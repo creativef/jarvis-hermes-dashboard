@@ -60,6 +60,7 @@ function usageBlock(u){
 // ── the run ──
 let running = false, answer = '', firstDelta = false, speakThisRun = true;
 let speakDone = Promise.resolve(), activeController = null;
+let history = [], currentUser = '';
 
 async function transmit(message, options = {}){
   if (!message.trim()) return;
@@ -69,12 +70,13 @@ async function transmit(message, options = {}){
     return;
   }
   running = true; answer = ''; firstDelta = false; speakThisRun = options.speak !== false;
+  currentUser = message;
 
   const fresh = /^\/new\b/.test(message.trim());
   const id = rid();
   setState('running', 'RUNNING', id.slice(0,20) + '…');
   setTag('run', 'RUNNING');
-  $('#response').innerHTML = '<span class="cur"></span>';
+  renderConversation();
   log('run', 'RUN', `started ${id}; uplink cleared`);
 
   // visible elapsed counter — a slow answer should never look like a dead screen
@@ -142,7 +144,7 @@ function handle(ev){
       break;
     case 'delta':
       answer += ev.text;
-      renderAnswer();
+      renderConversation();
       if (!firstDelta){
         firstDelta = true;
         log('reason', 'REASONING', answer.slice(0, 220));
@@ -155,7 +157,8 @@ function handle(ev){
       setState('done', 'COMPLETE', (ev.ms!=null?`${ev.ms}ms`:'') );
       setTag('done', 'COMPLETE');
       log('complete', 'COMPLETE', ev.ms!=null?`run completed in ${ev.ms}ms`:'run completed');
-      renderAnswer(true);
+      if (answer.trim()) history.push({user: currentUser, assistant: answer});
+      renderConversation(true);
       speakDone = speakThisRun ? speak(answer) : Promise.resolve();
       break;
     case 'error':
@@ -165,7 +168,7 @@ function handle(ev){
       // show it in the panel too, so a failure isn't a silent empty box
       if (!answer) $('#response').innerHTML =
         `<span style="color:var(--red)">⚠ ${esc(ev.message || 'Run failed.')}</span>`;
-      else renderAnswer(true);
+      else renderConversation(true);
       break;
     case 'note':
       log('note', 'NOTE', ev.message || '');
@@ -173,9 +176,18 @@ function handle(ev){
   }
 }
 
-function renderAnswer(finaldone){
+function renderConversation(finaldone){
   const el = $('#response');
-  el.innerHTML = esc(answer) + (finaldone ? '' : '<span class="cur"></span>');
+  let html = '';
+  for (const t of history){
+    html += `<div class="turn"><div class="tuser">You</div><div class="ttext">${esc(t.user)}</div>`
+          + `<div class="tjarvis">JARVIS</div><div class="ttext">${esc(t.assistant)}</div></div>`;
+  }
+  if (currentUser || answer){
+    html += `<div class="turn current"><div class="tuser">You</div><div class="ttext">${esc(currentUser)}</div>`
+          + `<div class="tjarvis">JARVIS</div><div class="ttext">${esc(answer)}${finaldone ? '' : '<span class="cur"></span>'}</div></div>`;
+  }
+  el.innerHTML = html || '<span class="rplaceholder">Standing by. Transmit an instruction.</span>';
   el.scrollTop = el.scrollHeight;
 }
 
@@ -486,7 +498,7 @@ $('#run').onclick = sendFromInput;
 $('#mic').onclick = micToggle;
 $('#showCommands').onclick = () => transmit('/commands', {speak:false});
 $('#missionBtn').onclick = () => transmit('/mission');
-$('#clearBtn').onclick = () => { answer=''; $('#response').innerHTML='<span class="rplaceholder">Display cleared. Standing by.</span>'; log('note','CLEAR','response panel cleared'); };
+$('#clearBtn').onclick = () => { answer=''; currentUser=''; history=[]; renderConversation(); log('note','CLEAR','response panel cleared'); };
 document.querySelectorAll('[data-quick]').forEach(b => b.onclick = () =>
   transmit(b.dataset.quick, {speak:false}));
 document.addEventListener('keydown', e => {
@@ -553,6 +565,13 @@ setInterval(async () => {
     log('voice', 'VOICE', `channel ready — ${RT.stt ? 'ElevenLabs STT' : (RT.browserStt ? 'browser STT' : s.stt)} / ${RT.tts ? 'ElevenLabs TTS' : 'browser TTS'}`);
     $('#mic').textContent = RT.stt ? '◉ ElevenLabs Voice' : '◉ Browser Voice';
     setState('', 'STANDBY', 'awaiting uplink');
+
+    // load prior conversation turns (persisted server-side)
+    try {
+      const h = await fetch('/api/history', {headers:apiHeaders()}).then(r=>r.json());
+      history = h.history || [];
+    } catch(_) { history = []; }
+    renderConversation();
   } catch(e){
     sys('gw','offline','warn');
     log('error','STATUS','server unreachable');

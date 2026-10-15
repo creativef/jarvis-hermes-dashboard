@@ -26,6 +26,20 @@ class StateTests(unittest.TestCase):
                 commands.set_session(None)
                 self.assertIsNone(commands.get_session())
 
+    def test_history(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = pathlib.Path(td) / "state.json"
+            with mock.patch.object(commands, "STATE_FILE", state):
+                self.assertEqual(commands.get_history(), [])
+                commands.record_turn("hello", "hi there")
+                commands.record_turn("how are you", "fine")
+                h = commands.get_history()
+                self.assertEqual(len(h), 2)
+                self.assertEqual(h[0]["user"], "hello")
+                self.assertEqual(h[1]["assistant"], "fine")
+                commands.clear_history()
+                self.assertEqual(commands.get_history(), [])
+
     def test_reconcile_orphaned_missions(self):
         with tempfile.TemporaryDirectory() as td:
             state = pathlib.Path(td) / "state.json"

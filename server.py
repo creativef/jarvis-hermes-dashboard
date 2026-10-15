@@ -174,6 +174,10 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/health":
             # unauthenticated readiness probe (for launchd / monitoring)
             return self._json({"ok": True, "runtime": runtime.runtime_kind()})
+        if p == "/api/history":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json({"history": commands.get_history()})
         if p == "/api/status":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -273,6 +277,7 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._json({"error": "bad json"}, 400)
         message = (payload.get("message") or "").strip()
+        original_message = message
         extra = (payload.get("system") or "").strip()
         system = "\n\n".join(x for x in (persona(), extra) if x) or None
         fresh = bool(payload.get("fresh"))
@@ -280,6 +285,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "empty message"}, 400)
         if fresh:
             SESSION["id"] = None
+            commands.clear_history()
 
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
@@ -308,6 +314,7 @@ class Handler(BaseHTTPRequestHandler):
                 emit(dict(t="note", message=cmd["note"]))
             if cmd.get("fresh"):
                 SESSION["id"] = None
+                commands.clear_history()
             if cmd.get("message") is None:
                 # answered locally — no model call needed
                 emit(dict(t="delta", text=cmd.get("reply", "Done.")))
@@ -326,6 +333,9 @@ class Handler(BaseHTTPRequestHandler):
                 if ev.get("t") == "complete" and runtime.valid_session(sid):
                     SESSION["id"] = sid
                     commands.set_session(sid)
+                    text = (ev.get("text") or "").strip()
+                    if text:
+                        commands.record_turn(original_message, text)
                 if ev.get("t") == "error":
                     SESSION["id"] = None       # drop a bad/stale session so the next run is fresh
                     commands.set_session(None)

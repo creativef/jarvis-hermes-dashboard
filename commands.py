@@ -19,7 +19,7 @@ import uuid
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
 _LOCK = threading.Lock()
-_DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "missions": [], "session": None}
+_DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "missions": [], "session": None, "history": []}
 
 
 def _load_unlocked():
@@ -68,6 +68,21 @@ def set_session(sid):
 
 def get_session():
     return load().get("session")
+
+
+def record_turn(user, assistant):
+    def _append(d):
+        d.setdefault("history", []).append({"user": user, "assistant": assistant, "ts": time.time()})
+        d["history"] = d["history"][-200:]
+    update_state(_append)
+
+
+def get_history():
+    return load().get("history", [])
+
+
+def clear_history():
+    update_state(lambda d: d.update(history=[]))
 
 
 def context_block():
