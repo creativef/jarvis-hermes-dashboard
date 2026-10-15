@@ -99,6 +99,7 @@
       <button id="missionBtn" class="ctl aux">Mission Control</button>
       <button id="mute" class="ctl mute on" title="Mute Jarvis speech" aria-label="Mute Jarvis">🔊</button>
       <button id="clearBtn" class="ctl aux">Clear</button>
+      <button id="settingsBtn" class="ctl aux">⚙ Settings</button>
     </div>
   </section>
 
@@ -133,6 +134,32 @@
 </div>
 
 <div class="brandmark">HERMES · JARVIS OS</div>
+
+<div id="settingsOverlay" class="settings-overlay" hidden>
+  <div class="settings-panel glass">
+    <div class="rhead"><span>Settings</span><button id="settingsClose" class="ctl aux" aria-label="Close settings">✕</button></div>
+    <div class="settings-body">
+      <label class="sfield">Permission
+        <select id="set-permission">
+          <option value="normal">Normal — ask before running tools</option>
+          <option value="bypass">Bypass — run without asking</option>
+        </select>
+      </label>
+      <label class="sfield">Idle timeout (seconds)
+        <input id="set-timeout" type="number" min="10" max="3600" step="10">
+      </label>
+      <label class="sfield">Working directory
+        <input id="set-workdir" type="text" placeholder="~">
+      </label>
+      <p class="snote">Changes apply to the next request. The working directory must exist on disk.</p>
+    </div>
+    <div class="settings-actions">
+      <button id="settingsSave" class="ctl run">Save</button>
+      <button id="settingsCancel" class="ctl aux">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

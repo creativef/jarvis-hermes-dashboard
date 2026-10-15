@@ -48,6 +48,25 @@ IDLE_TIMEOUT = int(os.environ.get("JARVIS_TIMEOUT", "120"))
 RAW_LOG = os.environ.get("JARVIS_RAW_LOG", "").strip()
 TOOLSETS = os.environ.get("HERMES_TOOLSETS", "").strip()
 
+
+def apply_settings(settings):
+    """Apply UI-supplied settings to the runtime globals (no restart needed)."""
+    global PERMISSION, IDLE_TIMEOUT, WORKDIR
+    if settings.get("permission"):
+        PERMISSION = str(settings["permission"]).strip().lower()
+    if settings.get("timeout"):
+        try:
+            IDLE_TIMEOUT = int(settings["timeout"])
+        except (TypeError, ValueError):
+            pass
+    if settings.get("workdir"):
+        WORKDIR = os.path.expanduser(str(settings["workdir"]).strip())
+
+
+def current_settings():
+    return {"permission": PERMISSION, "timeout": IDLE_TIMEOUT, "workdir": WORKDIR}
+
+
 # One Hermes subprocess at a time. Hermes session state and profile resources are
 # shared, so foreground runs and /background missions must not overlap. The active
 # process handle lets the browser Escape key stop the backend work, not just the

@@ -501,6 +501,34 @@ $('#mic').onclick = micToggle;
 $('#showCommands').onclick = () => transmit('/commands', {speak:false});
 $('#missionBtn').onclick = () => transmit('/mission');
 $('#clearBtn').onclick = () => { answer=''; currentUser=''; history=[]; renderConversation(); log('note','CLEAR','response panel cleared'); };
+
+// ══════════ settings ══════════
+$('#settingsBtn').onclick = async () => {
+  try {
+    const s = await fetch('/api/settings', {headers:apiHeaders()}).then(r=>r.json());
+    $('#set-permission').value = s.permission || 'normal';
+    $('#set-timeout').value = s.timeout ?? 120;
+    $('#set-workdir').value = s.workdir || '~';
+    $('#settingsOverlay').hidden = false;
+  } catch(e){ log('error','SETTINGS','could not load settings'); }
+};
+const closeSettings = () => { $('#settingsOverlay').hidden = true; };
+$('#settingsClose').onclick = closeSettings;
+$('#settingsCancel').onclick = closeSettings;
+$('#settingsOverlay').addEventListener('click', e => { if (e.target === $('#settingsOverlay')) closeSettings(); });
+$('#settingsSave').onclick = async () => {
+  const body = {
+    permission: $('#set-permission').value,
+    timeout: parseInt($('#set-timeout').value, 10),
+    workdir: $('#set-workdir').value.trim(),
+  };
+  try {
+    const r = await fetch('/api/settings', {method:'POST', headers:apiHeaders({'content-type':'application/json'}), body: JSON.stringify(body)}).then(r=>r.json());
+    if (r.error){ log('error','SETTINGS', r.error); return; }
+    log('note','SETTINGS', `saved: permission=${r.permission} timeout=${r.timeout}s workdir=${r.workdir}`);
+    closeSettings();
+  } catch(e){ log('error','SETTINGS','could not save settings'); }
+};
 document.querySelectorAll('[data-quick]').forEach(b => b.onclick = () =>
   transmit(b.dataset.quick, {speak:false}));
 document.addEventListener('keydown', e => {

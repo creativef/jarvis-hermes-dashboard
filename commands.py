@@ -19,7 +19,7 @@ import uuid
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
 _LOCK = threading.Lock()
-_DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "missions": [], "session": None, "history": []}
+_DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "missions": [], "session": None, "history": [], "settings": {}}
 
 
 def _load_unlocked():
@@ -83,6 +83,39 @@ def get_history():
 
 def clear_history():
     update_state(lambda d: d.update(history=[]))
+
+
+def get_settings():
+    return load().get("settings", {})
+
+
+def set_settings(updates):
+    """Validate + persist settings. Returns (cleaned_settings, error)."""
+    cleaned = {}
+    if "permission" in updates:
+        perm = str(updates["permission"]).strip().lower()
+        if perm not in ("normal", "bypass", "default"):
+            return None, f"invalid permission: {perm}"
+        cleaned["permission"] = perm
+    if "timeout" in updates:
+        try:
+            t = int(updates["timeout"])
+        except (TypeError, ValueError):
+            return None, "timeout must be an integer number of seconds"
+        if not (10 <= t <= 3600):
+            return None, "timeout must be between 10 and 3600 seconds"
+        cleaned["timeout"] = t
+    if "workdir" in updates:
+        wd = str(updates["workdir"]).strip() or "~"
+        wd = os.path.expanduser(wd)
+        if not os.path.isdir(wd):
+            return None, f"workdir is not a directory: {wd}"
+        cleaned["workdir"] = wd
+
+    def _merge(d):
+        d.setdefault("settings", {}).update(cleaned)
+    update_state(_merge)
+    return cleaned, None
 
 
 def context_block():

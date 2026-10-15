@@ -40,6 +40,23 @@ class StateTests(unittest.TestCase):
                 commands.clear_history()
                 self.assertEqual(commands.get_history(), [])
 
+    def test_set_settings_validation(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = pathlib.Path(td) / "state.json"
+            with mock.patch.object(commands, "STATE_FILE", state):
+                cleaned, err = commands.set_settings({"permission": "bypass", "timeout": 300, "workdir": "/tmp"})
+                self.assertIsNone(err)
+                self.assertEqual(cleaned["permission"], "bypass")
+                self.assertEqual(cleaned["timeout"], 300)
+                self.assertEqual(commands.get_settings()["permission"], "bypass")
+                # invalid inputs are rejected
+                _, err = commands.set_settings({"timeout": 5})
+                self.assertIsNotNone(err)
+                _, err = commands.set_settings({"workdir": "/nonexistent/xyz"})
+                self.assertIsNotNone(err)
+                _, err = commands.set_settings({"permission": "yolo"})
+                self.assertIsNotNone(err)
+
     def test_reconcile_orphaned_missions(self):
         with tempfile.TemporaryDirectory() as td:
             state = pathlib.Path(td) / "state.json"

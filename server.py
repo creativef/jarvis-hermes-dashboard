@@ -55,6 +55,9 @@ import commands         # noqa: E402
 import runtime          # noqa: E402
 import voice            # noqa: E402
 
+# Apply any UI-persisted settings (stored in state.json) over the env defaults.
+runtime.apply_settings(commands.get_settings())
+
 PORT = int(os.environ.get("JARVIS_PORT", "8730"))
 API_TOKEN = secrets.token_urlsafe(32)
 RUN_LOCK = threading.Lock()
@@ -178,6 +181,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
             return self._json({"history": commands.get_history()})
+        if p == "/api/settings":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json(runtime.current_settings())
         if p == "/api/status":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -225,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._token_ok():
             return self._json({"error": "unauthorized"}, 401)
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
-        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel"} and ctype != "application/json":
+        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings"} and ctype != "application/json":
             return self._json({"error": "application/json required"}, 415)
         if p == "/api/listen" and not ctype.startswith("audio/"):
             return self._json({"error": "audio content type required"}, 415)
@@ -259,6 +266,17 @@ class Handler(BaseHTTPRequestHandler):
             SESSION["id"] = None
             commands.set_session(None)
             return self._json({"ok": True, "stopped": stopped})
+
+        if p == "/api/settings":
+            try:
+                updates = json.loads(raw or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "bad json"}, 400)
+            cleaned, err = commands.set_settings(updates)
+            if err:
+                return self._json({"error": err}, 400)
+            runtime.apply_settings(cleaned)
+            return self._json(runtime.current_settings())
 
         if p == "/api/run":
             if not RUN_LOCK.acquire(blocking=False):
