@@ -55,7 +55,7 @@ Hermes can perform the clone, setup, launch, and health check with its terminal 
 
 ## Voice setup
 
-Voice works without configuration when the browser provides SpeechRecognition and speechSynthesis. For more reliable speech, add an ElevenLabs key to the private `.env` file:
+Voice works without configuration when the browser provides SpeechRecognition and speechSynthesis. On macOS, JARVIS also speaks offline with the built-in `say` voice (defaults to the British "Daniel"; override with `JARVIS_SAY_VOICE`). For the most natural speech, add an ElevenLabs key to the private `.env` file:
 
 ```bash
 ELEVENLABS_API_KEY=your_private_key
