@@ -157,6 +157,20 @@ To use another port:
 JARVIS_PORT=9000 ./start.sh
 ```
 
+## Run at login (launchd, macOS)
+
+To keep JARVIS running as an always-on background agent that starts at login:
+
+1. Edit `contrib/launchd/com.creativef.jarvis-dashboard.plist` and replace
+   `/Users/USERNAME` with your home path (four places).
+2. `mkdir -p ~/Library/LaunchAgents`
+3. `cp contrib/launchd/com.creativef.jarvis-dashboard.plist ~/Library/LaunchAgents/`
+4. `launchctl load ~/Library/LaunchAgents/com.creativef.jarvis-dashboard.plist`
+
+It runs on port 8730 with `JARVIS_OPEN=0` (no auto browser). Health-check it
+with `curl http://127.0.0.1:8730/api/health`. Stop it with
+`launchctl unload ~/Library/LaunchAgents/com.creativef.jarvis-dashboard.plist`.
+
 ## Troubleshooting
 
 ### Hermes is not found
