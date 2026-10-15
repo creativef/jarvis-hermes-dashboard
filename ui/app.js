@@ -261,8 +261,8 @@ function speak(text){
 // ── start / stop the whole conversation ──
 async function micToggle(){
   if (convo){ stopConvo(); return; }
-  // Prefer ElevenLabs server-side STT when configured. Browser STT is unreliable
-  // across Chrome profiles and often fails silently; ElevenLabs receives the
+  // Prefer local server-side STT (Parakeet) when installed. Browser STT is unreliable
+  // across Chrome profiles and often fails silently; the server receives the
   // actual microphone recording from MediaRecorder and is much more consistent.
   if (RT.stt){
     try {
@@ -275,8 +275,8 @@ async function micToggle(){
     actx.createMediaStreamSource(micStream).connect(analyser);
     vdata = new Uint8Array(analyser.fftSize);
     convo = true; suppress = false;
-    $('#mic').classList.add('on'); $('#mic').textContent = '● ElevenLabs Live';
-    log('voice','VOICE','ElevenLabs voice conversation open · listening');
+    $('#mic').classList.add('on'); $('#mic').textContent = '● Parakeet Live';
+    log('voice','VOICE','local voice conversation open · listening');
     beginTurn();
     return;
   }
@@ -288,7 +288,7 @@ async function micToggle(){
     startBrowserRecognition();
     return;
   }
-  log('error','VOICE','no speech recognition available — add ElevenLabs key or use Chrome browser STT');
+  log('error','VOICE','no speech recognition available — run ./install-voice.sh or use Chrome browser STT');
 }
 
 function stopConvo(){
@@ -342,7 +342,7 @@ function startBrowserRecognition(){
   try{ recognition.start(); }catch(e){ log('error','VOICE','speech recognition failed to start'); }
 }
 
-// ── one server-side ElevenLabs listening turn ──
+// ── one server-side local-STT listening turn ──
 function beginTurn(){
   if (!convo || suppress || !micStream) return;
   chunks = []; spoke = false; peak = 0;
@@ -427,7 +427,7 @@ async function ship(){
       if (convo) beginTurn(); else setState('','STANDBY','nothing heard');
       return;
     }
-    log('voice','VOICE',`transcribed by ElevenLabs in ${ms}ms: "${text}"`);
+    log('voice','VOICE',`transcribed by Parakeet in ${ms}ms: "${text}"`);
     const armed = $('#input').dataset.cmd || '';
     const full = (armed ? armed + ' ' : '') + text;
     $('#input').value = ''; disarm();
@@ -574,11 +574,11 @@ setInterval(async () => {
   defaultTip = $('#tip').textContent;
   try {
     const s = await fetch('/api/status', {headers:apiHeaders()}).then(r=>r.json());
-    RT.tts = s.tts==='elevenlabs' || s.tts==='local';
-    RT.stt = s.stt==='elevenlabs';
+    RT.tts = s.tts==='kokoro' || s.tts==='local';
+    RT.stt = s.stt==='parakeet';
     RT.browserStt = !!SpeechRecognition; RT.browserTts = !!speechSynth;
-    const TTS_LABEL = {elevenlabs:'ElevenLabs TTS', local:'Local TTS', browser:'Browser TTS'}[s.tts] || 'Browser TTS';
-    const STT_LABEL = {elevenlabs:'ElevenLabs STT', browser:'Browser STT'}[s.stt] || 'Browser STT';
+    const TTS_LABEL = {kokoro:'Kokoro TTS', local:'Local TTS', browser:'Browser TTS'}[s.tts] || 'Browser TTS';
+    const STT_LABEL = {parakeet:'Parakeet STT', browser:'Browser STT'}[s.stt] || 'Browser STT';
 
     const port = location.port || '8730';
     sys('gw', `online · :${port}`, 'ok');
@@ -596,7 +596,7 @@ setInterval(async () => {
     log('status', 'BOOT',
         `gateway online · ${s.runtime} core · profile=${s.profile || 'default'} · permission=${s.permission}`);
     log('voice', 'VOICE', `channel ready — ${STT_LABEL} / ${TTS_LABEL}`);
-    $('#mic').textContent = RT.stt ? '◉ ElevenLabs Voice' : '◉ Browser Voice';
+    $('#mic').textContent = RT.stt ? '◉ Local Voice' : '◉ Browser Voice';
     setState('', 'STANDBY', 'awaiting uplink');
 
     // load prior conversation turns (persisted server-side)

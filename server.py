@@ -201,9 +201,10 @@ class Handler(BaseHTTPRequestHandler):
                 browser_stt=True,
                 browser_tts=True,
                 voice_mode=os.environ.get("JARVIS_VOICE_MODE", voice.tts_engine()),
-                voice_id=voice.voice_id() if voice.available() else (voice.LOCAL_VOICE if voice.local_available() else "browser"),
-                stt="elevenlabs" if voice.available() else "browser",
+                voice_id=voice.voice_label(),
+                stt=voice.stt_engine(),
                 tts=voice.tts_engine(),
+                voice_ready=voice.ready(),
                 session=SESSION["id"]))
         if p == "/api/jobs":
             if not self._token_ok():
@@ -381,8 +382,8 @@ def main():
     kind = runtime.runtime_kind()
     brain = ("Hermes Agent (profile tools, skills, memory, MCP, browser integrations live)"
              if kind == "hermes" else "MOCK — Hermes CLI not reachable")
-    vo = (f"ElevenLabs · {voice.voice_id()[:8]}…" if voice.available()
-          else "none (add ELEVENLABS_API_KEY for voice)")
+    vo = (f"Kokoro ({voice.KOKORO_VOICE}) + Parakeet — local, warming up…" if voice.worker_installed()
+          else "local worker not installed (run ./install-voice.sh) — falling back to say / browser")
     perm = runtime.PERMISSION
     perm_note = ("  can run tools without asking — set JARVIS_PERMISSION=default to require approval"
                  if perm == "bypass" else "")
@@ -394,11 +395,12 @@ def main():
   profile      {runtime.PROFILE}
   workdir      {runtime.WORKDIR}
   permission   {perm}{perm_note}
-  voice        {vo} + browser Web Speech fallback
+  voice        {vo}
   open         http://localhost:{PORT}
 """, flush=True)
 
     _setup_error_log()
+    voice.start_async()
     srv = JarvisServer(("127.0.0.1", PORT), Handler)
     if os.environ.get("JARVIS_OPEN", "1") != "0":
         webbrowser.open(f"http://localhost:{PORT}")

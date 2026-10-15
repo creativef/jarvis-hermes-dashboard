@@ -9,8 +9,8 @@ A local, voice-enabled JARVIS dashboard for [Hermes Agent](https://github.com/No
 - Futuristic browser-based mission-control HUD
 - Natural conversational replies with a concise JARVIS voice persona
 - Continuous voice conversation: listen → transcribe → answer → speak → listen
-- Optional ElevenLabs speech-to-text and text-to-speech
-- Browser speech fallback when ElevenLabs is not configured
+- Local speech-to-text (Parakeet) and text-to-speech (Kokoro), no cloud
+- macOS `say` / browser speech fallback if the local voice isn't installed
 - Working command matrix and slash commands
 - Hermes session continuity across voice turns and dashboard restarts
 - Access to the active Hermes profile's tools, skills, browser, memory, and MCP integrations
@@ -55,15 +55,20 @@ Hermes can perform the clone, setup, launch, and health check with its terminal 
 
 ## Voice setup
 
-Voice works without configuration when the browser provides SpeechRecognition and speechSynthesis. On macOS, JARVIS also speaks offline with the built-in `say` voice (defaults to the British "Daniel"; override with `JARVIS_SAY_VOICE`). For the most natural speech, add an ElevenLabs key to the private `.env` file:
+Fully local, no accounts or API keys (Apple Silicon):
+
+- **Speech out:** Kokoro-82M (Apache-2.0) via MLX
+- **Speech in:** NVIDIA Parakeet TDT 0.6B v3 via MLX
 
 ```bash
-ELEVENLABS_API_KEY=your_private_key
-ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb
-ELEVENLABS_MODEL=eleven_turbo_v2_5
+./install-voice.sh   # creates .venv-voice; models (~1.5 GB) download on first start
+./start.sh
 ```
 
-Restart the dashboard after editing `.env`. The key stays server-side and is never sent to frontend JavaScript.
+Both models load once into a worker process (`voice_worker.py`) and stay warm.
+Measured on an M-series Mac: ~0.8 s to speak a sentence, ~0.4 s to transcribe one.
+Choose a voice in `.env` with `JARVIS_KOKORO_VOICE` (default `bm_george`).
+Without the venv, it falls back to macOS `say` and browser speech recognition.
 
 ## Hermes profile and tools
 

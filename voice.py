@@ -1,11 +1,14 @@
 """
-Text to speech.
+Local voice for JARVIS — no cloud, no API keys.
 
-ElevenLabs when a key is present, browser speechSynthesis otherwise.
+  TTS  Kokoro-82M      (Apache-2.0)  via MLX on the Apple GPU
+  STT  Parakeet TDT 0.6B v3          via MLX
 
-The key stays here, server-side. The browser asks /api/speak for audio and gets
-mp3 bytes back — it never sees the key, so nothing leaks into devtools, the
-page source, or a screen recording.
+Both models live in a long-running worker process (voice_worker.py, run from
+.venv-voice) so they load once. Fallbacks when the worker/venv is missing:
+macOS `say` for speech out, browser SpeechRecognition for speech in.
+The browser asks /api/speak for audio and /api/listen for text; nothing leaves
+the machine.
 """
 import json
 import os
@@ -13,19 +16,84 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
-import urllib.error
-import urllib.request
+import threading
 
-# Rachel — calm, British-adjacent. Override with ELEVENLABS_VOICE_ID.
-DEFAULT_VOICE = "21m00Tcm4TlvDq8ikWAM"
-MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
-# Local (offline) voice via macOS `say`. "Daniel" is a calm British male that
-# fits the JARVIS persona; override with JARVIS_SAY_VOICE.
-LOCAL_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel")
+HERE = pathlib.Path(__file__).resolve().parent
+VENV_PY = HERE / ".venv-voice" / "bin" / "python"
+WORKER = HERE / "voice_worker.py"
+
+KOKORO_VOICE = os.environ.get("JARVIS_KOKORO_VOICE", "bm_george")   # British male
+KOKORO_SPEED = float(os.environ.get("JARVIS_KOKORO_SPEED", "1.0"))
+LOCAL_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel")          # `say` fallback
+WARM_TIMEOUT = 600      # first run downloads models
+REQ_TIMEOUT = 60
+
+_lock = threading.Lock()        # one request at a time through the worker
+_proc = None
+_state = {"ready": False, "error": ""}
+_start_lock = threading.Lock()
 
 
-def available():
-    return bool(os.environ.get("ELEVENLABS_API_KEY"))
+def _disabled():
+    return os.environ.get("JARVIS_LOCAL_VOICE", "1") == "0"
+
+
+def worker_installed():
+    return VENV_PY.exists() and WORKER.exists() and not _disabled()
+
+
+def _spawn():
+    global _proc
+    _proc = subprocess.Popen(
+        [str(VENV_PY), str(WORKER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=open(HERE / "logs" / "voice_worker.log", "ab"), text=True, bufsize=1,
+        cwd=str(HERE))
+    first = _proc.stdout.readline()
+    msg = json.loads(first) if first else {"ready": False, "error": "worker exited"}
+    _state["ready"] = bool(msg.get("ready"))
+    _state["error"] = msg.get("error", "")
+
+
+def start_async():
+    """Kick off the worker in the background (called at server boot)."""
+    if not worker_installed():
+        return
+    (HERE / "logs").mkdir(exist_ok=True)
+
+    def run():
+        with _start_lock:
+            if _proc is None or _proc.poll() is not None:
+                try:
+                    _spawn()
+                except Exception as e:                       # noqa: BLE001
+                    _state.update(ready=False, error=str(e)[:200])
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _call(req, timeout=REQ_TIMEOUT):
+    """Send one request to the worker and wait for its reply."""
+    if not worker_installed():
+        raise RuntimeError("local voice not installed (.venv-voice missing)")
+    with _start_lock:                       # waits while the worker is still warming
+        if _proc is None or _proc.poll() is not None:
+            _spawn()
+    if not _state["ready"]:
+        raise RuntimeError("voice worker failed to start: " + (_state["error"] or "unknown"))
+    with _lock:
+        _proc.stdin.write(json.dumps(req) + "\n")
+        _proc.stdin.flush()
+        timer = threading.Timer(timeout, _proc.kill)   # a hung model must not wedge the server
+        timer.start()
+        try:
+            line = _proc.stdout.readline()
+        finally:
+            timer.cancel()
+    if not line:
+        raise RuntimeError("voice worker died mid-request")
+    res = json.loads(line)
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error", "voice worker error"))
+    return res
 
 
 def local_available():
@@ -33,42 +101,25 @@ def local_available():
 
 
 def tts_engine():
-    if available():
-        return "elevenlabs"
-    if local_available():
-        return "local"
-    return "browser"
+    if worker_installed() and (_state["ready"] or _proc is None or _proc.poll() is None):
+        return "kokoro"
+    return "local" if local_available() else "browser"
 
 
-def voice_id():
-    return os.environ.get("ELEVENLABS_VOICE_ID", DEFAULT_VOICE)
+def stt_engine():
+    return "parakeet" if worker_installed() else "browser"
 
 
-def _speak_elevenlabs(text):
-    req = urllib.request.Request(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id()}",
-        data=json.dumps({
-            "text": text[:2500],
-            "model_id": MODEL,
-            "voice_settings": {
-                "stability": 0.42,          # a little variation; 0.5+ goes flat
-                "similarity_boost": 0.85,
-                "style": 0.25,
-                "use_speaker_boost": True,
-            },
-        }).encode(),
-        method="POST",
-        headers={
-            "content-type": "application/json",
-            "accept": "audio/mpeg",
-            "xi-api-key": os.environ["ELEVENLABS_API_KEY"],
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read()
+def voice_label():
+    return KOKORO_VOICE if tts_engine() == "kokoro" else (
+        LOCAL_VOICE if local_available() else "browser")
 
 
-def _speak_local(text):
+def ready():
+    return _state["ready"]
+
+
+def _speak_say(text):
     fd, path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     try:
@@ -85,65 +136,33 @@ def speak(text):
     text = (text or "").strip()
     if not text:
         raise ValueError("empty text")
-    if available():
-        return _speak_elevenlabs(text), "audio/mpeg"
+    if worker_installed():
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        try:
+            _call({"op": "tts", "text": text[:2500], "out": path,
+                   "voice": KOKORO_VOICE, "speed": KOKORO_SPEED})
+            return pathlib.Path(path).read_bytes(), "audio/wav"
+        except Exception:                                    # noqa: BLE001
+            if not local_available():
+                raise
+        finally:
+            pathlib.Path(path).unlink(missing_ok=True)
     if local_available():
-        return _speak_local(text), "audio/wav"
-    raise RuntimeError("no TTS engine (set ELEVENLABS_API_KEY or run on macOS)")
+        return _speak_say(text[:2500]), "audio/wav"
+    raise RuntimeError("no TTS engine available")
 
 
 def transcribe(audio, mime="audio/webm"):
-    """Speech to text via ElevenLabs Scribe. Returns the transcript, or raises.
-
-    Used instead of the browser's Web Speech API because that one only exists in
-    Chrome and is a silently-failing stub in Brave — and because it ships your
-    audio to Google. This keeps listening on the same provider as speaking.
-    """
-    if not available():
-        raise RuntimeError("no ELEVENLABS_API_KEY")
+    """Speech to text with Parakeet. Returns the transcript, or raises."""
     if not audio:
         raise ValueError("empty audio")
-
     ext = {"audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "mp4",
-           "audio/mpeg": "mp3", "audio/wav": "wav"}.get(mime.split(";")[0], "webm")
-    boundary = "----jarvis" + os.urandom(8).hex()
-    b = boundary.encode()
-
-    body = b"".join([
-        b"--", b, b"\r\n",
-        b'Content-Disposition: form-data; name="model_id"\r\n\r\nscribe_v1\r\n',
-        b"--", b, b"\r\n",
-        f'Content-Disposition: form-data; name="file"; filename="turn.{ext}"\r\n'.encode(),
-        f"Content-Type: {mime}\r\n\r\n".encode(),
-        audio, b"\r\n",
-        b"--", b, b"--\r\n",
-    ])
-
-    req = urllib.request.Request(
-        "https://api.elevenlabs.io/v1/speech-to-text",
-        data=body, method="POST",
-        headers={
-            "content-type": f"multipart/form-data; boundary={boundary}",
-            "xi-api-key": os.environ["ELEVENLABS_API_KEY"],
-        },
-    )
-    with urllib.request.urlopen(req, timeout=45) as r:
-        return (json.loads(r.read()).get("text") or "").strip()
-
-
-def voices():
-    """List the account's voices, so you can find an id to put in .env."""
-    if not available():
-        return []
-    req = urllib.request.Request(
-        "https://api.elevenlabs.io/v2/voices",
-        headers={"xi-api-key": os.environ["ELEVENLABS_API_KEY"]},
-    )
+           "audio/mpeg": "mp3", "audio/wav": "wav"}.get(mime.split(";")[0].strip(), "webm")
+    fd, path = tempfile.mkstemp(suffix="." + ext)
+    os.close(fd)
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            body = json.loads(r.read())
-    except Exception:                                  # noqa: BLE001
-        return []
-    return [dict(id=v.get("voice_id"), name=v.get("name"),
-                 labels=v.get("labels", {}))
-            for v in body.get("voices", [])]
+        pathlib.Path(path).write_bytes(audio)
+        return _call({"op": "stt", "path": path})["text"]
+    finally:
+        pathlib.Path(path).unlink(missing_ok=True)
