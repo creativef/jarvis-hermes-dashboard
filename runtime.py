@@ -7,6 +7,19 @@ configured toolsets, MCP servers, browser automation, Google integrations,
 third-party tools, skills, memory, and gateway features that are available to the
 normal Hermes agent.
 
+The CLI is driven in `--format stream-json` mode, which emits newline-delimited
+JSON events on stdout (verified against Hermes v0.22.2):
+
+    {"type":"system","subtype":"init","model":...,"session_id":...}
+    {"type":"text","text":...}                       # token-level streaming
+    {"type":"tool_use","name":...,"input":{...}}
+    {"type":"tool_result","name":...,"output":...,"is_error":...,"duration_ms":...}
+    {"type":"result","session_id":...,"exit_code":...,"text":...,"tokens":{...}}
+
+Session IDs, token usage, and tool telemetry are first-class fields, so the
+dashboard never parses CLI prose. stderr carries a `session_id:` echo plus a
+`↻ Resumed session ...` line and is ignored entirely in this mode.
+
 Set HERMES_CMD when your shell exposes Hermes under a custom command/path, e.g.
   HERMES_CMD="/path/to/hermes"
 or
@@ -23,10 +36,6 @@ import threading
 import time
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
-_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-_CLI_NOISE = re.compile(
-    r"^(?:Query:|Initializing agent|Resume this session with:|hermes --resume\b|"
-    r"Session:|Duration:|Messages:|─+|=+|[-─ ]*⚕\s*Hermes\b)", re.I)
 
 MODEL = os.environ.get("JARVIS_MODEL", "").strip()
 PROFILE = os.environ.get("HERMES_PROFILE", os.environ.get("JARVIS_PROFILE", "default")).strip() or "default"
@@ -101,27 +110,35 @@ def runtime_kind():
     return "hermes" if ok else "mock"
 
 
-def build_command(message, session_id=None, system=None):
-    # Hermes chat has no separate --system flag. Put the voice persona and the
-    # current request into one explicit turn so the model answers as JARVIS
-    # instead of narrating its CLI/runtime. Quiet mode removes the Hermes banner.
-    prompt = message
-    if system:
-        prompt = (f"{system}\n\n## Current user request\n{message}\n\n"
-                  "Answer the request now. Return only the words JARVIS should say aloud; "
-                  "never include session IDs, runtime metadata, headings, or process narration.")
-    cmd = _hermes_base() + ["chat", "-Q", "-q", prompt, "--source", SOURCE]
+def build_prompt(message, system=None):
+    # Hermes chat has no separate --system flag (verified v0.22.2), so the voice
+    # persona and the request are combined into one explicit turn. This stops the
+    # model answering as a coding agent that narrates its own machinery.
+    if not system:
+        return message
+    return (f"{system}\n\n## Current user request\n{message}\n\n"
+            "Answer the request now. Return only the words JARVIS should say aloud; "
+            "never include session IDs, runtime metadata, headings, or process narration.")
+
+
+def build_command(message, session_id=None):
+    # --format stream-json = structured NDJSON on stdout (implies --quiet).
+    # --query-file - reads the prompt from stdin, the documented-safe way to pass
+    # arbitrary text (nothing is shell-interpreted, no argv length limits).
+    cmd = _hermes_base() + ["chat", "--format", "stream-json", "--query-file", "-",
+                            "--source", SOURCE]
     if valid_session(session_id):
         cmd += ["--resume", str(session_id)]
-    if PROFILE and PROFILE != "default":
-        cmd += ["--profile", PROFILE]
     if MODEL:
         cmd += ["--model", MODEL]
     if TOOLSETS:
         cmd += ["--toolsets", TOOLSETS]
-    # Hermes one-shot output is currently plain text; slash commands that need a
-    # live TUI are handled in commands.py before we get here. Prompts go to the
-    # real agent with normal tool access.
+    # JARVIS_PERMISSION=bypass maps to Hermes --yolo (skip dangerous-command
+    # approval). Other modes use Hermes's default approval behaviour.
+    if PERMISSION == "bypass":
+        cmd += ["--yolo"]
+    # NOTE: profile selection is via the HERMES_PROFILE env var (inherited below),
+    # not a `chat` flag — `--profile` is a GLOBAL flag and is invalid after `chat`.
     return cmd
 
 
@@ -155,12 +172,16 @@ def run_hermes(message, session_id=None, system=None):
 def _run_hermes_locked(message, session_id=None, system=None):
     global _ACTIVE_PROC
     started = _mono_ms()
-    cmd = build_command(message, session_id, system)
+    cmd = build_command(message, session_id)
+    prompt = build_prompt(message, system)
     yield dict(t="status", model=MODEL or "Hermes default", tools=len(hermes_tools_snapshot()),
                mcp=[], permission=PERMISSION, profile=PROFILE, runtime="hermes",
                session_id=session_id)
 
     child_env = dict(os.environ)
+    # Profile selection is env-based; the dashboard's own JARVIS_PROFILE override
+    # must be propagated to the child.
+    child_env["HERMES_PROFILE"] = PROFILE
     # Ensure GUI-started shells can still find common Homebrew/user installs.
     home = os.path.expanduser("~")
     child_env["PATH"] = ":".join(dict.fromkeys([
@@ -173,8 +194,8 @@ def _run_hermes_locked(message, session_id=None, system=None):
 
     try:
         proc = subprocess.Popen(cmd, cwd=WORKDIR, text=True, bufsize=1,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                env=child_env)
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=child_env)
         with _ACTIVE_LOCK:
             _ACTIVE_PROC = proc
     except FileNotFoundError:
@@ -199,7 +220,8 @@ def _run_hermes_locked(message, session_id=None, system=None):
         try:
             for ln in proc.stdout:
                 if raw:
-                    raw.write("OUT " + ln); raw.flush()
+                    raw.write("OUT " + ln)
+                    raw.flush()
                 with lock:
                     q.append(ln)
         finally:
@@ -209,18 +231,33 @@ def _run_hermes_locked(message, session_id=None, system=None):
         try:
             for ln in proc.stderr:
                 if raw:
-                    raw.write("ERR " + ln); raw.flush()
+                    raw.write("ERR " + ln)
+                    raw.flush()
                 errbuf.append(ln.rstrip())
         except Exception:
             pass
 
+    # Drain stdout/stderr FIRST so a large prompt write can't deadlock on a full
+    # pipe, then hand the query to stdin and close it.
     threading.Thread(target=pump_stdout, daemon=True).start()
     threading.Thread(target=pump_stderr, daemon=True).start()
+    if proc.stdin is not None:
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.flush()
+        except OSError:
+            pass  # Hermes may have already exited on bad args; the loop reports it.
+        finally:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
 
     first = True
     last = time.monotonic()
     text_seen = False
-    emitted_session = None
+    completed = False
+    result_session = None
     try:
         while not done.is_set() or q:
             line = None
@@ -238,39 +275,64 @@ def _run_hermes_locked(message, session_id=None, system=None):
                 time.sleep(0.05)
                 continue
             last = time.monotonic()
-            clean = _ANSI.sub("", line).strip()
-            if not clean:
+            line = line.strip()
+            if not line:
                 continue
-            session_match = re.match(r"^session_id:\s*(\S+)\s*$", clean, re.I)
-            if session_match:
-                candidate = session_match.group(1)
-                if valid_session(candidate):
-                    emitted_session = candidate
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # never let one malformed frame kill the whole stream
+            etype = ev.get("type")
+            if etype == "system":
+                # init frame carries session_id/model; nothing to display yet
                 continue
-            # Be defensive when an older Hermes build ignores quiet mode.
-            if _CLI_NOISE.match(clean):
+            if etype == "text":
+                if first:
+                    first = False
+                    yield dict(t="latency", ms=_mono_ms() - started)
+                text_seen = True
+                yield dict(t="delta", text=ev.get("text") or "")
                 continue
-            if first:
-                first = False
-                yield dict(t="latency", ms=_mono_ms() - started)
-            text_seen = True
-            yield dict(t="delta", text=clean + "\n")
+            if etype == "tool_use":
+                name = ev.get("name") or "tool"
+                inp = ev.get("input")
+                yield dict(t="tool", phase="use", name=name,
+                           input=(json.dumps(inp, ensure_ascii=False)[:200] if inp else ""))
+                continue
+            if etype == "tool_result":
+                yield dict(t="tool", phase="result", name=ev.get("name") or "tool",
+                           ok=not bool(ev.get("is_error")))
+                continue
+            if etype == "result":
+                completed = True
+                result_session = ev.get("session_id")
+                tokens = ev.get("tokens") or {}
+                if tokens:
+                    yield dict(t="usage", input_tokens=tokens.get("input"),
+                               output_tokens=tokens.get("output"),
+                               total_tokens=tokens.get("total"),
+                               cache_read=tokens.get("cache_read"),
+                               cache_write=tokens.get("cache_write"))
+                final_text = ev.get("text") or ""
+                rc = ev.get("exit_code", 0)
+                if rc != 0:
+                    err = " | ".join(list(errbuf)[-6:])
+                    yield dict(t="error", message=(err or f"Hermes exited with code {rc}")[:500])
+                    return
+                if not text_seen and final_text:
+                    yield dict(t="delta", text=final_text)
+                yield dict(t="complete", session_id=result_session or session_id,
+                           text=final_text, ms=_mono_ms() - started)
 
         rc = proc.wait(timeout=5)
-        # Hermes writes its programmatic session_id marker to stderr in quiet
-        # mode, so capture it there without exposing it as response text.
-        for errline in errbuf:
-            session_match = re.match(r"^session_id:\s*(\S+)\s*$", errline.strip(), re.I)
-            if session_match and valid_session(session_match.group(1)):
-                emitted_session = session_match.group(1)
-        if rc != 0:
-            err = " | ".join(list(errbuf)[-6:])
-            yield dict(t="error", message=(err or f"Hermes exited with code {rc}")[:500])
-            return
-        if not text_seen:
-            yield dict(t="delta", text="Hermes completed without textual output.")
-        yield dict(t="complete", session_id=emitted_session or session_id,
-                   ms=_mono_ms() - started)
+        if not completed:
+            if rc != 0:
+                err = " | ".join(list(errbuf)[-6:])
+                yield dict(t="error", message=(err or f"Hermes exited with code {rc}")[:500])
+            else:
+                yield dict(t="delta", text="Hermes completed without textual output.")
+                yield dict(t="complete", session_id=result_session or session_id,
+                           ms=_mono_ms() - started)
     finally:
         try:
             if raw:
@@ -287,8 +349,8 @@ def _run_hermes_locked(message, session_id=None, system=None):
 def run_mock(message, session_id=None, system=None):
     ok, detail = _can_launch_hermes()
     yield dict(t="error", message=("Hermes is not reachable from this dashboard process. "
-                                  "Set HERMES_CMD or start from a shell where `hermes` works. "
-                                  f"Diagnostic: {detail[:240]}"))
+                                   "Set HERMES_CMD or start from a shell where `hermes` works. "
+                                   f"Diagnostic: {detail[:240]}"))
 
 
 def run(message, session_id=None, system=None):

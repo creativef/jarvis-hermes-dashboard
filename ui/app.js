@@ -52,7 +52,8 @@ function usageBlock(u){
   const row = (k,v) => `  <span class="k">"${k}"</span>: <span class="v">${v}</span>`;
   return `{\n  <span class="k">"usage"</span>: {\n`
     + [row('input_tokens', u.input_tokens), row('output_tokens', u.output_tokens),
-       row('total_tokens', u.total_tokens)].join(',\n')
+       row('total_tokens', u.total_tokens), row('cache_read', u.cache_read),
+       row('cache_write', u.cache_write)].join(',\n')
     + `\n  }\n}`;
 }
 
@@ -102,7 +103,9 @@ async function transmit(message, options = {}){
       while ((nl = buf.indexOf('\n')) >= 0){
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
-        if (line) handle(JSON.parse(line));
+        if (!line) continue;
+        try { handle(JSON.parse(line)); }
+        catch(_){ log('error','STREAM','dropped a malformed event frame'); }
       }
     }
   } catch (e){
@@ -125,9 +128,8 @@ async function transmit(message, options = {}){
 function handle(ev){
   switch (ev.t){
     case 'status':
-      if (ev.session_id) sys('session', ev.session_id.slice(0,8));
-        const msg = `core online · Hermes tools=${ev.tools ?? 0} profile=${ev.profile||'default'} permission=${ev.permission||'normal'}`;
-      log('status', 'STATUS', msg);
+      log('status', 'STATUS',
+        `core online · Hermes tools=${ev.tools ?? 0} profile=${ev.profile||'default'} permission=${ev.permission||'normal'}`);
       break;
     case 'latency':
       log('latency', 'LATENCY', `first token after ${ev.ms}ms`);
@@ -147,7 +149,7 @@ function handle(ev){
       }
       break;
     case 'usage':
-      log('status', 'COMPLETE', 'run completed', usageBlock(ev));
+      log('status', 'USAGE', 'token usage', usageBlock(ev));
       break;
     case 'complete':
       setState('done', 'COMPLETE', (ev.ms!=null?`${ev.ms}ms`:'') );
