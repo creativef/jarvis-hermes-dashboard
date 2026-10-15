@@ -49,6 +49,10 @@ IDLE_TIMEOUT = int(os.environ.get("JARVIS_TIMEOUT", "120"))
 # Raw transcripts can contain private prompts. Logging is off by default.
 RAW_LOG = os.environ.get("JARVIS_RAW_LOG", "").strip()
 TOOLSETS = os.environ.get("HERMES_TOOLSETS", "").strip()
+# Optional backend with real per-command approvals (see api_backend.py).
+BACKEND = os.environ.get("JARVIS_BACKEND", "cli").strip().lower()      # cli | api
+API_URL = os.environ.get("JARVIS_API_URL", "http://127.0.0.1:8642").strip().rstrip("/")
+API_KEY = os.environ.get("JARVIS_API_KEY", "").strip()
 
 
 def apply_settings(settings):
@@ -119,8 +123,22 @@ def _ttl_cached(key, ttl, fn, *args):
     return value
 
 
+def api_backend_ready():
+    import api_backend
+    return BACKEND == "api" and api_backend.healthy(API_URL)
+
+
+def resolve_approval(run_id, request_id, choice):
+    import api_backend
+    return api_backend.resolve_approval(API_URL, API_KEY, run_id, request_id, choice)
+
+
 def cancel_active():
     """Terminate the currently running Hermes child process, if any."""
+    if BACKEND == "api":
+        import api_backend
+        if api_backend.cancel_active(API_URL, API_KEY):
+            return True
     with _ACTIVE_LOCK:
         proc = _ACTIVE_PROC
     if proc is None or proc.poll() is not None:
@@ -447,6 +465,19 @@ def run(message, session_id=None, system=None):
         yield from run_mock(message, session_id, system)
         return
     try:
+        if BACKEND == "api":
+            if api_backend_ready():
+                import api_backend
+                with EXECUTION_LOCK:
+                    yield from api_backend.run(
+                        message, session_id, build_prompt(message, system),
+                        base=API_URL, key=API_KEY, idle_timeout=IDLE_TIMEOUT,
+                        valid_session=valid_session, mono_ms=_mono_ms,
+                        profile=PROFILE, permission=PERMISSION,
+                        auto_approve=(PERMISSION == "bypass"))
+                return
+            yield dict(t="note", message="Hermes API server isn't reachable, so this turn used the standard "
+                                         "backend (no spoken approvals). Start it with ./start-gateway.sh")
         yield from run_hermes(message, session_id, system)
     except Exception as e:  # noqa: BLE001
         yield dict(t="error", message=f"could not start Hermes core: {e}")

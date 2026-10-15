@@ -116,6 +116,17 @@ Every button executes its base command immediately. Commands that accept a paylo
 
 Normal text and voice requests go directly to Hermes Agent.
 
+## Mic gate, greeting and approvals
+
+- **Space** opens / closes the mic (tap to latch). A bulb under the orb shows the state, the tab title and icon mirror it, and the mic auto-closes after a silence timeout (Settings). **Alt+C** (or the 📞 button) is *call mode*: mic locked closed, replies text-only.
+- **Greeting:** a short spoken hello once per launch/day, using the name in Settings. Browsers block audio until the page is touched, so he speaks on your first key press or click.
+- **Approvals (optional, `JARVIS_BACKEND=api`):** by default Hermes' one-shot CLI mode never *asks* about a risky command; it blocks it (or, in Bypass, allows everything). With the API backend Hermes pauses on each flagged command, the dashboard shows the exact command, and Jarvis asks out loud. Answer by voice ("yes" / "no"), or **Enter** / **Esc**.
+  - Risky categories (deletes, sending, spending, credentials, force/reset, sudo…) are *keyboard-only*: a spoken "yes" is ignored, though "no" always works.
+  - The dashboard can only ever send **once** or **deny**. It never sends "always"/"session", so a spoken yes can't become a standing rule. No answer in 45s means **deny**.
+  - Setup: `./start-gateway.sh` (creates a private key in `.env`, binds `127.0.0.1` only), then set `JARVIS_BACKEND=api` in `.env`. If the API server isn't reachable the dashboard falls back to the CLI backend and says so.
+  - Heads-up: `hermes gateway run` also runs Hermes' cron scheduler and any messaging platforms you've configured. Don't start a second one if you already run a gateway; point `JARVIS_API_URL` at it.
+  - With `approvals.mode: smart` (Hermes default) low-risk commands are auto-approved and only uncertain ones prompt; use `hermes config set approvals.mode manual` to be asked every time.
+
 ## Architecture
 
 ```text

@@ -60,6 +60,7 @@ runtime.apply_settings(commands.get_settings())
 
 PORT = int(os.environ.get("JARVIS_PORT", "8730"))
 API_TOKEN = secrets.token_urlsafe(32)
+BOOT_ID = secrets.token_hex(4)   # changes every server launch; drives "greet once per launch"
 RUN_LOCK = threading.Lock()
 MAX_JSON_BODY = 1024 * 1024
 MAX_AUDIO_BODY = 12 * 1024 * 1024
@@ -97,13 +98,43 @@ def persona():
         base = _PERSONA_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         base = ""
-    who = (f"## Who you serve\nYou serve {runtime.user_name()}. "
+    name = commands.get_settings().get("user_name", "").strip() or runtime.user_name()
+    who = (f"## Who you serve\nYou serve {name}. "
            "Address them by name, naturally.")
     extra = commands.context_block()      # profile / goal / personality / queue
     return "\n\n".join(x for x in (base, who, extra) if x)
 # One continuing Hermes conversation until the user hits /new. Persisted across
 # restarts so the assistant remembers the prior conversation.
 SESSION = {"id": commands.get_session()}
+
+
+def _merged_settings():
+    """Runtime settings plus the UI-only prefs (greeting name / toggle)."""
+    out = dict(runtime.current_settings())
+    st = commands.get_settings()
+    out["user_name"] = st.get("user_name", "")
+    out["greeting"] = st.get("greeting", True)
+    return out
+
+
+def build_greeting(now=None):
+    """Short spoken hello. Templated on purpose: no model call, so it is instant and free."""
+    import datetime, random
+    now = now or datetime.datetime.now()
+    st = commands.get_settings()
+    name = st.get("user_name", "").strip()
+    h = now.hour
+    if h < 4:
+        opener, lines = "Still up", ["Standing by.", "I'm here if you need me."]
+    elif h < 12:
+        opener, lines = "Good morning", ["What are we working on today?", "Standing by.", "Ready when you are."]
+    elif h < 18:
+        opener, lines = "Good afternoon", ["What are we working on?", "Standing by.", "Ready when you are."]
+    else:
+        opener, lines = "Good evening", ["What are we working on?", "Standing by.", "Ready when you are."]
+    head = f"{opener}, {name}." if name else f"{opener}."
+    return {"text": f"{head} {random.choice(lines)}", "boot_id": BOOT_ID,
+            "enabled": bool(st.get("greeting", True))}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -186,7 +217,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/settings":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
-            return self._json(runtime.current_settings())
+            return self._json(_merged_settings())
+        if p == "/api/greeting":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json(build_greeting())
         if p == "/api/status":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -205,7 +240,9 @@ class Handler(BaseHTTPRequestHandler):
                 stt=voice.stt_engine(),
                 tts=voice.tts_engine(),
                 voice_ready=voice.ready(),
-                session=SESSION["id"]))
+                session=SESSION["id"],
+                backend=("api" if runtime.api_backend_ready() else "cli"),
+                approvals=runtime.api_backend_ready()))
         if p == "/api/jobs":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -235,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._token_ok():
             return self._json({"error": "unauthorized"}, 401)
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
-        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings"} and ctype != "application/json":
+        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval"} and ctype != "application/json":
             return self._json({"error": "application/json required"}, 415)
         if p == "/api/listen" and not ctype.startswith("audio/"):
             return self._json({"error": "audio content type required"}, 415)
@@ -259,6 +296,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:                        # noqa: BLE001
                 return self._json({"error": str(e)[:300], "text": ""}, 503)
 
+        if p == "/api/approval":
+            try:
+                body = json.loads(raw or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "bad json"}, 400)
+            ok, res = runtime.resolve_approval(body.get("run_id"), body.get("request_id"), body.get("choice"))
+            return self._json({"ok": True, **(res if isinstance(res, dict) else {})} if ok
+                              else {"ok": False, "error": res}, 200 if ok else 409)
+
         if p == "/api/new":
             runtime.cancel_active()
             SESSION["id"] = None
@@ -280,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._json({"error": err}, 400)
             runtime.apply_settings(cleaned)
-            return self._json(runtime.current_settings())
+            return self._json(_merged_settings())
 
         if p == "/api/run":
             if not RUN_LOCK.acquire(blocking=False):

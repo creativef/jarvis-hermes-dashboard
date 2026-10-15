@@ -691,7 +691,7 @@ setInterval(async () => {
     const ph = resp.querySelector('.rplaceholder');
     if (!ph) return;
     obs.disconnect();
-    resp.innerHTML = `<div class="welcome"><h3>Good to see you.</h3><p>Talk to me with the mic, or type below. Slash commands work, and <kbd>⌘K</kbd> opens the Command Matrix.</p>`
+    resp.innerHTML = `<div class="welcome"><h3>${esc(window.__greetText || 'Good to see you.')}</h3><p>Talk to me with the mic, or type below. Slash commands work, and <kbd>⌘K</kbd> opens the Command Matrix.</p>`
       + `<div class="starters">${STARTERS.map(s => `<button class="starter" data-s="${esc(s[0])}">${esc(s[0])}<small>${esc(s[1])}</small></button>`).join('')}</div></div>`;
     obs.observe(resp, {childList:true});
   });
@@ -740,11 +740,12 @@ setInterval(async () => {
 
   // ── tab title + favicon so the state is visible even from another window ──
   const fav = document.createElement('link'); fav.rel = 'icon'; document.head.appendChild(fav);
-  const COLORS = {closed:'#4a5f6a', listening:'#ff5566', busy:'#ffb648', call:'#a884ff', closing:'#ff5566'};
-  const TITLES = {closed:'JARVIS · mic closed', listening:'🔴 JARVIS · listening', busy:'🟠 JARVIS · working', call:'🟣 JARVIS · call mode', closing:'🔴 JARVIS · closing…'};
+  const COLORS = {ask:'#ffb648', closed:'#4a5f6a', listening:'#ff5566', busy:'#ffb648', call:'#a884ff', closing:'#ff5566'};
+  const TITLES = {ask:'🟠 JARVIS · needs your OK', closed:'JARVIS · mic closed', listening:'🔴 JARVIS · listening', busy:'🟠 JARVIS · working', call:'🟣 JARVIS · call mode', closing:'🔴 JARVIS · closing…'};
 
   function stateNow(){
     if (callMode) return 'call';
+    if (window.__approvalOpen) return 'ask';
     if (!convo) return 'closed';
     if (suppress || document.body.classList.contains('running') || document.body.classList.contains('speaking')) return 'busy';
     return 'listening';
@@ -766,6 +767,7 @@ setInterval(async () => {
       closed:   ['MIC CLOSED', 'Press <kbd>Space</kbd> to open'],
       listening:['LISTENING', 'Press <kbd>Space</kbd> to close'],
       closing:  ['LISTENING', `Closing in ${Math.max(left,0)}s — speak to keep it open`],
+      ask:      ['AWAITING YOUR ANSWER', 'Say <kbd>yes</kbd> or <kbd>no</kbd> — or <kbd>Enter</kbd> / <kbd>Esc</kbd>'],
       busy:     ['PAUSED', 'Jarvis is working — mic resumes after'],
       call:     ['CALL MODE', 'Silent · mic locked · <kbd>Alt</kbd>+<kbd>C</kbd> to exit'],
     }[st];
@@ -783,8 +785,10 @@ setInterval(async () => {
   // ── open / close the mic ──
   async function toggleMic(){
     if (pending) return;
+    if (window.__approvalOpen) return;          // the approval prompt owns the mic right now
     if (callMode){ toast('Call mode is on — press Alt+C to exit first'); return; }
     pending = true;
+    if (window.__greetNow) { try { await window.__greetNow(); } catch(_){} }
     try {
       if (convo){ stopConvo(); chime(false); }
       else { lastActive = Date.now(); await micToggle(); if (convo) chime(true); }
@@ -859,4 +863,204 @@ setInterval(async () => {
 
   $('#mic').title = 'Open / close the mic (Space)';
   render();
+})();
+
+// ══════════ greeting on launch ══════════
+(() => {
+  const GKEY = 'jarvis.greeted';
+  let text = '', armed = null;
+
+  async function boot(){
+    let g;
+    try { g = await fetch('/api/greeting', {headers: apiHeaders()}).then(r => r.json()); } catch(_){ return; }
+    if (!g || !g.text) return;
+    text = g.text; window.__greetText = text;
+    const h = document.querySelector('.welcome h3'); if (h) h.textContent = text;   // visible even if never spoken
+    if (!g.enabled) return;
+
+    // once per server launch, and at most once per calendar day
+    const mark = g.boot_id + ':' + new Date().toDateString();
+    if (localStorage.getItem(GKEY) === mark) return;
+
+    const speakIt = () => {
+      if (!armed) return Promise.resolve();
+      armed = null; window.__greetNow = null;
+      localStorage.setItem(GKEY, mark);
+      log('voice', 'GREETING', text);
+      return speak(text);                       // honours mute / call mode (speak() no-ops when muted)
+    };
+    armed = speakIt;
+    // Browsers block audio until the page has been touched, so wait for the first gesture.
+    window.__greetNow = speakIt;
+    if (navigator.userActivation?.hasBeenActive) { speakIt(); return; }
+    const first = e => {
+      if (e.type === 'keydown' && (e.metaKey || e.ctrlKey || e.key === 'Shift' || e.key === 'Meta' || e.key === 'Control' || e.key === 'Alt')) return;
+      document.removeEventListener('keydown', first, true);
+      document.removeEventListener('pointerdown', first, true);
+      if (e.type === 'keydown' && e.code === 'Space') return;   // Space → the mic gate awaits __greetNow itself
+      if (armed) armed();
+    };
+    document.addEventListener('keydown', first, true);
+    document.addEventListener('pointerdown', first, true);
+  }
+
+  // settings fields
+  $('#settingsBtn').addEventListener('click', async () => {
+    try {
+      const s = await fetch('/api/settings', {headers: apiHeaders()}).then(r => r.json());
+      $('#set-name').value = s.user_name || '';
+      $('#set-greet').checked = s.greeting !== false;
+    } catch(_){}
+  });
+  $('#settingsSave').addEventListener('click', async () => {
+    try {
+      await fetch('/api/settings', {method:'POST', headers: apiHeaders({'content-type':'application/json'}),
+        body: JSON.stringify({user_name: $('#set-name').value, greeting: $('#set-greet').checked})});
+      localStorage.removeItem(GKEY);
+    } catch(_){ log('error', 'SETTINGS', 'could not save greeting settings'); }
+  });
+
+  setTimeout(boot, 600);   // after the main boot has drawn the welcome state
+})();
+
+// ══════════ approvals: ask out loud, answer by voice or key ══════════
+(() => {
+  const card = $('#approval');
+  const TTL = 45;                       // seconds of silence before it counts as "no"
+  const YES = /\b(yes|yeah|yep|yup|sure|okay|ok|approve|approved|go ahead|do it|proceed|confirm|affirmative)\b/i;
+  const NO  = /\b(no|nope|nah|don'?t|do not|deny|denied|stop|cancel|negative|abort|never)\b/i;
+  let cur = null, shownAt = 0, tick = null, listening = null;
+  const callOn = () => $('#callBtn').getAttribute('aria-pressed') === 'true';
+  const voiceOK = () => !callOn() && !muted;
+
+  const parse = t => NO.test(t) ? 'deny' : (YES.test(t) ? 'once' : null);   // any "no" wins
+
+  function render(ev){
+    const high = ev.risk === 'high';
+    $('#apBadge').textContent = high ? 'NEEDS YOUR OK · CONFIRM WITH KEYBOARD' : 'NEEDS YOUR OK';
+    $('#apBadge').classList.toggle('high', high);
+    $('#apTitle').textContent = `Jarvis wants to run: ${ev.description}.`;
+    $('#apCmd').textContent = ev.command || '(no command text)';
+    $('#apHint').textContent = high
+      ? 'This kind of action needs a deliberate keypress — a spoken "yes" is not accepted. You can still say "no".'
+      : (voiceOK() ? 'Say "yes" or "no", or use the buttons.' : 'Use the buttons or the keyboard.');
+    card.hidden = false;
+  }
+
+  function close(){
+    cur = null; window.__approvalOpen = false;
+    clearInterval(tick); tick = null; card.hidden = true;
+    if (listening){ listening.cancel(); listening = null; }
+  }
+
+  async function answer(choice, via){
+    const ev = cur; if (!ev) return;
+    close();
+    try {
+      const r = await fetch('/api/approval', {method:'POST', headers: apiHeaders({'content-type':'application/json'}),
+        body: JSON.stringify({run_id: ev.run_id, request_id: ev.request_id, choice})}).then(r => r.json());
+      if (!r.ok) log('error', 'APPROVAL', 'could not deliver answer: ' + (r.error || 'unknown'));
+    } catch(_){ log('error', 'APPROVAL', 'could not deliver answer'); }
+    log('command', 'APPROVAL', `${choice === 'once' ? 'approved once' : 'denied'} (${via}): ${ev.description}`);
+  }
+
+  // ── listen for a short spoken answer ──
+  function listenOnce(maxMs){
+    const ctl = {stop: false, cancel(){ this.stop = true; }};
+    const p = (async () => {
+      if (RT.stt){                                         // local Parakeet: record, VAD, upload
+        let stream, ac;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true, noiseSuppression:true}});
+          ac = new (window.AudioContext || window.webkitAudioContext)(); await ac.resume();
+          const an = ac.createAnalyser(); an.fftSize = 1024;
+          ac.createMediaStreamSource(stream).connect(an);
+          const data = new Uint8Array(an.fftSize), chunks = [];
+          const rec = new MediaRecorder(stream, pickMime()); rec.ondataavailable = e => e.data?.size && chunks.push(e.data);
+          rec.start(250);
+          const t0 = performance.now(); let last = t0, spoke = false, floor = 0, n = 0, thr = 0.02;
+          await new Promise(res => {
+            const iv = setInterval(() => {
+              an.getByteTimeDomainData(data);
+              let sum = 0; for (const v of data){ const x = (v-128)/128; sum += x*x; }
+              const rms = Math.sqrt(sum/data.length), now = performance.now();
+              if (now - t0 < 300){ floor += rms; n++; thr = Math.max(0.006, (floor/n)*1.6 + 0.003); }
+              else if (rms > thr){ spoke = true; last = now; }
+              if (ctl.stop || (spoke && now - last > 900) || (!spoke && now - t0 > maxMs) || now - t0 > 9000){ clearInterval(iv); res(); }
+            }, 40);
+          });
+          const blob = await new Promise(res => { rec.onstop = () => res(new Blob(chunks, {type: rec.mimeType || 'audio/webm'})); try{ rec.stop(); }catch(_){ res(null); } });
+          if (ctl.stop || !blob || blob.size < 1400) return '';
+          const r = await fetch('/api/listen', {method:'POST', headers: apiHeaders({'content-type': blob.type || 'audio/webm'}), body: blob}).then(r => r.json());
+          return (r.text || '').trim();
+        } catch(_){ return ''; }
+        finally { stream?.getTracks().forEach(t => t.stop()); ac?.close().catch(()=>{}); }
+      }
+      if (SpeechRecognition){                              // browser fallback
+        return await new Promise(res => {
+          const r = new SpeechRecognition(); r.lang = 'en-US'; r.continuous = false; r.interimResults = false;
+          let out = ''; r.onresult = e => { out = e.results[0][0].transcript; }; r.onend = () => res(out); r.onerror = () => res('');
+          ctl.cancel = () => { ctl.stop = true; try{ r.abort(); }catch(_){} };
+          try{ r.start(); setTimeout(() => { try{ r.stop(); }catch(_){} }, maxMs); } catch(_){ res(''); }
+        });
+      }
+      return '';
+    })();
+    ctl.result = p; return ctl;
+  }
+
+  async function voiceLoop(ev){
+    for (let attempt = 0; attempt < 2 && cur === ev; attempt++){
+      listening = listenOnce(10000);
+      const heard = await listening.result;
+      if (cur !== ev) return;                              // answered another way meanwhile
+      const choice = parse(heard);
+      if (heard) log('voice', 'VOICE', `approval answer heard: "${heard}"`);
+      if (choice === 'deny') return answer('deny', 'voice');
+      if (choice === 'once'){
+        if (ev.risk === 'high'){ await speak('That one needs the keyboard. Press Enter to approve.'); return; }
+        return answer('once', 'voice');
+      }
+      if (attempt === 0) await speak("Sorry, yes or no?");
+    }
+  }
+
+  async function onApproval(ev){
+    if (cur) return;
+    cur = ev; shownAt = Date.now(); window.__approvalOpen = true;
+    render(ev); log('command', 'APPROVAL', `asked: ${ev.description} — ${(ev.command || '').slice(0, 120)}`);
+    setState('', 'AWAITING OK', ev.description.slice(0, 32));
+    let left = TTL; $('#apTimer').textContent = `${left}s`;
+    tick = setInterval(() => {
+      left--; $('#apTimer').textContent = `${Math.max(left,0)}s`;
+      if (left <= 0){ toast('No answer — denied'); answer('deny', 'timeout'); }
+    }, 1000);
+    if (voiceOK()){
+      await speak(`I need your approval for a ${ev.description}. The command is on screen. `
+        + (ev.risk === 'high' ? 'Press Enter to approve, or Escape to deny.' : 'Say yes or no.'));
+      if (cur === ev && !callOn()) voiceLoop(ev);
+    }
+  }
+
+  // buttons + keys (Esc always denies; Enter only approves when it can't be a stray keystroke)
+  $('#apOk').addEventListener('click', () => answer('once', 'click'));
+  $('#apDeny').addEventListener('click', () => answer('deny', 'click'));
+  document.addEventListener('keydown', e => {
+    if (!cur) return;
+    if (e.key === 'Escape'){ e.preventDefault(); e.stopImmediatePropagation(); answer('deny', 'key'); return; }
+    if (e.key === 'Enter' && !e.shiftKey){
+      const typing = document.activeElement === $('#input') && $('#input').value.trim();
+      if (typing || Date.now() - shownAt < 800) return;     // never approve by accident while typing
+      e.preventDefault(); e.stopImmediatePropagation(); answer('once', 'key');
+    }
+  }, true);
+
+  // route the new stream events (everything else flows to the original handler untouched)
+  const original = handle;
+  handle = ev => {
+    if (ev.t === 'approval') return onApproval(ev);
+    if (ev.t === 'approval_done' && cur && ev.request_id === cur.request_id) close();
+    if ((ev.t === 'complete' || ev.t === 'error') && cur) close();
+    return original(ev);
+  };
 })();

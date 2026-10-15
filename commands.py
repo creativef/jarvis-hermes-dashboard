@@ -112,6 +112,11 @@ def set_settings(updates):
             return None, f"workdir is not a directory: {wd}"
         cleaned["workdir"] = wd
 
+    if "user_name" in updates:
+        name = " ".join(str(updates["user_name"]).split())[:40]
+        cleaned["user_name"] = name
+    if "greeting" in updates:
+        cleaned["greeting"] = bool(updates["greeting"])
     def _merge(d):
         d.setdefault("settings", {}).update(cleaned)
     update_state(_merge)

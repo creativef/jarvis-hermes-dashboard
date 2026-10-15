@@ -65,6 +65,16 @@
   <section class="chat card" id="responseWrap">
     <div class="chathead"><span>Conversation</span><span class="rtag" id="rtag">IDLE</span></div>
     <div class="rbody" id="response" aria-live="polite"><span class="rplaceholder">Standing by. Transmit an instruction.</span></div>
+    <div class="approval" id="approval" hidden role="alertdialog" aria-labelledby="apTitle">
+      <div class="aphead"><span class="apbadge" id="apBadge">NEEDS YOUR OK</span><span class="aptimer" id="apTimer"></span></div>
+      <div class="aptitle" id="apTitle"></div>
+      <pre class="apcmd" id="apCmd"></pre>
+      <div class="aphint" id="apHint"></div>
+      <div class="apbtns">
+        <button id="apDeny" class="ctl aux">Deny <kbd>Esc</kbd></button>
+        <button id="apOk" class="ctl run">Approve once <kbd>Enter</kbd></button>
+      </div>
+    </div>
     <div class="composer">
       <div class="armedchip" id="armedChip" hidden><span>Armed</span><b id="armedName"></b><button id="armedX" aria-label="Disarm command">✕</button></div>
       <div class="slashmenu" id="slashMenu" role="listbox" hidden></div>
@@ -143,6 +153,10 @@
       <label class="sfield">Working directory
         <input id="set-workdir" type="text" placeholder="~">
       </label>
+      <label class="sfield">Your name (used in the greeting)
+        <input id="set-name" type="text" maxlength="40" placeholder="e.g. Mr Thompson">
+      </label>
+      <label class="sfield check"><input id="set-greet" type="checkbox"> Greet me when I open the dashboard</label>
       <label class="sfield">Auto-close mic after silence (seconds, 0 = never)
         <input id="set-micidle" type="number" min="0" max="3600" step="5">
       </label>
