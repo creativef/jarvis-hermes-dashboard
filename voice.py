@@ -9,30 +9,42 @@ page source, or a screen recording.
 """
 import json
 import os
+import pathlib
+import shutil
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 
 # Rachel — calm, British-adjacent. Override with ELEVENLABS_VOICE_ID.
 DEFAULT_VOICE = "21m00Tcm4TlvDq8ikWAM"
 MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
+# Local (offline) voice via macOS `say`. "Daniel" is a calm British male that
+# fits the JARVIS persona; override with JARVIS_SAY_VOICE.
+LOCAL_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel")
 
 
 def available():
     return bool(os.environ.get("ELEVENLABS_API_KEY"))
 
 
+def local_available():
+    return shutil.which("say") is not None
+
+
+def tts_engine():
+    if available():
+        return "elevenlabs"
+    if local_available():
+        return "local"
+    return "browser"
+
+
 def voice_id():
     return os.environ.get("ELEVENLABS_VOICE_ID", DEFAULT_VOICE)
 
 
-def speak(text):
-    """Returns mp3 bytes, or raises. Caller decides what to do on failure."""
-    if not available():
-        raise RuntimeError("no ELEVENLABS_API_KEY")
-    text = (text or "").strip()
-    if not text:
-        raise ValueError("empty text")
-
+def _speak_elevenlabs(text):
     req = urllib.request.Request(
         f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id()}",
         data=json.dumps({
@@ -54,6 +66,30 @@ def speak(text):
     )
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.read()
+
+
+def _speak_local(text):
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        subprocess.run(["say", "-v", LOCAL_VOICE, "-o", path,
+                        "--data-format=LEI16@22050", text[:2500]],
+                       check=True, capture_output=True, timeout=30)
+        return pathlib.Path(path).read_bytes()
+    finally:
+        pathlib.Path(path).unlink(missing_ok=True)
+
+
+def speak(text):
+    """Returns (audio_bytes, mime_type). Raises if no engine is available."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("empty text")
+    if available():
+        return _speak_elevenlabs(text), "audio/mpeg"
+    if local_available():
+        return _speak_local(text), "audio/wav"
+    raise RuntimeError("no TTS engine (set ELEVENLABS_API_KEY or run on macOS)")
 
 
 def transcribe(audio, mime="audio/webm"):

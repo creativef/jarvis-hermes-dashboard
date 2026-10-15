@@ -200,10 +200,10 @@ class Handler(BaseHTTPRequestHandler):
                 tools=runtime.hermes_tools_snapshot(),
                 browser_stt=True,
                 browser_tts=True,
-                voice_mode=os.environ.get("JARVIS_VOICE_MODE", "elevenlabs" if voice.available() else "browser"),
-                voice_id=voice.voice_id() if voice.available() else "browser",
+                voice_mode=os.environ.get("JARVIS_VOICE_MODE", voice.tts_engine()),
+                voice_id=voice.voice_id() if voice.available() else (voice.LOCAL_VOICE if voice.local_available() else "browser"),
                 stt="elevenlabs" if voice.available() else "browser",
-                tts="elevenlabs" if voice.available() else "browser",
+                tts=voice.tts_engine(),
                 session=SESSION["id"]))
         if p == "/api/jobs":
             if not self._token_ok():
@@ -246,7 +246,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/speak":
             try:
                 text = (json.loads(raw or b"{}").get("text") or "").strip()
-                return self._bytes(voice.speak(text), "audio/mpeg")
+                data, mime = voice.speak(text)
+                return self._bytes(data, mime)
             except Exception as e:                        # noqa: BLE001
                 return self._json({"error": str(e)[:200]}, 503)
 
