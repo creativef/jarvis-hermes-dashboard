@@ -88,6 +88,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; script-src 'self'; "
+                         "style-src 'self' 'unsafe-inline'; font-src 'self'; "
+                         "img-src 'self' data:; connect-src 'self'; "
+                         "media-src 'self' blob:; object-src 'none'; "
+                         "base-uri 'self'; form-action 'self'")
 
     def _json(self, body, code=200):
         data = json.dumps(body).encode()
