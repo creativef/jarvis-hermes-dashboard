@@ -291,6 +291,7 @@ def _run_hermes_locked(message, session_id=None, system=None):
     text_seen = False
     completed = False
     result_session = None
+    in_tool = False
     try:
         while not done.is_set() or q:
             line = None
@@ -300,8 +301,12 @@ def _run_hermes_locked(message, session_id=None, system=None):
             if line is None:
                 if proc.poll() is not None and done.is_set():
                     break
-                if time.monotonic() - last > IDLE_TIMEOUT:
+                if time.monotonic() - last > IDLE_TIMEOUT and not in_tool:
                     proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
                     err = " | ".join(list(errbuf)[-3:])
                     yield dict(t="error", message=(f"Hermes went quiet for {IDLE_TIMEOUT}s and was stopped. " + err)[:400])
                     return
@@ -327,12 +332,14 @@ def _run_hermes_locked(message, session_id=None, system=None):
                 yield dict(t="delta", text=ev.get("text") or "")
                 continue
             if etype == "tool_use":
+                in_tool = True
                 name = ev.get("name") or "tool"
                 inp = ev.get("input")
                 yield dict(t="tool", phase="use", name=name,
                            input=(json.dumps(inp, ensure_ascii=False)[:200] if inp else ""))
                 continue
             if etype == "tool_result":
+                in_tool = False
                 yield dict(t="tool", phase="result", name=ev.get("name") or "tool",
                            ok=not bool(ev.get("is_error")))
                 continue

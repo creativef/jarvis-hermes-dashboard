@@ -78,5 +78,34 @@ class RunStreamTests(unittest.TestCase):
             self.assertIn("run the fake", record["prompt"])
 
 
+class IdleTimeoutTests(unittest.TestCase):
+    def _run_with_idle(self, idle_seconds, env_extra):
+        with tempfile.TemporaryDirectory() as td:
+            env = {
+                "HERMES_CMD": f"{sys.executable} {FAKE}",
+                "FAKE_HERMES_LOG": str(pathlib.Path(td) / "fake.log"),
+            }
+            env.update(env_extra)
+            with mock.patch.dict(os.environ, env, clear=False), \
+                 mock.patch.object(runtime, "RUNTIME", "hermes"), \
+                 mock.patch.object(runtime, "IDLE_TIMEOUT", idle_seconds):
+                runtime._TTL_CACHE.clear()
+                return list(runtime.run("hi", None, None))
+
+    def test_long_tool_call_is_not_killed(self):
+        # the fake stalls 2.5s between tool_use and tool_result; a 1s idle
+        # timeout must NOT kill it because a tool is in flight
+        events = self._run_with_idle(1, {"FAKE_HERMES_TOOL_STALL_MS": "2500"})
+        kinds = [e.get("t") for e in events]
+        self.assertIn("complete", kinds)
+        self.assertNotIn("error", kinds)
+
+    def test_silent_hang_is_killed(self):
+        # the fake emits nothing for 2.5s; a 1s idle timeout must kill it
+        events = self._run_with_idle(1, {"FAKE_HERMES_STALL_MS": "2500"})
+        kinds = [e.get("t") for e in events]
+        self.assertIn("error", kinds)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ runtime actually invoked.
 import json
 import os
 import sys
+import time
 
 
 def _log(entry):
@@ -31,16 +32,22 @@ def main(argv):
         prompt = sys.stdin.read()
         _log({"argv": argv, "prompt": prompt})
         session_id = os.environ.get("FAKE_HERMES_SESSION", "20260101_000000_test00")
-        frames = (
-            {"type": "system", "subtype": "init", "model": "fake", "session_id": session_id},
-            {"type": "tool_use", "name": "terminal", "input": {"command": "echo hi"}},
-            {"type": "tool_result", "name": "terminal", "output": "hi", "is_error": False, "duration_ms": 5},
-            {"type": "text", "text": "hello"},
-            {"type": "result", "session_id": session_id, "exit_code": 0, "text": "hello",
-             "tokens": {"input": 10, "output": 2, "total": 12, "cache_read": 0, "cache_write": 0}},
-        )
-        for frame in frames:
-            print(json.dumps(frame), flush=True)
+        stall = int(os.environ.get("FAKE_HERMES_STALL_MS", "0"))
+        tool_stall = int(os.environ.get("FAKE_HERMES_TOOL_STALL_MS", "0"))
+
+        def emit(obj):
+            print(json.dumps(obj), flush=True)
+
+        if stall:
+            time.sleep(stall / 1000.0)  # silence before any output
+        emit({"type": "system", "subtype": "init", "model": "fake", "session_id": session_id})
+        emit({"type": "tool_use", "name": "terminal", "input": {"command": "echo hi"}})
+        if tool_stall:
+            time.sleep(tool_stall / 1000.0)  # stall while the tool "runs"
+        emit({"type": "tool_result", "name": "terminal", "output": "hi", "is_error": False, "duration_ms": 5})
+        emit({"type": "text", "text": "hello"})
+        emit({"type": "result", "session_id": session_id, "exit_code": 0, "text": "hello",
+              "tokens": {"input": 10, "output": 2, "total": 12, "cache_read": 0, "cache_write": 0}})
         return 0
     print("fake hermes: unknown args", file=sys.stderr)
     return 2

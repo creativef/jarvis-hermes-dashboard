@@ -3,3 +3,4 @@ state.json
 .no-mcp.json
 __pycache__/
 *.pyc
+logs/

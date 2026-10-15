@@ -9,6 +9,7 @@ third-party integrations that your normal Hermes sessions have. Voice can use th
 browser Web Speech API, with optional server-side ElevenLabs STT/TTS if present.
 """
 import json
+import logging
 import mimetypes
 import os
 import pathlib
@@ -17,6 +18,7 @@ import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -59,6 +61,28 @@ RUN_LOCK = threading.Lock()
 MAX_JSON_BODY = 1024 * 1024
 MAX_AUDIO_BODY = 12 * 1024 * 1024
 
+# Durable rotating error log. The UI action log is in-memory (capped) and
+# JARVIS_VERBOSE only prints access lines, so failures at rest need a file.
+LOG_DIR = ROOT / "logs"
+_ERR_LOG = None
+
+
+def _setup_error_log():
+    global _ERR_LOG
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOG_DIR / "server.log"
+        path.touch(exist_ok=True)
+        os.chmod(path, 0o600)
+        handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger = logging.getLogger("jarvis")
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        _ERR_LOG = logger
+    except OSError:
+        _ERR_LOG = None
+
 # The Jarvis persona, appended to every run. Without it, the model answers as a
 # coding agent and narrates its own tooling — which is not what you want spoken
 # out loud. Edit persona.md to change how it talks.
@@ -82,6 +106,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         if os.environ.get("JARVIS_VERBOSE"):
             sys.stderr.write("  " + (fmt % args) + "\n")
+
+    def log_error(self, format, *args):
+        msg = format % args
+        if _ERR_LOG:
+            _ERR_LOG.error("client=%s %s", self.client_address, msg)
+        if os.environ.get("JARVIS_VERBOSE"):
+            sys.stderr.write("  ERROR " + msg + "\n")
 
     # ── helpers ──────────────────────────────────────────────
     def _security_headers(self):
@@ -293,6 +324,13 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
 
+class JarvisServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        if _ERR_LOG:
+            _ERR_LOG.exception("unhandled error from %s", client_address)
+        super().handle_error(request, client_address)
+
+
 def main():
     kind = runtime.runtime_kind()
     brain = ("Hermes Agent (profile tools, skills, memory, MCP, browser integrations live)"
@@ -314,7 +352,8 @@ def main():
   open         http://localhost:{PORT}
 """, flush=True)
 
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    _setup_error_log()
+    srv = JarvisServer(("127.0.0.1", PORT), Handler)
     if os.environ.get("JARVIS_OPEN", "1") != "0":
         webbrowser.open(f"http://localhost:{PORT}")
     try:
