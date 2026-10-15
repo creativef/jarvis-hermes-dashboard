@@ -26,8 +26,10 @@ or
   HERMES_CMD="python3 -m hermes_cli.main"
 """
 import collections
+import getpass
 import json
 import os
+import pathlib
 import re
 import shlex
 import shutil
@@ -65,6 +67,28 @@ def apply_settings(settings):
 
 def current_settings():
     return {"permission": PERMISSION, "timeout": IDLE_TIMEOUT, "workdir": WORKDIR}
+
+
+def _profile_home():
+    base = os.path.expanduser(os.environ.get("HERMES_HOME") or "~/.hermes")
+    if PROFILE and PROFILE != "default":
+        return pathlib.Path(base) / "profiles" / PROFILE
+    return pathlib.Path(base)
+
+
+def user_name():
+    """Best-effort the user's name from Hermes memory, falling back to the OS user."""
+    for rel in ("memories/USER.md", "SOUL.md"):
+        try:
+            text = (_profile_home() / rel).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = re.search(r"(?:name is|name:|owner:)\s*([A-Za-z][A-Za-z0-9' -]{1,40})", text, re.I)
+        if m:
+            name = m.group(1).strip().split(".")[0].strip()
+            return " ".join(name.split()[:2])
+    name = getpass.getuser()
+    return name[:1].upper() + name[1:] if name else name
 
 
 # One Hermes subprocess at a time. Hermes session state and profile resources are

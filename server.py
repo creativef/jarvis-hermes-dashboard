@@ -97,8 +97,10 @@ def persona():
         base = _PERSONA_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         base = ""
+    who = (f"## Who you serve\nYou serve {runtime.user_name()}. "
+           "Address them by name, naturally.")
     extra = commands.context_block()      # profile / goal / personality / queue
-    return "\n\n".join(x for x in (base, extra) if x)
+    return "\n\n".join(x for x in (base, who, extra) if x)
 # One continuing Hermes conversation until the user hits /new. Persisted across
 # restarts so the assistant remembers the prior conversation.
 SESSION = {"id": commands.get_session()}

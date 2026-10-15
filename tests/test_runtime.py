@@ -107,5 +107,20 @@ class IdleTimeoutTests(unittest.TestCase):
         self.assertIn("error", kinds)
 
 
+class UserNameTests(unittest.TestCase):
+    def test_falls_back_to_os_user(self):
+        name = runtime.user_name()
+        self.assertIsInstance(name, str)
+        self.assertTrue(name)
+
+    def test_reads_name_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = pathlib.Path(td)
+            (home / "SOUL.md").write_text("Name: Alice Johnson\nmore")
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False), \
+                 mock.patch.object(runtime, "PROFILE", "default"):
+                self.assertEqual(runtime.user_name(), "Alice Johnson")
+
+
 if __name__ == "__main__":
     unittest.main()
