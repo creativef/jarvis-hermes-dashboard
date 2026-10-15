@@ -12,9 +12,11 @@ A local, voice-enabled JARVIS dashboard for [Hermes Agent](https://github.com/No
 - Optional ElevenLabs speech-to-text and text-to-speech
 - Browser speech fallback when ElevenLabs is not configured
 - Working command matrix and slash commands
-- Hermes session continuity across voice turns
+- Hermes session continuity across voice turns and dashboard restarts
 - Access to the active Hermes profile's tools, skills, browser, memory, and MCP integrations
 - Local-only HTTP server bound to `127.0.0.1`
+- Fully offline (self-hosted fonts; no CDN requests)
+- Durable server error log at `logs/server.log`
 
 ## Prerequisites
 

@@ -4,6 +4,16 @@
 > (v0.22.2), then fix the bugs and dead features found in the audit, in
 > priority order. Each phase is independently shippable.
 
+## Status (this session — 10 commits)
+
+- **Phase 1 ✓** stream-json rewrite (tool/usage telemetry, structured session_id, permission, profile)
+- **Phase 2 ✓** bug fixes (path-traversal guard, README clone URLs, JSON.parse guard, orphaned-mission reconcile)
+- **Phase 3 ✓** security (token-gate /api/status, security headers + CSP, self-hosted fonts, hardened .env parser)
+- **Phase 4 ✓** robustness (probe caching, cancel→kill escalation, durable error log, idle-timeout exempts tools)
+- **Phase 5 ✓** tests (12 stdlib-unittest cases incl. fake-hermes integration + CI)
+- **Phase 6 ~** background preemption ✓, /api/health ✓, a11y label ✓, session persistence ✓
+  **Remaining:** config UI, mobile/tablet layout, full history scrollback, launchd agent
+
 ## Verified integration facts (Hermes v0.22.2 — do not re-derive)
 
 **Streaming protocol** — `hermes chat --format stream-json` emits NDJSON on stdout:
