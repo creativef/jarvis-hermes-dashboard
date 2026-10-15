@@ -530,7 +530,7 @@ setInterval(async () => {
 (async () => {
   defaultTip = $('#tip').textContent;
   try {
-    const s = await fetch('/api/status').then(r=>r.json());
+    const s = await fetch('/api/status', {headers:apiHeaders()}).then(r=>r.json());
     RT.tts = s.tts==='elevenlabs'; RT.stt = s.stt==='elevenlabs';
     RT.browserStt = !!SpeechRecognition; RT.browserTts = !!speechSynth;
 

@@ -23,13 +23,31 @@ ROOT = pathlib.Path(__file__).resolve().parent
 UI = ROOT / "ui"
 
 # load .env before importing anything that reads os.environ
+def _load_dotenv(path):
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # strip a trailing inline comment only when the '#' is preceded by
+        # whitespace, so a '#' inside a value is preserved
+        hash_idx = value.find(" #")
+        if hash_idx != -1:
+            value = value[:hash_idx].rstrip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
 _env = ROOT / ".env"
 if _env.exists():
-    for line in _env.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    _load_dotenv(_env)
 
 import commands         # noqa: E402
 import runtime          # noqa: E402
@@ -66,12 +84,18 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("  " + (fmt % args) + "\n")
 
     # ── helpers ──────────────────────────────────────────────
+    def _security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+
     def _json(self, body, code=200):
         data = json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -80,6 +104,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -109,6 +134,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "invalid host"}, 403)
         p = urlparse(self.path).path
         if p == "/api/status":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
             return self._json(dict(
                 runtime=runtime.runtime_kind(),
                 permission=runtime.PERMISSION,
@@ -134,7 +161,10 @@ class Handler(BaseHTTPRequestHandler):
 
         rel = "index.html" if p == "/" else p.lstrip("/")
         f = (UI / rel).resolve()
-        if not str(f).startswith(str(UI.resolve())) or not f.is_file():
+        ui_root = UI.resolve()
+        # commonpath (not a prefix match) so a sibling dir like `/ui_evil` can't
+        # pass the containment check
+        if os.path.commonpath([f, ui_root]) != str(ui_root) or not f.is_file():
             return self._bytes(b"not found", "text/plain", 404)
         ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
         data = f.read_bytes()
@@ -212,6 +242,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
+        self._security_headers()
         self.end_headers()
 
         def emit(ev):

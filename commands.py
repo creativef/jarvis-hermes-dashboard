@@ -258,3 +258,22 @@ def handle(message, runner=None):
         return dict(message=None, reply=f"Background Hermes mission {jid} launched. I'll report when it lands.", note=f"mission {jid} started: {arg[:50]}")
 
     return None
+
+
+def _reconcile_orphaned_missions():
+    """Missions marked 'running' in state.json were running in a now-dead process
+    (the JOBS registry is in-memory). On boot, mark them failed so they don't
+    linger as 'running' forever."""
+    d = _load_unlocked()
+    changed = False
+    for m in d.get("missions", []):
+        if m.get("status") == "running":
+            m["status"] = "failed"
+            m["finished"] = m.get("at", time.time())
+            m["result"] = m.get("result") or "interrupted by dashboard restart"
+            changed = True
+    if changed:
+        _save_unlocked(d)
+
+
+_reconcile_orphaned_missions()

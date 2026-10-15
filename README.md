@@ -31,7 +31,7 @@ Confirm that `hermes chat -q "Say online"` works before installing the dashboard
 ## One-command install
 
 ```bash
-git clone https://github.com/Itsme23476/jarvis-hermes-dashboard.git && \
+git clone https://github.com/creativef/jarvis-hermes-dashboard.git && \
 cd jarvis-hermes-dashboard && \
 ./install.sh
 ```
@@ -46,7 +46,7 @@ No API keys are required for the basic dashboard. Browser speech APIs are used a
 
 Give this prompt to an already-installed Hermes Agent:
 
-> Install and launch the JARVIS dashboard from https://github.com/Itsme23476/jarvis-hermes-dashboard. Clone or update it under ~/jarvis-hermes-dashboard, preserve any existing private .env file, run its installer, verify http://127.0.0.1:8730/api/status reports the Hermes runtime, and tell me the local dashboard URL. Do not print or expose any credentials.
+> Install and launch the JARVIS dashboard from https://github.com/creativef/jarvis-hermes-dashboard. Clone or update it under ~/jarvis-hermes-dashboard, preserve any existing private .env file, run its installer, verify http://127.0.0.1:8730/api/status reports the Hermes runtime, and tell me the local dashboard URL. Do not print or expose any credentials.
 
 Hermes can perform the clone, setup, launch, and health check with its terminal tools.
 
