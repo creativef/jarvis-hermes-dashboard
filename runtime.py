@@ -374,6 +374,12 @@ def _run_hermes_locked(message, session_id=None, system=None):
             pass
         if proc.poll() is None:
             proc.terminate()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except Exception:
+                pass
         with _ACTIVE_LOCK:
             if _ACTIVE_PROC is proc:
                 _ACTIVE_PROC = None
