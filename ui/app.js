@@ -610,3 +610,253 @@ setInterval(async () => {
     log('error','STATUS','server unreachable');
   }
 })();
+
+// ══════════ top-menu drawers (Command Matrix / Action Logs) ══════════
+(() => {
+  const drawers = { navCmds: '#drawerCmds', navLogs: '#drawerLogs' };
+  const scrim = $('#scrim');
+  function closeAll(){
+    Object.entries(drawers).forEach(([b, d]) => { $(d).hidden = true; $('#' + b).setAttribute('aria-expanded', 'false'); });
+    scrim.hidden = true;
+  }
+  function toggle(btnId){
+    const open = !$(drawers[btnId]).hidden;
+    closeAll();
+    if (open) return;
+    $(drawers[btnId]).hidden = false;
+    $('#' + btnId).setAttribute('aria-expanded', 'true');
+    scrim.hidden = false;
+  }
+  Object.keys(drawers).forEach(b => $('#' + b).addEventListener('click', () => toggle(b)));
+  scrim.addEventListener('click', closeAll);
+  document.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', closeAll));
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !scrim.hidden) closeAll(); });
+  // arming a command, or running a quick action, drops you back at the chat
+  $('#cmds').addEventListener('click', e => { if (e.target.closest('.cmd')) closeAll(); });
+  $('#showCommands').addEventListener('click', closeAll);
+  $('#missionBtn').addEventListener('click', closeAll);
+})();
+
+// ══════════ v2 enhancements (additive; transmit/voice logic untouched) ══════════
+(() => {
+  const input = $('#input'), menu = $('#slashMenu');
+
+  // composer: Enter sends, Shift+Enter newline, auto-grow
+  const grow = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; };
+  input.addEventListener('input', grow);
+  setInterval(() => { if (!input.value && input.style.height !== '') grow(); }, 800);
+
+  // slash-command autocomplete
+  const CMDS = [['/new','Fresh thread'],['/goal','Standing objective'],['/tools','Hermes tool status'],['/browser','Chrome / browser op'],
+    ['/background','Async mission'],['/mission','Mission queue'],['/personality','Voice / tone overlay'],['/commands','Show commands'],
+    ['/status','Gateway status'],['/toolsets','Toolsets'],['/connectors','Connectors']];
+  let sel = 0, items = [];
+  const closeMenu = () => { menu.hidden = true; items = []; };
+  function renderMenu(){
+    const v = input.value;
+    if (!/^\/\S*$/.test(v)) return closeMenu();
+    items = CMDS.filter(c => c[0].startsWith(v.toLowerCase()));
+    if (!items.length || (items.length === 1 && items[0][0] === v)) return closeMenu();
+    sel = Math.min(sel, items.length - 1);
+    menu.innerHTML = items.map((c,i) => `<div class="slashitem${i===sel?' sel':''}" data-i="${i}" role="option"><b>${c[0]}</b><span>${c[1]}</span></div>`).join('');
+    menu.hidden = false;
+  }
+  function pick(i){ input.value = items[i][0] + ' '; closeMenu(); input.focus(); grow(); }
+  input.addEventListener('input', () => { sel = 0; renderMenu(); });
+  menu.addEventListener('mousedown', e => { const it = e.target.closest('.slashitem'); if (it){ e.preventDefault(); pick(+it.dataset.i); } });
+  input.addEventListener('keydown', e => {
+    if (e.isComposing) return;
+    if (!menu.hidden){
+      if (e.key === 'ArrowDown'){ e.preventDefault(); sel = (sel+1) % items.length; return renderMenu(); }
+      if (e.key === 'ArrowUp'){ e.preventDefault(); sel = (sel-1+items.length) % items.length; return renderMenu(); }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)){ e.preventDefault(); return pick(sel); }
+      if (e.key === 'Escape'){ e.stopPropagation(); return closeMenu(); }
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey){ e.preventDefault(); sendFromInput(); setTimeout(grow, 0); }
+  });
+  input.addEventListener('blur', () => setTimeout(closeMenu, 120));
+
+  // armed-command chip (the drawer closes after arming, so show it by the input)
+  const chip = $('#armedChip');
+  function syncChip(){ const c = input.dataset.cmd || ''; chip.hidden = !c; $('#armedName').textContent = c; }
+  new MutationObserver(syncChip).observe(input, {attributes:true, attributeFilter:['data-cmd']});
+  $('#armedX').addEventListener('click', () => { disarm(); $('#tip').textContent = defaultTip; input.focus(); });
+  syncChip();
+
+  // welcome state with starter prompts (replaces the bare placeholder)
+  const STARTERS = [['What can you do?','Capabilities overview'],['/status','Gateway & runtime'],['/tools','Connected Hermes tools'],
+    ['Summarise what you did in our last session','Recall'],];
+  const resp = $('#response');
+  const obs = new MutationObserver(() => {
+    const ph = resp.querySelector('.rplaceholder');
+    if (!ph) return;
+    obs.disconnect();
+    resp.innerHTML = `<div class="welcome"><h3>Good to see you.</h3><p>Talk to me with the mic, or type below. Slash commands work, and <kbd>⌘K</kbd> opens the Command Matrix.</p>`
+      + `<div class="starters">${STARTERS.map(s => `<button class="starter" data-s="${esc(s[0])}">${esc(s[0])}<small>${esc(s[1])}</small></button>`).join('')}</div></div>`;
+    obs.observe(resp, {childList:true});
+  });
+  obs.observe(resp, {childList:true});
+  resp.addEventListener('click', e => {
+    const b = e.target.closest('.starter'); if (!b) return;
+    input.value = b.dataset.s; $('#run').click();
+  });
+  // handle the case where the placeholder is already there (before observer attached)
+  if (resp.querySelector('.rplaceholder')) resp.appendChild(document.createComment('init'));
+
+  // keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k'){ e.preventDefault(); $('#navCmds').click(); return; }
+    if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey){ e.preventDefault(); input.focus(); input.value = '/'; renderMenu(); }
+  });
+  $('#navLogs').title = 'Action Logs';
+  input.focus();
+})();
+
+// ══════════ mic gate: Space latch · mic light · auto-close · call mode ══════════
+(() => {
+  const LS = k => 'jarvis.' + k;
+  let idleSec = parseInt(localStorage.getItem(LS('micIdle')) ?? '60', 10);
+  if (!(idleSec >= 0)) idleSec = 60;
+  let callMode = false, premuted = false, lastActive = Date.now(), pending = false;
+  const bar = $('#micbar'), word = $('#micWord'), hint = $('#micHint');
+
+  // ── chimes (soft, skipped when Jarvis is muted / in call mode) ──
+  let cctx = null;
+  function chime(up){
+    if (muted || callMode) return;
+    try {
+      cctx = cctx || new (window.AudioContext || window.webkitAudioContext)();
+      const t = cctx.currentTime, notes = up ? [660, 880] : [880, 560];
+      notes.forEach((f, i) => {
+        const o = cctx.createOscillator(), g = cctx.createGain();
+        o.type = 'sine'; o.frequency.value = f;
+        g.gain.setValueAtTime(0, t + i*.09); g.gain.linearRampToValueAtTime(.06, t + i*.09 + .015);
+        g.gain.exponentialRampToValueAtTime(.0001, t + i*.09 + .16);
+        o.connect(g).connect(cctx.destination); o.start(t + i*.09); o.stop(t + i*.09 + .18);
+      });
+    } catch(_){}
+  }
+
+  // ── tab title + favicon so the state is visible even from another window ──
+  const fav = document.createElement('link'); fav.rel = 'icon'; document.head.appendChild(fav);
+  const COLORS = {closed:'#4a5f6a', listening:'#ff5566', busy:'#ffb648', call:'#a884ff', closing:'#ff5566'};
+  const TITLES = {closed:'JARVIS · mic closed', listening:'🔴 JARVIS · listening', busy:'🟠 JARVIS · working', call:'🟣 JARVIS · call mode', closing:'🔴 JARVIS · closing…'};
+
+  function stateNow(){
+    if (callMode) return 'call';
+    if (!convo) return 'closed';
+    if (suppress || document.body.classList.contains('running') || document.body.classList.contains('speaking')) return 'busy';
+    return 'listening';
+  }
+  let shown = '';
+  function render(){
+    let st = stateNow();
+    let left = null;
+    if (st === 'listening' && idleSec > 0){
+      left = Math.ceil(idleSec - (Date.now() - lastActive) / 1000);
+      if (left <= 10) st = 'closing';
+    }
+    const key = st + ':' + left;
+    if (key === shown) return; shown = key;
+    bar.dataset.state = st;
+    document.body.classList.toggle('micopen', convo && !callMode);
+    document.body.classList.toggle('micclosed', !convo || callMode);
+    const T = {
+      closed:   ['MIC CLOSED', 'Press <kbd>Space</kbd> to open'],
+      listening:['LISTENING', 'Press <kbd>Space</kbd> to close'],
+      closing:  ['LISTENING', `Closing in ${Math.max(left,0)}s — speak to keep it open`],
+      busy:     ['PAUSED', 'Jarvis is working — mic resumes after'],
+      call:     ['CALL MODE', 'Silent · mic locked · <kbd>Alt</kbd>+<kbd>C</kbd> to exit'],
+    }[st];
+    word.textContent = T[0]; hint.innerHTML = T[1];
+    document.title = TITLES[st];
+    fav.href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="12" fill="${COLORS[st]}"/></svg>`);
+  }
+
+  function toast(msg){
+    document.querySelector('.toast')?.remove();
+    const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+    document.body.appendChild(t); setTimeout(() => t.remove(), 2600);
+  }
+
+  // ── open / close the mic ──
+  async function toggleMic(){
+    if (pending) return;
+    if (callMode){ toast('Call mode is on — press Alt+C to exit first'); return; }
+    pending = true;
+    try {
+      if (convo){ stopConvo(); chime(false); }
+      else { lastActive = Date.now(); await micToggle(); if (convo) chime(true); }
+    } finally { pending = false; render(); }
+  }
+  // clicking the Voice button should feel identical (chime + idle clock)
+  $('#mic').addEventListener('click', e => { if (callMode){ e.stopImmediatePropagation(); toast('Call mode is on — press Alt+C to exit first'); } }, true);
+  $('#mic').addEventListener('click', () => { lastActive = Date.now(); setTimeout(render, 50); });
+
+  // ── auto-close: any speech / thinking / speaking counts as activity ──
+  setInterval(() => {
+    if (convo && (spoke || suppress || document.body.classList.contains('running') || document.body.classList.contains('speaking')))
+      lastActive = Date.now();
+    if (convo && !callMode && idleSec > 0 && Date.now() - lastActive > idleSec * 1000 && !suppress){
+      stopConvo(); chime(false);
+      log('voice', 'VOICE', `mic auto-closed after ${idleSec}s of silence`);
+      toast('Mic closed — silence timeout');
+    }
+    render();
+  }, 500);
+  new MutationObserver(render).observe(document.body, {attributes:true, attributeFilter:['class']});
+  new MutationObserver(render).observe($('#mic'), {attributes:true, attributeFilter:['class']});
+
+  // ── call mode: no listening, no speaking — text only ──
+  function setCall(on){
+    if (on === callMode) return;
+    callMode = on;
+    if (on){
+      premuted = muted;
+      if (convo) stopConvo();
+      if (!muted) $('#mute').click();
+      try { speechSynth?.cancel(); } catch(_){}
+      if (player) try { player.pause(); } catch(_){}
+      log('note', 'CALL', 'call mode on — mic locked, replies are text only');
+    } else {
+      if (muted && !premuted) $('#mute').click();
+      log('note', 'CALL', 'call mode off');
+    }
+    $('#callBtn').setAttribute('aria-pressed', String(on));
+    toast(on ? 'Call mode on — silent, mic locked' : 'Call mode off');
+    shown = ''; render();
+  }
+  $('#callBtn').addEventListener('click', () => setCall(!callMode));
+
+  // ── keys: Space = latch mic, C = call mode (never while typing) ──
+  const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+  // an empty composer counts as "not typing" for Space: a leading space is meaningless there
+  const emptyComposer = () => document.activeElement === $('#input') && !$('#input').value;
+  const spaceFree = () => !typing() || emptyComposer();
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space' && !e.metaKey && !e.ctrlKey && !e.altKey && spaceFree()){
+      e.preventDefault(); e.stopPropagation();
+      if (!e.repeat){ document.activeElement?.blur?.(); toggleMic(); }
+      return;
+    }
+    // call mode: Alt+C anywhere, or plain C when not typing
+    const isC = e.code === 'KeyC';
+    if (isC && !e.repeat && !e.metaKey && !e.ctrlKey && $('#settingsOverlay').hidden && (e.altKey || !typing())){
+      e.preventDefault(); setCall(!callMode);
+    }
+  }, true);
+  document.addEventListener('keyup', e => {          // stop a focused button from "clicking" on Space release
+    if (e.code === 'Space' && spaceFree()) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+
+  // ── settings field ──
+  $('#settingsBtn').addEventListener('click', () => { $('#set-micidle').value = idleSec; });
+  $('#settingsSave').addEventListener('click', () => {
+    const v = parseInt($('#set-micidle').value, 10);
+    if (v >= 0){ idleSec = v; localStorage.setItem(LS('micIdle'), String(v)); }
+  });
+
+  $('#mic').title = 'Open / close the mic (Space)';
+  render();
+})();

@@ -9,56 +9,26 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<div class="scan"></div>
-<div class="grid-bg"></div>
 <div class="ambient a1"></div><div class="ambient a2"></div>
 
-<header class="topbar">
-  <div class="sigil"><span></span></div>
-  <div class="brandlock">
-    <div class="overline">Hermes Agent Direct Channel</div>
-    <div class="mega">JARVIS</div>
-  </div>
-  <div class="pills">
-    <div class="pill ok"><i></i><span id="top-gw">Gateway: probing</span></div>
-    <div class="pill"><i></i><span id="top-profile">Profile: default</span></div>
-    <div class="pill warn"><i></i><span id="top-voice">Voice: browser</span></div>
+<header class="menubar">
+  <div class="brand"><span class="dot"></span><b>JARVIS</b></div>
+  <nav class="menu">
+    <button class="navbtn" id="navCmds" aria-expanded="false" title="Command Matrix (⌘K)">Command Matrix</button>
+    <button class="navbtn" id="navLogs" aria-expanded="false">Action Logs</button>
+    <button class="navbtn" id="settingsBtn">Settings</button>
+  </nav>
+  <div class="menu-right">
+    <div class="pill ok" title="Gateway"><i></i><span id="top-gw">Gateway: probing</span></div>
+    <div class="pill hide-sm"><span id="top-profile">Profile: default</span></div>
+    <div class="pill warn hide-md"><i></i><span id="top-voice">Voice: browser</span></div>
+    <button id="callBtn" class="iconbtn" title="Call mode — silent, mic locked closed (Alt+C)" aria-pressed="false">📞</button>
+    <button id="mute" class="iconbtn mute on" title="Mute Jarvis speech" aria-label="Mute Jarvis">🔊</button>
   </div>
 </header>
 
-<div class="hud">
-  <section class="col left glass">
-    <header class="colhead">
-      <div class="h">Command Matrix</div>
-      <div class="sub">Click to execute · payload commands stay armed</div>
-    </header>
-
-    <div class="cmds" id="cmds">
-      <button class="cmd" data-cmd="/new"><b>/new</b><span>Fresh thread</span></button>
-      <button class="cmd" data-cmd="/goal"><b>/goal</b><span>Standing objective</span></button>
-      <button class="cmd" data-cmd="/tools"><b>/tools</b><span>Hermes tool status</span></button>
-      <button class="cmd" data-cmd="/browser"><b>/browser</b><span>Chrome / browser op</span></button>
-      <button class="cmd" data-cmd="/background"><b>/background</b><span>Async mission</span></button>
-      <button class="cmd" data-cmd="/mission"><b>/mission</b><span>Mission queue</span></button>
-      <button class="cmd" data-cmd="/personality"><b>/personality</b><span>Voice/tone overlay</span></button>
-      <button class="cmd" data-cmd="/commands"><b>/commands</b><span>Show commands</span></button>
-    </div>
-
-    <div class="toolrack">
-      <div class="lbl">Connected Hermes Tools</div>
-      <div id="toolsList" class="chips"><span class="chip ghost">loading tool matrix…</span></div>
-    </div>
-
-    <div class="uplink">
-      <div class="lbl">Pending uplink</div>
-      <div class="field">
-        <textarea id="input" rows="3" spellcheck="false" placeholder="Speak through browser voice or type a Hermes instruction. Slash commands are supported."></textarea>
-      </div>
-      <div class="tip" id="tip">Use <b>Browser Voice</b> for local speech recognition, or local Parakeet/Kokoro if installed. Try <b>/browser</b> “open Chrome and inspect the current tab”.</div>
-    </div>
-  </section>
-
-  <section class="col center">
+<main class="stage">
+  <section class="reactorpane">
     <div class="reactor" id="reactor">
       <svg viewBox="0 0 520 520" id="core" aria-label="JARVIS reactor visualizer">
         <defs>
@@ -81,59 +51,81 @@
         <circle class="orbrim" cx="260" cy="260" r="64"/>
       </svg>
       <div class="status">
-        <div class="stbrand">JARVIS CORE</div>
+        <div class="stbrand">JARVIS</div>
         <div class="stword" id="stword">STANDBY</div>
         <div class="strun" id="strun">awaiting uplink</div>
       </div>
     </div>
-
-    <div class="response glass" id="responseWrap">
-      <div class="rhead"><span>JARVIS Response</span><span class="rtag" id="rtag">IDLE</span></div>
-      <div class="rbody" id="response"><span class="rplaceholder">Standing by. Transmit an instruction.</span></div>
-    </div>
-
-    <div class="missionbar glass">
-      <button id="mic" class="ctl mic" title="Browser voice / microphone">◉ Browser Voice</button>
-      <button id="run" class="ctl run" title="Send (⌘↵)">Transmit to JARVIS ▸</button>
-      <button id="showCommands" class="ctl aux">Commands</button>
-      <button id="missionBtn" class="ctl aux">Mission</button>
-      <button id="mute" class="ctl mute on" title="Mute Jarvis speech" aria-label="Mute Jarvis">🔊</button>
-      <button id="clearBtn" class="ctl aux">Clear</button>
-      <button id="settingsBtn" class="ctl aux">⚙ Settings</button>
+    <div class="micbar" id="micbar" data-state="closed" role="status" aria-live="polite">
+      <span class="bulb" id="bulb"></span>
+      <div class="miclabel"><b id="micWord">MIC CLOSED</b><span id="micHint">Press <kbd>Space</kbd> to open</span></div>
     </div>
   </section>
 
-  <section class="col right glass">
-    <header class="colhead row">
-      <div class="h sm">Action Log</div>
-      <div class="live" id="live">LIVE TELEMETRY</div>
-    </header>
-
-    <div class="sysgrid">
-      <div class="sysrow"><span>Gateway</span><b id="sy-gw" class="ok">online</b></div>
-      <div class="sysrow"><span>Brain</span><b id="sy-brain">—</b></div>
-      <div class="sysrow"><span>Voice</span><b id="sy-voice">—</b></div>
-      <div class="sysrow"><span>Profile</span><b id="sy-profile">default</b></div>
-      <div class="sysrow"><span>Runtime</span><b id="sy-runtime">—</b></div>
-      <div class="sysrow"><span>Uplink</span><b id="sy-clock">—</b></div>
-    </div>
-
-    <div class="missionPanel">
-      <div class="log-lbl">Mission controls</div>
-      <div class="miniBtns">
-        <button data-quick="/status">Status</button>
-        <button data-quick="/tools">Tools</button>
-        <button data-quick="/toolsets">Toolsets</button>
-        <button data-quick="/connectors">Connectors</button>
+  <section class="chat card" id="responseWrap">
+    <div class="chathead"><span>Conversation</span><span class="rtag" id="rtag">IDLE</span></div>
+    <div class="rbody" id="response" aria-live="polite"><span class="rplaceholder">Standing by. Transmit an instruction.</span></div>
+    <div class="composer">
+      <div class="armedchip" id="armedChip" hidden><span>Armed</span><b id="armedName"></b><button id="armedX" aria-label="Disarm command">✕</button></div>
+      <div class="slashmenu" id="slashMenu" role="listbox" hidden></div>
+      <div class="field">
+        <textarea id="input" rows="2" spellcheck="false" placeholder="Message JARVIS…   ( / for commands )"></textarea>
       </div>
+      <div class="actions">
+        <button id="mic" class="ctl mic" title="Voice / microphone">◉ Browser Voice</button>
+        <button id="clearBtn" class="ctl aux" title="Clear conversation">Clear</button>
+        <button id="run" class="ctl run" title="Send (⌘↵)">Send ▸</button>
+      </div>
+      <div class="tip" id="tip">Use <b>Browser Voice</b> for local speech recognition, or local Parakeet/Kokoro if installed. Try <b>/browser</b> “open Chrome and inspect the current tab”.</div>
     </div>
-
-    <div class="log-lbl">Event stream</div>
-    <div class="log" id="log"></div>
   </section>
-</div>
+</main>
 
-<div class="brandmark">HERMES · JARVIS OS</div>
+<div class="scrim" id="scrim" hidden></div>
+
+<!-- Command Matrix drawer -->
+<aside class="drawer left-drawer card" id="drawerCmds" hidden>
+  <div class="drawerhead"><div><div class="h">Command Matrix</div><div class="sub">Click to arm · the command stays armed for your next message</div></div><button class="iconbtn" data-close aria-label="Close">✕</button></div>
+  <div class="cmds" id="cmds">
+    <button class="cmd" data-cmd="/new"><b>/new</b><span>Fresh thread</span></button>
+    <button class="cmd" data-cmd="/goal"><b>/goal</b><span>Standing objective</span></button>
+    <button class="cmd" data-cmd="/tools"><b>/tools</b><span>Hermes tool status</span></button>
+    <button class="cmd" data-cmd="/browser"><b>/browser</b><span>Chrome / browser op</span></button>
+    <button class="cmd" data-cmd="/background"><b>/background</b><span>Async mission</span></button>
+    <button class="cmd" data-cmd="/mission"><b>/mission</b><span>Mission queue</span></button>
+    <button class="cmd" data-cmd="/personality"><b>/personality</b><span>Voice / tone overlay</span></button>
+    <button class="cmd" data-cmd="/commands"><b>/commands</b><span>Show commands</span></button>
+  </div>
+  <div class="drawerrow">
+    <button id="showCommands" class="ctl aux">List commands</button>
+    <button id="missionBtn" class="ctl aux">Mission queue</button>
+  </div>
+  <div class="toolrack">
+    <div class="lbl">Connected Hermes Tools</div>
+    <div id="toolsList" class="chips"><span class="chip ghost">loading tool matrix…</span></div>
+  </div>
+</aside>
+
+<!-- Action Logs drawer -->
+<aside class="drawer right-drawer card" id="drawerLogs" hidden>
+  <div class="drawerhead"><div><div class="h">Action Logs</div><div class="live" id="live">LIVE TELEMETRY</div></div><button class="iconbtn" data-close aria-label="Close">✕</button></div>
+  <div class="sysgrid">
+    <div class="sysrow"><span>Gateway</span><b id="sy-gw" class="ok">online</b></div>
+    <div class="sysrow"><span>Brain</span><b id="sy-brain">—</b></div>
+    <div class="sysrow"><span>Voice</span><b id="sy-voice">—</b></div>
+    <div class="sysrow"><span>Profile</span><b id="sy-profile">default</b></div>
+    <div class="sysrow"><span>Runtime</span><b id="sy-runtime">—</b></div>
+    <div class="sysrow"><span>Uplink</span><b id="sy-clock">—</b></div>
+  </div>
+  <div class="miniBtns">
+    <button data-quick="/status">Status</button>
+    <button data-quick="/tools">Tools</button>
+    <button data-quick="/toolsets">Toolsets</button>
+    <button data-quick="/connectors">Connectors</button>
+  </div>
+  <div class="log-lbl">Event stream</div>
+  <div class="log" id="log"></div>
+</aside>
 
 <div id="settingsOverlay" class="settings-overlay" hidden>
   <div class="settings-panel glass">
@@ -150,6 +142,9 @@
       </label>
       <label class="sfield">Working directory
         <input id="set-workdir" type="text" placeholder="~">
+      </label>
+      <label class="sfield">Auto-close mic after silence (seconds, 0 = never)
+        <input id="set-micidle" type="number" min="0" max="3600" step="5">
       </label>
       <p class="snote">Changes apply to the next request. The working directory must exist on disk.</p>
     </div>
