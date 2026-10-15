@@ -157,9 +157,11 @@ function handle(ev){
       setState('done', 'COMPLETE', (ev.ms!=null?`${ev.ms}ms`:'') );
       setTag('done', 'COMPLETE');
       log('complete', 'COMPLETE', ev.ms!=null?`run completed in ${ev.ms}ms`:'run completed');
-      if (answer.trim()) history.push({user: currentUser, assistant: answer});
+      const spoken = answer;
+      if (spoken.trim()) history.push({user: currentUser, assistant: spoken});
+      answer = ''; currentUser = '';
       renderConversation(true);
-      speakDone = speakThisRun ? speak(answer) : Promise.resolve();
+      speakDone = speakThisRun ? speak(spoken) : Promise.resolve();
       break;
     case 'error':
       setState('error', 'FAULT', ev.message?.slice(0,40) || 'error');
