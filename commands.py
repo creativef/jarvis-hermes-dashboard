@@ -19,7 +19,7 @@ import uuid
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
 _LOCK = threading.Lock()
-_DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "missions": []}
+_DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "missions": [], "session": None}
 
 
 def _load_unlocked():
@@ -60,6 +60,14 @@ def update_state(mutator):
         result = mutator(d)
         _save_unlocked(d)
         return result
+
+
+def set_session(sid):
+    update_state(lambda d: d.update(session=sid))
+
+
+def get_session():
+    return load().get("session")
 
 
 def context_block():

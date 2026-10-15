@@ -96,8 +96,9 @@ def persona():
         base = ""
     extra = commands.context_block()      # profile / goal / personality / queue
     return "\n\n".join(x for x in (base, extra) if x)
-# One continuing Hermes conversation until the user hits /new.
-SESSION = {"id": None}
+# One continuing Hermes conversation until the user hits /new. Persisted across
+# restarts so the assistant remembers the prior conversation.
+SESSION = {"id": commands.get_session()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -246,11 +247,13 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/new":
             runtime.cancel_active()
             SESSION["id"] = None
+            commands.set_session(None)
             return self._json({"ok": True})
 
         if p == "/api/cancel":
             stopped = runtime.cancel_active()
             SESSION["id"] = None
+            commands.set_session(None)
             return self._json({"ok": True, "stopped": stopped})
 
         if p == "/api/run":
@@ -322,8 +325,10 @@ class Handler(BaseHTTPRequestHandler):
                 # run after it with --resume <half-born session>.
                 if ev.get("t") == "complete" and runtime.valid_session(sid):
                     SESSION["id"] = sid
+                    commands.set_session(sid)
                 if ev.get("t") == "error":
                     SESSION["id"] = None       # drop a bad/stale session so the next run is fresh
+                    commands.set_session(None)
                 emit(ev)
         except (BrokenPipeError, ConnectionResetError):
             pass                                          # client navigated away

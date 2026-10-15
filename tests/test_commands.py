@@ -16,6 +16,16 @@ class StateTests(unittest.TestCase):
                 d = commands.load()
             self.assertEqual(d["profile"], ["likes tea"])
 
+    def test_session_persistence(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = pathlib.Path(td) / "state.json"
+            with mock.patch.object(commands, "STATE_FILE", state):
+                self.assertIsNone(commands.get_session())
+                commands.set_session("20260808_031038_0ecb14")
+                self.assertEqual(commands.get_session(), "20260808_031038_0ecb14")
+                commands.set_session(None)
+                self.assertIsNone(commands.get_session())
+
     def test_reconcile_orphaned_missions(self):
         with tempfile.TemporaryDirectory() as td:
             state = pathlib.Path(td) / "state.json"
