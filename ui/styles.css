@@ -29,3 +29,34 @@ body{background:radial-gradient(1000px 620px at 52% 18%,rgba(9,91,112,.42),trans
 ::-webkit-scrollbar{width:7px;height:7px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--edge);border-radius:10px}
 @media (max-width:1320px){.topbar{height:116px;grid-template-columns:96px 1fr}.pills{display:none}.sigil{width:86px;height:86px}.hud{height:calc(100% - 116px);grid-template-columns:320px 1fr 360px;gap:14px;padding:14px}.left,.right{padding:20px}.mega{font-size:64px}.reactor:before{display:none}.ctl.run{min-width:150px}.cmds{gap:10px}.cmd{padding:14px 12px}.ctl.mute,#clearBtn{display:none}}
 @media (max-width:900px){html,body{height:auto;overflow:auto}.topbar{height:auto;grid-template-columns:60px minmax(0,1fr);padding:12px 14px;gap:12px}.sigil{width:52px;height:52px}.mega{font-size:38px;letter-spacing:.3em}.overline{font-size:10px;letter-spacing:.3em}.pills{display:none}.hud{height:auto;display:flex;flex-direction:column;gap:14px;padding:12px}.left,.right{width:100%;overflow:visible}.reactor{display:none}.center{width:100%;gap:12px}.response,.missionbar{max-width:100%}.missionbar{flex-wrap:wrap}.brandmark{display:none}}
+
+/* ── layout polish (alignment pass) ───────────────────────── */
+/* stray decorative label that sat on top of the STANDBY readout */
+.reactor:before{content:none!important;display:none!important}
+
+/* one-line panel titles so both side panels line up */
+.colhead .h{white-space:nowrap}
+.colhead .sub{line-height:1.5}
+
+/* action bar: never wrap or clip a label; wrap whole buttons if space runs out */
+.missionbar{flex-wrap:wrap;justify-content:center;align-items:stretch}
+.missionbar{gap:6px}
+.missionbar .ctl{white-space:nowrap;flex:1 1 auto;display:flex;align-items:center;justify-content:center;padding:11px 9px;letter-spacing:.04em;line-height:1.2}
+.missionbar .ctl.run{flex:2 1 auto}
+.missionbar .ctl.mute{flex:0 0 auto}
+
+/* mid-size laptops: give the center column room instead of the side panels */
+@media (min-width:1321px) and (max-width:1600px){
+  .hud{grid-template-columns:340px minmax(0,1fr) 380px;gap:16px}
+}
+/* short viewports: compact command cards so the input box stays on screen */
+@media (max-height:900px){
+  .cmds{gap:10px}
+  .cmd{padding:11px 14px}
+    .brandmark{display:none}
+}
+@media (max-width:1320px){
+  .missionbar .ctl.run{min-width:0}
+  .missionbar .ctl{padding:10px 7px;letter-spacing:.02em}
+  .colhead .h{font-size:clamp(20px,2vw,26px)}
+}

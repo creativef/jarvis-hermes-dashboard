@@ -29,7 +29,7 @@
 <div class="hud">
   <section class="col left glass">
     <header class="colhead">
-      <div class="h">Command<br>Matrix</div>
+      <div class="h">Command Matrix</div>
       <div class="sub">Click to execute · payload commands stay armed</div>
     </header>
 
@@ -52,9 +52,9 @@
     <div class="uplink">
       <div class="lbl">Pending uplink</div>
       <div class="field">
-        <textarea id="input" rows="4" spellcheck="false" placeholder="Speak through browser voice or type a Hermes instruction. Slash commands are supported."></textarea>
+        <textarea id="input" rows="3" spellcheck="false" placeholder="Speak through browser voice or type a Hermes instruction. Slash commands are supported."></textarea>
       </div>
-      <div class="tip" id="tip">Use <b>Browser Voice</b> for local speech recognition, or server ElevenLabs if configured. Try <b>/browser</b> “open Chrome and inspect the current tab”.</div>
+      <div class="tip" id="tip">Use <b>Browser Voice</b> for local speech recognition, or local Parakeet/Kokoro if installed. Try <b>/browser</b> “open Chrome and inspect the current tab”.</div>
     </div>
   </section>
 
@@ -95,8 +95,8 @@
     <div class="missionbar glass">
       <button id="mic" class="ctl mic" title="Browser voice / microphone">◉ Browser Voice</button>
       <button id="run" class="ctl run" title="Send (⌘↵)">Transmit to JARVIS ▸</button>
-      <button id="showCommands" class="ctl aux">Show Commands</button>
-      <button id="missionBtn" class="ctl aux">Mission Control</button>
+      <button id="showCommands" class="ctl aux">Commands</button>
+      <button id="missionBtn" class="ctl aux">Mission</button>
       <button id="mute" class="ctl mute on" title="Mute Jarvis speech" aria-label="Mute Jarvis">🔊</button>
       <button id="clearBtn" class="ctl aux">Clear</button>
       <button id="settingsBtn" class="ctl aux">⚙ Settings</button>
