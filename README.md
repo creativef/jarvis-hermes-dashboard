@@ -180,6 +180,17 @@ hermes tools list
 
 Then restart the dashboard and click `/new`.
 
+## Tests
+
+Run the suite with the stdlib `unittest` runner (no extra dependencies):
+
+```
+python3 -m unittest discover -s tests -t . -v
+```
+
+`tests/fake_hermes` is a stand-in CLI that replays canned `stream-json`, so the
+integration test exercises the subprocess machinery without a live Hermes model.
+
 ## Credits and license
 
 Originally inspired by [`Itsme23476/jarvis-os`](https://github.com/Itsme23476/jarvis-os), redesigned and adapted to use Hermes Agent as its runtime. Released under the MIT License; see [LICENSE](LICENSE).

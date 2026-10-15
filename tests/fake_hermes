@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Stand-in for the Hermes CLI, used only by the test suite.
+
+Handles the three invocations the dashboard makes (`--version`, `tools list`,
+`chat --format stream-json --query-file -`) and replays canned NDJSON so the
+subprocess machinery is exercised without a live model. When FAKE_HERMES_LOG is
+set, it appends a JSON record of argv + stdin so tests can assert what the
+runtime actually invoked.
+"""
+import json
+import os
+import sys
+
+
+def _log(entry):
+    path = os.environ.get("FAKE_HERMES_LOG")
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
+def main(argv):
+    if argv[:1] == ["--version"]:
+        print("Hermes Agent v0.22.2 (fake)")
+        return 0
+    if argv[:2] == ["tools", "list"]:
+        print("tool enabled: terminal")
+        print("tool enabled: file")
+        return 0
+    if argv[:1] == ["chat"]:
+        prompt = sys.stdin.read()
+        _log({"argv": argv, "prompt": prompt})
+        session_id = os.environ.get("FAKE_HERMES_SESSION", "20260101_000000_test00")
+        frames = (
+            {"type": "system", "subtype": "init", "model": "fake", "session_id": session_id},
+            {"type": "tool_use", "name": "terminal", "input": {"command": "echo hi"}},
+            {"type": "tool_result", "name": "terminal", "output": "hi", "is_error": False, "duration_ms": 5},
+            {"type": "text", "text": "hello"},
+            {"type": "result", "session_id": session_id, "exit_code": 0, "text": "hello",
+             "tokens": {"input": 10, "output": 2, "total": 12, "cache_read": 0, "cache_write": 0}},
+        )
+        for frame in frames:
+            print(json.dumps(frame), flush=True)
+        return 0
+    print("fake hermes: unknown args", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
