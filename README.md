@@ -16,6 +16,7 @@ A local, voice-enabled JARVIS dashboard for [Hermes Agent](https://github.com/No
 - Access to the active Hermes profile's tools, skills, browser, memory, and MCP integrations
 - Local-only HTTP server bound to `127.0.0.1`
 - Fully offline (self-hosted fonts; no CDN requests)
+- In-browser settings panel (permission, idle timeout, working directory)
 - Durable server error log at `logs/server.log`
 
 ## Prerequisites
