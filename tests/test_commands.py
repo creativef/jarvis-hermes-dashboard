@@ -35,5 +35,13 @@ class StateTests(unittest.TestCase):
             self.assertEqual(by_id["def"]["status"], "done")
 
 
+class BackgroundJobTests(unittest.TestCase):
+    def test_running_background(self):
+        self.assertFalse(commands.running_background())
+        with mock.patch.dict(commands.JOBS, {"abc": {"id": "abc", "status": "running"}}, clear=True):
+            self.assertTrue(commands.running_background())
+        self.assertFalse(commands.running_background())
+
+
 if __name__ == "__main__":
     unittest.main()

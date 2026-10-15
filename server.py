@@ -170,6 +170,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._json({"error": "invalid host"}, 403)
         p = urlparse(self.path).path
+        if p == "/api/health":
+            # unauthenticated readiness probe (for launchd / monitoring)
+            return self._json({"ok": True, "runtime": runtime.runtime_kind()})
         if p == "/api/status":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -285,6 +288,13 @@ class Handler(BaseHTTPRequestHandler):
         def emit(ev):
             self.wfile.write((json.dumps(ev) + "\n").encode())
             self.wfile.flush()
+
+        # Foreground always wins: stop any in-flight background mission so this
+        # request runs now instead of silently blocking behind it on the shared
+        # Hermes execution lock.
+        if commands.running_background():
+            runtime.cancel_active()
+            emit(dict(t="note", message="Interrupted a background mission to answer you."))
 
         # ── the command matrix: /new /profile /goal /personality /kanban /mission /background /tools /status /browser
         cmd = commands.handle(

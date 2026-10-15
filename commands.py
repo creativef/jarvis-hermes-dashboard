@@ -119,6 +119,11 @@ def jobs_snapshot():
         return [dict(j) for j in JOBS.values()]
 
 
+def running_background():
+    with _JOB_LOCK:
+        return any(j["status"] == "running" for j in JOBS.values())
+
+
 def take_finished():
     with _JOB_LOCK:
         done = [dict(j) for j in JOBS.values() if j["status"] == "done"]

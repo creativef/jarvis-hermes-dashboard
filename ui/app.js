@@ -501,6 +501,7 @@ document.addEventListener('keydown', e => {
 $('#mute').onclick = () => {
   muted = !muted; const b=$('#mute');
   b.textContent = muted?'🔇':'🔊'; b.classList.toggle('on',!muted); b.classList.toggle('off',muted);
+  b.setAttribute('aria-label', muted ? 'Unmute Jarvis' : 'Mute Jarvis');
   if (muted && player) player.pause();
 };
 $('#input').addEventListener('keydown', e => {
