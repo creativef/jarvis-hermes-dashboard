@@ -56,6 +56,25 @@ EXECUTION_LOCK = threading.RLock()
 _ACTIVE_PROC = None
 _ACTIVE_LOCK = threading.Lock()
 
+# Runtime probes (`hermes --version`, `hermes tools list`) are subprocess spawns
+# that can each take tens of seconds; cache them briefly so every request does
+# not re-pay that cost.
+_TTL_CACHE = {}
+_TTL_LOCK = threading.Lock()
+_PROBE_TTL = 60.0
+
+
+def _ttl_cached(key, ttl, fn, *args):
+    now = time.monotonic()
+    with _TTL_LOCK:
+        hit = _TTL_CACHE.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    value = fn(*args)
+    with _TTL_LOCK:
+        _TTL_CACHE[key] = (now, value)
+    return value
+
 
 def cancel_active():
     """Terminate the currently running Hermes child process, if any."""
@@ -65,9 +84,19 @@ def cancel_active():
         return False
     try:
         proc.terminate()
-        return True
     except Exception:
         return False
+    # Escalate to SIGKILL if the process ignores SIGTERM (e.g. a hung tool call),
+    # so the execution lock is never held hostage by a process that won't die.
+    def _escalate():
+        time.sleep(2.0)
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+    threading.Thread(target=_escalate, daemon=True).start()
+    return True
 
 
 def valid_session(sid):
@@ -106,7 +135,7 @@ def runtime_kind():
         return "mock"
     if RUNTIME == "hermes":
         return "hermes"
-    ok, _ = _can_launch_hermes()
+    ok, _ = _ttl_cached("hermes_version", _PROBE_TTL, _can_launch_hermes)
     return "hermes" if ok else "mock"
 
 
@@ -144,6 +173,10 @@ def build_command(message, session_id=None):
 
 def hermes_tools_snapshot(limit=36):
     """Return a compact list of enabled/visible Hermes toolsets/tools for UI status."""
+    return _ttl_cached("tools_snapshot", _PROBE_TTL, _tools_snapshot_raw, limit)
+
+
+def _tools_snapshot_raw(limit=36):
     try:
         base = _hermes_base()
         proc = subprocess.run(base + ["tools", "list"], cwd=WORKDIR, text=True,
