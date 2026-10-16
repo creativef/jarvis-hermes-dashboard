@@ -1077,7 +1077,7 @@ setInterval(async () => {
   });
 })();
 
-// ══════════ living orb: breathes idle · tightens to your voice · vibrates to Jarvis ══════════
+// ══════════ living orb: character states · radial waveform · comet/ring · particles · live caption ══════════
 (() => {
   const cv = document.getElementById('orbCanvas'); if (!cv) return;
   const ctx = cv.getContext('2d');
@@ -1090,13 +1090,13 @@ setInterval(async () => {
   };
   new ResizeObserver(fit).observe(cv); fit();
 
-  // ── input levels ──
+  // ── input levels & live caption ──
   let micLvl = 0;                                   // fed by the existing mic meter
   const prevMeter = window.meter;
   if (typeof prevMeter === 'function') window.meter = rms => { micLvl = Math.min(1, rms * 7); return prevMeter(rms); };
 
   let outCtx = null, outAn = null, outData = null, wired = null;
-  function outLevel(){                              // real loudness of Jarvis's voice
+  function outLevel(){                              // real loudness of Atlas's voice
     try {
       if (player && wired !== player){
         outCtx = outCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -1114,22 +1114,136 @@ setInterval(async () => {
     return null;
   }
 
+  // ── orb visualizer style (orb | waveform | ring) ──
+  let orbStyle = 'orb';
+  try { const sv = localStorage.getItem('jarvis.orbStyle'); if (/^(orb|waveform|ring)$/.test(sv || '')) orbStyle = sv; } catch (_) {}
+  window.AtlasOrb = {
+    getStyle: () => orbStyle,
+    setStyle(st){
+      if (!/^(orb|waveform|ring)$/.test(st)) return;
+      orbStyle = st;
+      try { localStorage.setItem('jarvis.orbStyle', st); } catch (_) {}
+      document.documentElement.dataset.orbStyle = st;
+      document.querySelectorAll('[data-orb-style]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.orbStyle === st)));
+    },
+    flash(kind){
+      ringFlash = {kind: kind || 'done', born: performance.now()};
+    },
+    bargeIn(){
+      bargeUntil = performance.now() + 450;
+    },
+    setCaption(text, confirmed = false, kind = 'VOICE'){
+      const box = document.getElementById('orbCaption');
+      const kEl = document.getElementById('ocKind'), tEl = document.getElementById('ocText');
+      if (!box || !tEl) return;
+      clearTimeout(capTimer);
+      if (!text){ box.hidden = true; return; }
+      box.hidden = false;
+      box.classList.toggle('confirmed', !!confirmed);
+      if (kEl) kEl.textContent = kind;
+      tEl.textContent = text;
+      capTimer = setTimeout(() => { box.hidden = true; }, confirmed ? 4200 : 8000);
+    },
+    setTool(label){
+      const el = document.getElementById('stTool');
+      if (!el) return;
+      if (!label){ el.hidden = true; el.textContent = ''; }
+      else { el.hidden = false; el.textContent = label; }
+    }
+  };
+  document.documentElement.dataset.orbStyle = orbStyle;
+
+  let capTimer = null, ringFlash = null, bargeUntil = 0, wakingUntil = 0, doneSweepAt = 0, errShakeAt = 0;
+  let prevState = 'idle', prevMicOpen = false;
+
+  // Watch #strun for browser speech partial/final transcripts and tool usage
+  const strunEl = document.getElementById('strun');
+  if (strunEl){
+    new MutationObserver(() => {
+      const txt = strunEl.textContent || '';
+      if (txt.startsWith('HEARD: ')){
+        const phrase = txt.slice(7).trim();
+        if (phrase) window.AtlasOrb.setCaption(phrase, false, 'HEARING');
+      } else if (txt === 'TRANSCRIBING' || txt === '…'){
+        window.AtlasOrb.setCaption('Transcribing speech…', false, 'VOICE');
+      }
+    }).observe(strunEl, {childList: true, characterData: true, subtree: true});
+  }
+
+  // Hook into handle() to surface tool badges under orb and done/error flashes
+  const origHandleOrb = handle;
+  handle = ev => {
+    try {
+      if (ev.t === 'tool'){
+        if (ev.phase === 'use'){
+          const raw = String(ev.name || 'tool').toLowerCase();
+          const friendly = /browser|chrome|web/.test(raw) ? 'browser'
+                         : /read|write|patch|file|search/.test(raw) ? 'files'
+                         : /search|extract/.test(raw) ? 'search'
+                         : /terminal|exec|bash/.test(raw) ? 'terminal'
+                         : raw.slice(0, 16);
+          window.AtlasOrb.setTool(`▸ ${friendly}`);
+        } else {
+          window.AtlasOrb.setTool('');
+        }
+      } else if (ev.t === 'delta' && !firstDelta){
+        window.AtlasOrb.setTool('');
+      } else if (ev.t === 'complete'){
+        window.AtlasOrb.setTool('');
+        doneSweepAt = performance.now();
+        window.AtlasOrb.flash('done');
+      } else if (ev.t === 'error'){
+        window.AtlasOrb.setTool('');
+        errShakeAt = performance.now();
+        window.AtlasOrb.flash('error');
+      }
+    } catch (_) {}
+    return origHandleOrb(ev);
+  };
+
+  // Watch action log for transcribed voice confirmation or barge-in
+  const logEl = document.getElementById('log');
+  if (logEl){
+    new MutationObserver(muts => {
+      for (const m of muts){
+        for (const n of m.addedNodes){
+          if (!(n instanceof HTMLElement)) continue;
+          const msg = n.querySelector('.msg')?.textContent || '';
+          const tm = /transcribed(?: by Parakeet in \d+ms)?:\s*"([^"]+)"/i.exec(msg);
+          if (tm) window.AtlasOrb.setCaption(tm[1], true, 'CONFIRMED');
+        }
+      }
+    }).observe(logEl, {childList: true});
+  }
+
+  // ── particles (36 orbital motes) ──
+  const PARTS = Array.from({length: 36}, (_, i) => ({
+    a: (i / 36) * Math.PI * 2,
+    dist: 0.24 + (i % 7) * 0.032,
+    spd: (i % 2 ? 1 : -1) * (0.18 + (i % 5) * 0.05),
+    sz: 1.2 + (i % 3) * 0.65,
+    ph: i * 1.1
+  }));
+
   // ── look per state ──
   const LOOK = {
     idle:      {c:[79,170,245],  glow:.35, r:.19},
-    listening: {c:[79,235,230],  glow:.65, r:.20},
-    speaking:  {c:[168,132,255], glow:.75, r:.20},
-    thinking:  {c:[255,182,72],  glow:.55, r:.19},
-    error:     {c:[255,107,120], glow:.6,  r:.19},
-    done:      {c:[62,232,168],  glow:.55, r:.19},
+    waking:    {c:[110,245,255], glow:.78, r:.18},
+    listening: {c:[79,235,230],  glow:.68, r:.20},
+    speaking:  {c:[168,132,255], glow:.78, r:.20},
+    thinking:  {c:[255,182,72],  glow:.58, r:.19},
+    waiting:   {c:[255,182,72],  glow:.72, r:.195},
+    error:     {c:[255,107,120], glow:.65, r:.19},
+    done:      {c:[62,232,168],  glow:.62, r:.195},
+    call:      {c:[130,115,175], glow:.18, r:.175},
   };
   const cur = {c:[79,170,245], glow:.35, r:.19, lvl:0, spin:0};
-  // orb colours come from the active theme (--orb-* variables), so every theme has its own palette
   const rgbVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim().split(',').map(Number);
   const readLook = () => {
     const src = {idle:'--orb-idle', listening:'--orb-listen', speaking:'--orb-speak', thinking:'--orb-think'};
     for (const k in src){ const v = rgbVar(src[k]); if (v.length === 3 && v.every(Number.isFinite)) LOOK[k].c = v; }
-    const st = document.querySelector('.stage');                 // layouts shrink the canvas, so they also scale the orb
+    LOOK.waiting.c = LOOK.thinking.c.slice();
+    const st = document.querySelector('.stage');
     const sc = parseFloat(st && getComputedStyle(st).getPropertyValue('--orb-scale'));
     orbScale = Number.isFinite(sc) && sc > 0 ? sc : 1;
   };
@@ -1140,55 +1254,227 @@ setInterval(async () => {
   const ripples = []; let lastRip = 0;
   let t0 = performance.now();
 
+  function resolveState(now){
+    const cl = document.body.classList;
+    const callOn = document.getElementById('callBtn')?.getAttribute('aria-pressed') === 'true'
+                || document.getElementById('micbar')?.dataset.state === 'call';
+    const micOpen = cl.contains('micopen');
+    if (micOpen && !prevMicOpen){
+      wakingUntil = now + 650;
+      ripples.push({born: now, dir: -1, a: 0.65});
+    }
+    prevMicOpen = micOpen;
+    if (cl.contains('speaking') && micLvl > 0.25) bargeUntil = now + 420;
+
+    let st = 'idle';
+    if (callOn) st = 'call';
+    else if (window.__approvalOpen || document.getElementById('micbar')?.dataset.state === 'ask') st = 'waiting';
+    else if (cl.contains('error')) st = 'error';
+    else if (cl.contains('speaking')) st = 'speaking';
+    else if (now < wakingUntil) st = 'waking';
+    else if (cl.contains('listening')) st = 'listening';
+    else if (cl.contains('running')) st = 'thinking';
+    else if (cl.contains('done')) st = 'done';
+
+    document.body.classList.toggle('waiting', st === 'waiting');
+    document.body.classList.toggle('callmode', st === 'call');
+    if (st !== prevState){
+      if (st === 'done') doneSweepAt = now;
+      if (st === 'error') errShakeAt = now;
+      prevState = st;
+    }
+    return st;
+  }
+
   function frame(now){
     requestAnimationFrame(frame);
-    if (!W) return;
-    const t = (now - t0) / 1000, cl = document.body.classList;
-    const state = cl.contains('error') ? 'error'
-                : cl.contains('speaking') ? 'speaking'
-                : cl.contains('listening') ? 'listening'
-                : cl.contains('running') ? 'thinking'
-                : cl.contains('done') ? 'done' : 'idle';
-    const L = LOOK[state];
+    if (document.hidden || !W) return;
+    const t = (now - t0) / 1000;
+    const state = resolveState(now);
+    const L = LOOK[state] || LOOK.idle;
 
     // target level for this state
     let target = 0;
     if (state === 'speaking'){
       const o = outLevel();
-      target = o != null ? o : 0.35 + 0.25 * Math.sin(t * 9) * Math.sin(t * 3.1) + 0.12 * Math.sin(t * 17);
+      target = o != null ? o : 0.38 + 0.26 * Math.sin(t * 9) * Math.sin(t * 3.1) + 0.14 * Math.sin(t * 17);
     } else if (state === 'listening'){
-      target = micLvl;
+      target = Math.max(micLvl, 0.08 + 0.05 * Math.sin(t * 4.2));
     } else if (state === 'thinking'){
-      target = 0.18 + 0.1 * Math.sin(t * 2.4);
+      target = 0.04;                                // surface goes still in thinking
+    } else if (state === 'waiting'){
+      const hb = Math.pow(Math.max(0, Math.sin(t * 2.7)), 3);
+      target = hb * 0.38;
+    } else if (state === 'waking'){
+      target = 0.32;
     }
-    micLvl *= 0.9;                                  // decay when the meter goes quiet
-    const k = target > cur.lvl ? 0.35 : 0.08;       // fast attack, slow release
+    micLvl *= 0.9;
+    const k = target > cur.lvl ? 0.35 : 0.08;
     cur.lvl = mix(cur.lvl, Math.max(0, target), k);
-    for (let i = 0; i < 3; i++) cur.c[i] = mix(cur.c[i], L.c[i], 0.06);
-    cur.glow = mix(cur.glow, L.glow, 0.06); cur.r = mix(cur.r, L.r, 0.06);
-    cur.spin += (state === 'thinking' ? 0.9 : 0.15) / 60;
+    for (let i = 0; i < 3; i++) cur.c[i] = mix(cur.c[i], L.c[i], 0.08);
+    cur.glow = mix(cur.glow, L.glow, 0.08); cur.r = mix(cur.r, L.r, 0.08);
+    cur.spin += (state === 'thinking' ? 1.35 : state === 'listening' ? 0.35 : 0.14) / 60;
 
-    const S = Math.min(W, H), cx = W / 2, cy = H / 2;
-    const breathe = reduce ? 0 : Math.sin(t * 1.5) * 0.025;
-    // listening: orb tightens as you speak; speaking: swells with the voice
+    const S = Math.min(W, H);
+    let cx = W / 2, cy = H / 2;
+    // error brief horizontal shake
+    if (now - errShakeAt < 420 && !reduce){
+      const decay = 1 - (now - errShakeAt) / 420;
+      cx += Math.sin((now - errShakeAt) * 0.09) * 9 * decay;
+    }
+    // slow 4s breathing in idle
+    const breathe = reduce ? 0 : (state === 'thinking' ? 0 : Math.sin(t * (Math.PI / 2)) * 0.028);
     let R = S * cur.r * orbScale * (1 + breathe);
-    if (state === 'listening') R *= 1 - cur.lvl * 0.16;
-    else if (state === 'speaking') R *= 1 + cur.lvl * 0.14;
+    if (state === 'waking') R *= 0.94;              // rings tighten ~6% on wake
+    else if (state === 'listening') R *= 1 - cur.lvl * 0.12;
+    else if (state === 'speaking') R *= 1 + cur.lvl * 0.15;
+    else if (state === 'waiting') R *= 1 + cur.lvl * 0.10;
+    if (now < bargeUntil) R *= 0.86;                // barge-in catch & shrink
+
     const [r, g, b] = cur.c.map(Math.round), col = a => `rgba(${r},${g},${b},${a})`;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
 
+    // ── Waveform bar mode (suits wall display or minimalists) ──
+    if (orbStyle === 'waveform'){
+      const bars = 32, bw = Math.min(W * 0.72, 360), bh = S * 0.28, x0 = cx - bw / 2;
+      const gr = ctx.createRadialGradient(cx, cy, 10, cx, cy, S * 0.45);
+      gr.addColorStop(0, col(0.22 * cur.glow)); gr.addColorStop(1, col(0));
+      ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
+      for (let i = 0; i < bars; i++){
+        const u = i / (bars - 1) - 0.5;
+        const env = Math.cos(u * Math.PI);
+        const wave = Math.abs(Math.sin(t * (state === 'speaking' ? 8 : 3.2) + i * 0.45));
+        const h = Math.max(4, env * bh * (0.14 + cur.lvl * 0.85 * wave + (state === 'thinking' ? 0.18 * Math.sin(t * 5 + i * 0.3) : 0)));
+        const x = x0 + i * (bw / bars);
+        ctx.fillStyle = col(0.45 + env * 0.45);
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(x, cy - h / 2, (bw / bars) * 0.64, h, 3) : ctx.rect(x, cy - h / 2, (bw / bars) * 0.64, h);
+        ctx.fill();
+      }
+      return;
+    }
+
     // soft outer glow
-    const gr = ctx.createRadialGradient(cx, cy, R * 0.4, cx, cy, S * 0.5);
+    const gr = ctx.createRadialGradient(cx, cy, R * 0.35, cx, cy, S * 0.5);
     gr.addColorStop(0, col(0.30 * cur.glow + cur.lvl * 0.25));
-    gr.addColorStop(0.45, col(0.10 * cur.glow));
+    gr.addColorStop(0.48, col(0.10 * cur.glow));
     gr.addColorStop(1, col(0));
     ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
 
-    // ripples: your voice sends rings inward-out, mine sends them outward
-    if (!reduce && (state === 'speaking' || state === 'listening') && cur.lvl > 0.12 && now - lastRip > 260 - cur.lvl * 120){
-      ripples.push({born: now, dir: state === 'speaking' ? 1 : -1, a: 0.2 + cur.lvl * 0.4}); lastRip = now;
+    // ── Outer drifting ticks & signature Atlas ring ──
+    const ringR = R * (state === 'waking' ? 1.24 : 1.32);
+    ctx.save();
+    ctx.translate(cx, cy);
+    const tickCount = 60;
+    const tickDrift = t * (state === 'thinking' ? 0.35 : 0.06);
+    for (let i = 0; i < tickCount; i++){
+      const a = (i / tickCount) * Math.PI * 2 + tickDrift;
+      const maj = i % 5 === 0;
+      const r0 = ringR + (maj ? 8 : 11);
+      const r1 = ringR + (maj ? 16 : 14) + (state === 'listening' ? Math.sin(a * 6 + t * 8) * cur.lvl * 7 : 0);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
+      ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+      ctx.strokeStyle = col(maj ? 0.42 : 0.18);
+      ctx.lineWidth = maj ? 1.6 : 1;
+      ctx.stroke();
+    }
+
+    // State-specific outer rings
+    if (state === 'thinking'){
+      // Segmented ring + orbiting comet chasing around
+      ctx.strokeStyle = col(0.32);
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 10]);
+      ctx.beginPath(); ctx.arc(0, 0, ringR, t * 1.2, t * 1.2 + Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      // Orbiting comet arc + bright head
+      const ca = t * 2.8;
+      const grad = ctx.createConicGradient ? null : null;
+      ctx.beginPath();
+      ctx.arc(0, 0, ringR, ca - 1.3, ca);
+      ctx.strokeStyle = col(0.88);
+      ctx.lineWidth = 3.2;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      const hx = Math.cos(ca) * ringR, hy = Math.sin(ca) * ringR;
+      ctx.beginPath(); ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff'; ctx.shadowColor = col(1); ctx.shadowBlur = 14; ctx.fill(); ctx.shadowBlur = 0;
+    } else if (state === 'waiting'){
+      // Slow amber heartbeat with one ring held open (gap at top)
+      const pulse = 1 + 0.035 * Math.sin(t * 2.7);
+      ctx.beginPath();
+      ctx.arc(0, 0, ringR * pulse, -Math.PI * 0.32, Math.PI * 1.32);
+      ctx.strokeStyle = 'rgba(255,182,72,0.88)';
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    } else if (state === 'listening'){
+      // Radial waveform ring deformed by real mic level
+      const segs = 72;
+      ctx.beginPath();
+      for (let i = 0; i <= segs; i++){
+        const a = (i / segs) * Math.PI * 2;
+        const wave = Math.sin(a * 8 + t * 10) * 0.5 + Math.cos(a * 13 - t * 7) * 0.5;
+        const rr = ringR + wave * (3 + cur.lvl * 18);
+        const x = Math.cos(a) * rr, y = Math.sin(a) * rr;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+      ctx.strokeStyle = col(0.62);
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // ── Done green ring sweep / Error red flash ──
+    if (now - doneSweepAt < 900){
+      const p = (now - doneSweepAt) / 900;
+      ctx.save(); ctx.translate(cx, cy);
+      ctx.beginPath();
+      ctx.arc(0, 0, ringR * (1 + p * 0.08), -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, p * 1.25));
+      ctx.strokeStyle = `rgba(62,232,168,${(1 - p) * 0.95})`;
+      ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.stroke();
+      ctx.restore();
+    }
+    if (ringFlash){
+      const age = (now - ringFlash.born) / 480;
+      if (age >= 1) ringFlash = null;
+      else {
+        const fc = ringFlash.kind === 'error' ? '255,107,120' : '62,232,168';
+        ctx.beginPath(); ctx.arc(cx, cy, ringR * (1 + age * 0.14), 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${fc},${(1 - age) * 0.85})`;
+        ctx.lineWidth = 3; ctx.stroke();
+      }
+    }
+
+    // ── Faint particles (orbit in idle, drift inward on listening, push outward on speaking) ──
+    if (!reduce && state !== 'call'){
+      for (const p of PARTS){
+        p.a += (p.spd * (state === 'thinking' ? 1.8 : 0.7)) / 60;
+        if (state === 'listening'){
+          p.dist -= (0.04 + cur.lvl * 0.12) / 60;
+          if (p.dist < 0.16) p.dist = 0.44;
+        } else if (state === 'speaking'){
+          p.dist += (0.05 + cur.lvl * 0.22) / 60;
+          if (p.dist > 0.46) p.dist = 0.18;
+        } else {
+          const home = 0.25 + (p.ph % 5) * 0.035;
+          p.dist = mix(p.dist, home, 0.03);
+        }
+        const pr = S * p.dist * orbScale;
+        const px = cx + Math.cos(p.a) * pr, py = cy + Math.sin(p.a) * pr;
+        ctx.beginPath(); ctx.arc(px, py, p.sz, 0, Math.PI * 2);
+        ctx.fillStyle = col(state === 'speaking' ? 0.65 : state === 'listening' ? 0.55 : 0.28);
+        ctx.fill();
+      }
+    }
+
+    // ripples: your voice sends rings inward, Atlas sends them outward
+    if (!reduce && (state === 'speaking' || state === 'listening') && cur.lvl > 0.10 && now - lastRip > 250 - cur.lvl * 120){
+      ripples.push({born: now, dir: state === 'speaking' ? 1 : -1, a: 0.22 + cur.lvl * 0.4}); lastRip = now;
     }
     for (let i = ripples.length - 1; i >= 0; i--){
       const p = ripples[i], age = (now - p.born) / 1400;
@@ -1199,27 +1485,51 @@ setInterval(async () => {
       ctx.strokeStyle = col(p.a * (1 - age)); ctx.lineWidth = 1.5; ctx.stroke();
     }
 
-    // the orb body: a soft blob whose edge vibrates with the level
-    const N = 96, amp = reduce ? 0 : (state === 'speaking' ? 0.10 : state === 'listening' ? 0.05 : state === 'thinking' ? 0.03 : 0.012) * (0.3 + cur.lvl * 2.2);
+    // ── Ring-only mode stops after drawing the rings and particles ──
+    if (orbStyle === 'ring'){
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      ctx.strokeStyle = col(0.85); ctx.lineWidth = 2.5; ctx.stroke();
+      return;
+    }
+
+    // ── The orb body ──
+    const N = 96;
+    // Thinking surface goes still; listening has high-harmonic radial waveform; speaking has word-rhythm pulses
+    const amp = reduce || state === 'thinking' || state === 'call' ? 0.004
+              : (state === 'speaking' ? 0.11 : state === 'listening' ? 0.065 : state === 'waiting' ? 0.025 : 0.012) * (0.3 + cur.lvl * 2.2);
     ctx.beginPath();
     for (let i = 0; i <= N; i++){
       const a = (i / N) * Math.PI * 2;
-      const wob = Math.sin(a * 3 + t * 2.1 + cur.spin * 6) * 0.5
-                + Math.sin(a * 5 - t * 3.3) * 0.3
-                + Math.sin(a * 9 + t * (state === 'speaking' ? 14 : 5)) * 0.2 * (0.4 + cur.lvl * 2);
+      const wob = state === 'listening'
+        ? Math.sin(a * 6 + t * 7) * 0.45 + Math.sin(a * 12 - t * 11) * 0.35 + Math.cos(a * 18 + t * 15) * 0.2
+        : Math.sin(a * 3 + t * 2.1 + cur.spin * 6) * 0.5
+          + Math.sin(a * 5 - t * 3.3) * 0.3
+          + Math.sin(a * 9 + t * (state === 'speaking' ? 14 : 5)) * 0.2 * (0.4 + cur.lvl * 2);
       const rad = R * (1 + wob * amp * 2.2);
       const x = cx + Math.cos(a) * rad, y = cy + Math.sin(a) * rad;
       i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
     }
     ctx.closePath();
     const body = ctx.createRadialGradient(cx - R * 0.25, cy - R * 0.3, R * 0.1, cx, cy, R * 1.15);
-    body.addColorStop(0, `rgba(255,255,255,${0.85})`);
-    body.addColorStop(0.35, col(0.95));
-    body.addColorStop(1, `rgba(${Math.round(r * 0.18)},${Math.round(g * 0.18)},${Math.round(b * 0.28)},0.95)`);
-    ctx.shadowColor = col(0.8); ctx.shadowBlur = 28 + cur.lvl * 50;
+    body.addColorStop(0, `rgba(255,255,255,${state === 'call' ? 0.45 : 0.85})`);
+    body.addColorStop(0.35, col(state === 'call' ? 0.55 : 0.95));
+    body.addColorStop(1, `rgba(${Math.round(r * 0.18)},${Math.round(g * 0.18)},${Math.round(b * 0.28)},${state === 'call' ? 0.7 : 0.95})`);
+    ctx.shadowColor = col(0.8); ctx.shadowBlur = (state === 'call' ? 10 : 28) + cur.lvl * 50;
     ctx.fillStyle = body; ctx.fill();
     ctx.shadowBlur = 0;
     ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(234,246,250,.55)'; ctx.stroke();
+
+    // ── Call mode lock glyph drawn cleanly above the orb label ──
+    if (state === 'call'){
+      ctx.save();
+      ctx.translate(cx, cy - R * 0.42);
+      ctx.strokeStyle = 'rgba(234,246,250,0.85)';
+      ctx.fillStyle = 'rgba(234,246,250,0.85)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, -5, 6, Math.PI, 0); ctx.stroke();
+      ctx.fillRect(-8, -5, 16, 12);
+      ctx.restore();
+    }
   }
   requestAnimationFrame(frame);
 })();
@@ -1538,6 +1848,28 @@ setInterval(async () => {
   const mbtn = $('#modeBtn'); if (mbtn) mbtn.onclick = () => setMode(curMode() === 'light' ? 'dark' : 'light');
   build($('#layoutGrid'), LAYOUTS, layBtn);
 
+  // orb visualizer style picker (orb | waveform | ring)
+  const ORBSTYLES = [{id:'orb', label:'Orb'}, {id:'waveform', label:'Waveform'}, {id:'ring', label:'Ring'}];
+  const orbGrid = $('#orbStyleGrid');
+  if (orbGrid){
+    ORBSTYLES.forEach(s => {
+      const b = document.createElement('button'); b.className = 'swatch mode'; b.type = 'button';
+      b.dataset.orbStyle = s.id; b.innerHTML = `<span>${s.id === 'orb' ? '◉' : s.id === 'waveform' ? '▮' : '◌'}</span>${s.label}`;
+      b.onclick = () => window.AtlasOrb && AtlasOrb.setStyle(s.id);
+      orbGrid.appendChild(b);
+    });
+  }
+  // display mode picker (normal | ambient)
+  const dispGrid = $('#displayModeGrid');
+  if (dispGrid){
+    [['normal', 'Normal'], ['ambient', 'Ambient']].forEach(([id, label]) => {
+      const b = document.createElement('button'); b.className = 'swatch mode'; b.type = 'button';
+      b.dataset.displayMode = id; b.innerHTML = `<span>${id === 'ambient' ? '⛶' : '▦'}</span>${label}`;
+      b.onclick = () => { if (id === 'ambient') window.AtlasAmbient ? AtlasAmbient.on() : location.hash = '#mode=ambient'; else window.AtlasAmbient ? AtlasAmbient.off() : location.hash = ''; };
+      dispGrid.appendChild(b);
+    });
+  }
+
   // quick theme picker in the top bar, so Settings isn't needed to change look
   const tBtn = $('#themeBtn'), tPop = $('#themePop');
   if (tBtn && tPop){
@@ -1600,4 +1932,663 @@ setInterval(async () => {
     } catch (_) {}
     return prevHandle(ev);
   };
+})();
+
+// ══════════ IIFE · status & latency badge, shared overlay transitions, sliding nav indicator ══════════
+(() => {
+  'use strict';
+  const badge = $('#statusBadge'); if (!badge) return;
+  const pop = $('#statusPop');
+  const latHistory = [];
+  const MAX_LAT = 20;
+  let runStart = 0, listenStart = 0, firstDeltaAt = 0, bootAt = performance.now(), online = true;
+
+  const fmtMs = ms => (ms == null || !isFinite(ms)) ? '—' : ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
+  const tier = ms => (ms == null ? 'green' : ms < 1500 ? 'green' : ms < 4000 ? 'amber' : 'red');
+
+  // ── intercept run/state timing (thinking, first token) ──
+  const origSetState = setState;
+  setState = function(cls, word, sub){
+    if (cls === 'running' && !runStart) runStart = performance.now();
+    if (cls === 'listening') listenStart = performance.now();
+    return origSetState(cls, word, sub);
+  };
+  const origHandleStatus = handle;
+  handle = ev => {
+    try {
+      if (ev.t === 'latency' && ev.ms != null){
+        latHistory.push(ev.ms); if (latHistory.length > MAX_LAT) latHistory.shift();
+        $('#spFirst').textContent = fmtMs(ev.ms);
+        if (runStart) $('#spStWord').textContent = fmtMs(ev.ms);
+        renderLatency();
+      } else if (ev.t === 'delta' && !firstDeltaAt){
+        firstDeltaAt = performance.now();
+        if (runStart) $('#spStThink').textContent = fmtMs(firstDeltaAt - runStart);
+      } else if (ev.t === 'complete' || ev.t === 'error'){
+        runStart = 0; firstDeltaAt = 0;
+      }
+    } catch (_) {}
+    return origHandleStatus(ev);
+  };
+
+  // heard = mic-open → transcription confirm (captured from the action log)
+  const logBox = $('#log');
+  if (logBox){
+    new MutationObserver(muts => {
+      for (const m of muts) for (const n of m.addedNodes){
+        if (!(n instanceof HTMLElement)) continue;
+        const msg = n.querySelector('.msg')?.textContent || '';
+        if (/transcribed/.test(msg) && listenStart){
+          $('#spStHeard').textContent = fmtMs(performance.now() - listenStart);
+          listenStart = 0;
+        }
+      }
+    }).observe(logBox, {childList: true});
+  }
+
+  function renderLatency(){
+    const last = latHistory[latHistory.length - 1];
+    const t = tier(last);
+    badge.classList.remove('tier-amber', 'tier-red');
+    const tierEl = $('#spTier');
+    tierEl.classList.remove('amber', 'red');
+    if (t === 'amber'){ badge.classList.add('tier-amber'); tierEl.classList.add('amber'); tierEl.textContent = 'OK'; }
+    else if (t === 'red'){ badge.classList.add('tier-red'); tierEl.classList.add('red'); tierEl.textContent = 'SLOW'; }
+    else tierEl.textContent = 'FAST';
+    $('#sbLat').textContent = fmtMs(last);
+    $('#spAvg').textContent = 'avg ' + fmtMs(latHistory.reduce((a, b) => a + b, 0) / latHistory.length);
+    const svg = $('#spSpark');
+    if (svg){
+      const w = 220, h = 38;
+      const max = Math.max.apply(null, latHistory.concat(2000));
+      const pts = latHistory.map((v, i) => {
+        const x = latHistory.length === 1 ? w / 2 : (i / (latHistory.length - 1)) * w;
+        const y = h - 3 - (v / max) * (h - 6);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+      const line = svg.querySelector('polyline') || document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      if (!svg.contains(line)) svg.appendChild(line);
+      line.setAttribute('points', pts.join(' '));
+      line.setAttribute('stroke', t === 'green' ? 'var(--green)' : t === 'amber' ? 'var(--amber)' : 'var(--red)');
+    }
+  }
+
+  function setOnline(ok){
+    online = ok;
+    badge.classList.remove('tier-amber', 'tier-red');
+    if (!ok){
+      badge.classList.add('tier-red');
+      $('#sbState').textContent = 'Offline';
+      $('#sbDot').style.background = 'var(--red)';
+      $('#spGw').textContent = 'offline';
+      $('#spTitle').textContent = 'RECONNECTING';
+      if (window.AtlasOrb) AtlasOrb.setCaption('Reconnecting…', false, 'SYSTEM');
+      document.body.classList.add('offline');
+    } else {
+      $('#sbState').textContent = 'Live';
+      $('#sbDot').style.background = '';
+      $('#spGw').textContent = 'online';
+      $('#spTitle').textContent = 'UPLINK HEALTH';
+      document.body.classList.remove('offline');
+      if (window.AtlasOrb) AtlasOrb.setCaption('');
+    }
+  }
+
+  setInterval(() => {
+    const s = Math.floor((performance.now() - bootAt) / 1000);
+    const m = Math.floor(s / 60), x = s % 60;
+    $('#spUp').textContent = `${m}m ${String(x).padStart(2, '0')}s`;
+  }, 1000);
+
+  async function probe(){
+    try {
+      const r = await fetch('/api/health', {cache: 'no-store'});
+      setOnline(r.ok);
+    } catch (_) { setOnline(false); }
+  }
+  setInterval(probe, 20000);
+
+  const closePop = () => { pop.hidden = true; badge.setAttribute('aria-expanded', 'false'); };
+  badge.addEventListener('click', e => {
+    e.stopPropagation();
+    pop.hidden = !pop.hidden;
+    badge.setAttribute('aria-expanded', String(!pop.hidden));
+  });
+  document.addEventListener('click', e => { if (!pop.hidden && !pop.contains(e.target) && e.target !== badge) closePop(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !pop.hidden) closePop(); });
+
+  // ── sliding nav indicator ──
+  const menu = document.querySelector('.menu');
+  const ind = document.createElement('span');
+  ind.className = 'nav-ind';
+  menu.appendChild(ind);
+  function placeInd(target){
+    if (!target){ ind.style.opacity = '0'; return; }
+    const mr = menu.getBoundingClientRect(), br = target.getBoundingClientRect();
+    ind.style.left = (br.left - mr.left) + 'px';
+    ind.style.width = br.width + 'px';
+    ind.style.opacity = '1';
+  }
+  const navbtns = menu.querySelectorAll('.navbtn');
+  let active = null;
+  navbtns.forEach(b => {
+    b.addEventListener('click', () => { active = b; placeInd(b); });
+    b.addEventListener('mouseenter', () => { if (!active) placeInd(b); });
+    b.addEventListener('mouseleave', () => { if (!active) placeInd(null); });
+  });
+  new MutationObserver(() => {
+    navbtns.forEach(b => { if (b.getAttribute('aria-expanded') === 'true') active = b; });
+    if (active) placeInd(active); else placeInd(null);
+  }).observe(menu, {subtree: true, attributes: true, attributeFilter: ['aria-expanded']});
+  addEventListener('resize', () => { if (active) placeInd(active); });
+
+  renderLatency();
+  probe();
+})();
+
+// ══════════ IIFE · Cmd+K command palette + ? shortcut sheet ══════════
+(() => {
+  'use strict';
+  const CMDS = [
+    ['/new', 'New thread', 'Fresh conversation', () => transmit('/new', {speak:false}), '/new'],
+    ['/goal', 'Set standing objective', 'Arm /goal for your next message', () => arm('/goal'), '/goal'],
+    ['/browser', 'Browser mission', 'Arm /browser for your next message', () => arm('/browser'), '/browser'],
+    ['/background', 'Background mission', 'Arm /background for your next message', () => arm('/background'), '/background'],
+    ['/mission', 'Mission queue', 'Read or add to the queue', () => transmit('/mission', {speak:false}), '/mission'],
+    ['/personality', 'Tone overlay', 'Arm /personality', () => arm('/personality'), '/personality'],
+    ['/status', 'Gateway status', 'Show runtime + profile', () => transmit('/status', {speak:false}), '/status'],
+    ['/tools', 'Hermes tools', 'Show connected tools', () => transmit('/tools', {speak:false}), '/tools'],
+    ['/toolsets', 'Hermes toolsets', 'List toolsets', () => transmit('/toolsets', {speak:false}), '/toolsets'],
+    ['/connectors', 'Connectors', 'How apps connect', () => transmit('/connectors', {speak:false}), '/connectors'],
+    ['/commands', 'All commands', 'List dashboard commands', () => transmit('/commands', {speak:false}), '/commands'],
+  ];
+  const NAV = [
+    ['Departments', 'Browse departments & teams', () => AtlasNav ? AtlasNav.go('departments') : $('#navDepts')?.click(), '⌘', 'D'],
+    ['Brain', 'Second-brain graph', () => AtlasNav ? AtlasNav.go('brain') : $('#navBrain')?.click(), '⌘', 'B'],
+    ['Agents', 'Live sub-agents', () => AtlasNav ? AtlasNav.go('agents') : $('#navAgents')?.click(), '⌘', 'A'],
+    ['Action Logs', 'Telemetry stream', () => $('#navLogs')?.click(), '⌘', ''],
+    ['Command Matrix', 'Browse all commands', () => $('#navCmds')?.click(), '⌘', ''],
+    ['Settings', 'Theme, voice, profile', () => $('#settingsBtn')?.click(), '⌘', 'S'],
+    ['Morning brief', 'Back to the day-at-a-glance', () => window.AtlasBrief && AtlasBrief.focus(), '⌘', 'H'],
+    ['Ambient display', 'Wall / desk display mode', () => window.AtlasAmbient && AtlasAmbient.on(), '⌘', 'W'],
+  ];
+  const THEME_ACTIONS = (() => {
+    const list = [];
+    const names = [['atlas','Atlas'],['terminal','Terminal'],['folio','Folio'],['brutal','Brutal'],['aurora','Aurora'],['blueprint','Blueprint'],['clay','Clay']];
+    for (const [id, name] of names){
+      list.push([`Theme: ${name}`, 'Switch theme', () => document.querySelector(`#themeGrid [data-theme-id="${id}"]`)?.click(), id, 'T']);
+    }
+    list.push(['Light / dark', 'Toggle mode', () => $('#modeBtn')?.click(), '☾', 'M']);
+    return list;
+  })();
+
+  function arm(cmd){
+    disarm();
+    const el = document.querySelector(`.cmd[data-cmd="${cmd}"]`);
+    if (el) el.classList.add('armed');
+    const input = $('#input');
+    input.dataset.cmd = cmd; input.focus();
+  }
+
+  const ov = document.createElement('div');
+  ov.className = 'palette-overlay'; ov.hidden = true;
+  ov.innerHTML = `<div class="palette" role="dialog" aria-label="Command palette">
+    <div class="pal-input-wrap"><span class="pal-ico">⌘</span><input id="palInput" type="text" placeholder="Search commands, departments, notes, themes…" autocomplete="off" spellcheck="false"><kbd>esc</kbd></div>
+    <div class="pal-results" id="palResults"></div></div>`;
+  document.body.appendChild(ov);
+  const input = ov.querySelector('#palInput'), results = ov.querySelector('#palResults');
+
+  let items = [], sel = 0, brainNotes = [], agentsNow = [];
+  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+
+  async function loadBrain(){
+    try {
+      const g = await fetch('/api/brain/graph', {headers: apiHeaders()}).then(r => r.json());
+      brainNotes = (g.nodes || []).filter(n => n.type !== 'other').map(n => ({id: n.id, type: n.type, group: n.group || ''}));
+    } catch (_) { brainNotes = []; }
+  }
+  async function loadAgents(){
+    try {
+      const a = await fetch('/api/agents', {headers: apiHeaders()}).then(r => r.json());
+      agentsNow = (a.agents || []).filter(x => x.status === 'running' || x.status === 'stalled').map(x => ({name: x.name, step: x.step || ''}));
+    } catch (_) { agentsNow = []; }
+  }
+
+  function buildItems(query){
+    const q = (query || '').toLowerCase().trim();
+    const out = [];
+    const push = (group, name, sub, hint, icon, run) => out.push({group, name, sub, hint, icon, run});
+    for (const [cmd, name, sub, run, hint] of CMDS) push('Commands', cmd, sub, '', '/', run);
+    for (const [name, sub, run, , hint] of NAV) push('Navigate', name, sub, hint, '▸', run);
+    for (const d of (window.AtlasData ? AtlasData.depts : [])){
+      push('Departments', d.name, d.remit || '', 'D', '§', () => AtlasNav.go('departments', {dept: d.slug}));
+      for (const t of d.teams) push('Teams', `${t.name} — ${d.name}`, t.remit || '', '', '§', () => AtlasNav.go('departments', {dept: d.slug, team: t.slug}));
+    }
+    for (const n of brainNotes) push('Brain notes', n.id, n.type + (n.group ? ' · ' + n.group : ''), '', '◈', () => AtlasNav.go('brain', n.id));
+    for (const a of agentsNow) push('Agents', a.name, a.step || 'working', '', '◉', () => AtlasNav.go('agents'));
+    for (const [name, sub, run, hint] of THEME_ACTIONS) push('Themes', name, sub, hint, '◐', run);
+
+    if (!q) return out;
+    const scored = [];
+    for (const it of out){
+      const n = it.name.toLowerCase();
+      if (n === q) scored.push([0, it]);
+      else if (n.startsWith(q)) scored.push([1, it]);
+      else if (n.includes(q)) scored.push([2 + n.indexOf(q) * 0.01, it]);
+      else if ((it.sub || '').toLowerCase().includes(q)) scored.push([5, it]);
+    }
+    scored.sort((a, b) => a[0] - b[0]);
+    return scored.slice(0, 40).map(s => s[1]);
+  }
+
+  function render(){
+    sel = Math.min(sel, Math.max(0, items.length - 1));
+    if (!items.length){
+      const q = input.value.trim();
+      results.innerHTML = q
+        ? `<div class="pal-empty">No match. Press Enter to <b>Ask Atlas: ${esc(q)}</b>.</div>`
+        : '<div class="pal-empty">Type to search. Arrows to move, Enter to run, Tab to arm a command, Esc to close.</div>';
+      return;
+    }
+    let html = '', lastGroup = '';
+    items.forEach((it, i) => {
+      if (it.group !== lastGroup){ html += `<div class="pal-group">${esc(it.group)}</div>`; lastGroup = it.group; }
+      html += `<button type="button" class="pal-item${i === sel ? ' sel' : ''}" data-i="${i}">
+        <span class="pi-ico">${it.icon}</span>
+        <span class="pi-name">${esc(it.name)}<span class="pi-sub">${esc(it.sub || '')}</span></span>
+        ${it.hint ? `<span class="pi-hint">${esc(it.hint)}</span>` : ''}</button>`;
+    });
+    results.innerHTML = html;
+    results.querySelector('.sel')?.scrollIntoView({block: 'nearest'});
+  }
+
+  function runItem(it){
+    if (!it) return;
+    close();
+    try { it.run(); } catch (_) {}
+  }
+
+  function askAtlas(){
+    const q = input.value.trim();
+    close();
+    const inp = $('#input'); if (!inp || !q) return;
+    inp.value = q; inp.focus();
+  }
+
+  function open(){
+    ov.hidden = false;
+    input.value = ''; items = buildItems(''); sel = 0;
+    render();
+    if (document.activeElement !== input) input.focus();
+    loadBrain(); loadAgents().then(() => { items = buildItems(input.value); render(); });
+  }
+  function close(){ ov.hidden = true; }
+
+  input.addEventListener('input', () => { items = buildItems(input.value); sel = 0; render(); });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown'){ e.preventDefault(); sel = (sel + 1) % Math.max(1, items.length); render(); }
+    else if (e.key === 'ArrowUp'){ e.preventDefault(); sel = (sel - 1 + Math.max(1, items.length)) % Math.max(1, items.length); render(); }
+    else if (e.key === 'Enter'){ e.preventDefault(); items.length ? runItem(items[sel]) : askAtlas(); }
+    else if (e.key === 'Tab'){ e.preventDefault(); if (items.length) runItem(items[sel]); }
+    else if (e.key === 'Escape'){ e.stopPropagation(); close(); }
+  });
+  results.addEventListener('mousedown', e => {
+    const b = e.target.closest('.pal-item'); if (!b) return;
+    e.preventDefault(); runItem(items[+b.dataset.i]);
+  });
+  ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k'){ e.preventDefault(); ov.hidden ? open() : close(); }
+  });
+  window.AtlasPalette = {open, close, isOpen: () => !ov.hidden};
+
+  // ── ? shortcut sheet ──
+  const help = document.createElement('div');
+  help.className = 'help-overlay'; help.hidden = true;
+  const K = (s) => `<kbd>${esc(s)}</kbd>`;
+  const row = (label, keys) => `<div class="help-row"><span>${label}</span><span class="hr-keys">${keys}</span></div>`;
+  help.innerHTML = `<div class="help-sheet" role="dialog" aria-label="Keyboard shortcuts">
+    <div class="h">Shortcuts</div><div class="help-sub">Press <kbd>?</kbd> anytime to reopen this. Single-letter keys work only when you are not typing.</div>
+    <div class="help-grid">
+      <div class="help-sec"><h4>Command &amp; voice</h4>
+        ${row('Command palette', K('⌘') + K('K'))}
+        ${row('Open / close mic (latch)', K('Space'))}
+        ${row('Call mode (silent)', K('Alt') + K('C'))}
+        ${row('Focus composer / slash', K('/'))}
+        ${row('Cancel a running answer', K('Esc'))}</div>
+      <div class="help-sec"><h4>Go to… (press G first)</h4>
+        ${row('Home / morning brief', K('G') + K('H'))}
+        ${row('Departments', K('G') + K('D'))}
+        ${row('Brain', K('G') + K('B'))}
+        ${row('Activity / Agents', K('G') + K('A'))}
+        ${row('Jobs', K('G') + K('J'))}
+        ${row('Inbox', K('G') + K('I'))}
+        ${row('Settings', K('G') + K('S'))}
+        ${row('Ambient wall display', K('G') + K('W'))}</div>
+      <div class="help-sec"><h4>Appearance</h4>
+        ${row('Cycle theme', K('T'))}
+        ${row('Light / dark', K('M'))}
+        ${row('Mute Atlas speech', K('⇧') + K('M'))}</div>
+      <div class="help-sec"><h4>Composer</h4>
+        ${row('Send', K('Enter'))}
+        ${row('New line', K('⇧') + K('Enter'))}
+        ${row('Send from anywhere', K('⌘') + K('↵'))}
+        ${row('Tab / arrows in slash menu', K('Tab') + K('↑') + K('↓'))}</div>
+    </div></div>`;
+  document.body.appendChild(help);
+  const helpBtn = $('#helpBtn');
+  const openHelp = () => { help.hidden = false; };
+  const closeHelp = () => { help.hidden = true; };
+  if (helpBtn) helpBtn.addEventListener('click', () => help.hidden ? openHelp() : closeHelp());
+  help.addEventListener('click', e => { if (e.target === help) closeHelp(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !help.hidden){ closeHelp(); return; }
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)){
+      e.preventDefault(); help.hidden ? openHelp() : closeHelp();
+    }
+  });
+
+  // ── single-letter shortcuts (never while typing) ──
+  const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+  const emptyComposer = () => document.activeElement === $('#input') && !$('#input').value;
+  let gArmed = false, gTimer = null;
+  const cycleTheme = () => {
+    const btns = [...document.querySelectorAll('#themeGrid [data-theme-id]')];
+    if (!btns.length) return;
+    const cur = document.documentElement.dataset.theme;
+    const i = btns.findIndex(b => b.dataset.themeId === cur);
+    (btns[(i + 1) % btns.length] || btns[0]).click();
+  };
+  document.addEventListener('keydown', e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (typing() && !emptyComposer()) return;
+    const k = e.key.toLowerCase();
+    if (k === 'g' && !gArmed){
+      gArmed = true; clearTimeout(gTimer);
+      gTimer = setTimeout(() => { gArmed = false; }, 1200);
+      return;
+    }
+    if (gArmed && k !== 'g'){
+      gArmed = false; clearTimeout(gTimer);
+      const go = {
+        h: () => window.AtlasBrief && AtlasBrief.focus(),
+        d: () => AtlasNav ? AtlasNav.go('departments') : $('#navDepts')?.click(),
+        b: () => AtlasNav ? AtlasNav.go('brain') : $('#navBrain')?.click(),
+        a: () => AtlasNav ? AtlasNav.go('agents') : $('#navAgents')?.click(),
+        j: () => $('#navLogs')?.click(),
+        i: () => window.AtlasBrief && AtlasBrief.focus(),
+        s: () => $('#settingsBtn')?.click(),
+        w: () => window.AtlasAmbient && AtlasAmbient.toggle(),
+      }[k];
+      if (go){ e.preventDefault(); go(); }
+      return;
+    }
+    if (k === 't'){ e.preventDefault(); cycleTheme(); }
+    else if (k === 'm' && !e.shiftKey){ e.preventDefault(); $('#modeBtn')?.click(); }
+    else if (k === 'm' && e.shiftKey){ e.preventDefault(); $('#mute')?.click(); }
+  });
+})();
+
+// ══════════ IIFE · morning brief home screen (real data: jobs, agents, brain, greeting) ══════════
+(() => {
+  'use strict';
+  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+  const data = {greeting: '', date: '', agents: [], running: 0, brainCount: 0, brainDepts: [], collapsed: false};
+  window.AtlasBrief = {data, focus(){ const b = document.getElementById('brief'); if (b) b.scrollIntoView({behavior: 'smooth', block: 'start'}); }, refresh};
+
+  function fmtWhen(ts){
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    const today = new Date(); const yest = new Date(); yest.setDate(today.getDate() - 1);
+    const sameDay = x => x.toDateString() === d.toDateString();
+    if (sameDay(today)) return 'today ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+    if (sameDay(yest)) return 'yesterday ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+    return d.toLocaleDateString([], {month: 'short', day: 'numeric'});
+  }
+  function dur(s){
+    if (s == null) return '';
+    s = Math.max(0, Math.floor(s));
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+    return h ? `${h}h ${String(m).padStart(2, '0')}m` : m ? `${m}m` : `${s}s`;
+  }
+
+  async function refresh(){
+    const out = {agents: [], running: 0, brainCount: 0, brainDepts: []};
+    try {
+      const g = await fetch('/api/greeting', {headers: apiHeaders()}).then(r => r.json());
+      if (g && g.text) data.greeting = g.text;
+    } catch (_) {}
+    try {
+      const a = await fetch('/api/agents', {headers: apiHeaders()}).then(r => r.json());
+      out.agents = a.agents || [];
+      out.running = a.running || 0;
+    } catch (_) {}
+    try {
+      const b = await fetch('/api/brain/graph', {headers: apiHeaders()}).then(r => r.json());
+      const nodes = b.nodes || [];
+      out.brainCount = nodes.length;
+      out.brainDepts = nodes.filter(n => n.type === 'dept').map(n => n.id.replace(/-/g, ' '));
+    } catch (_) {}
+    data.agents = out.agents; data.running = out.running;
+    data.brainCount = out.brainCount; data.brainDepts = out.brainDepts;
+    data.date = new Date().toLocaleDateString([], {weekday: 'long', month: 'long', day: 'numeric'});
+    window.dispatchEvent(new CustomEvent('atlas-brief'));
+    render();
+  }
+
+  function sentence(){
+    const done = data.agents.filter(a => a.status === 'done' || a.status === 'failed').length;
+    const running = data.running;
+    const parts = [];
+    if (running) parts.push(`${running} mission${running > 1 ? 's' : ''} running`);
+    if (done) parts.push(`${done} finished overnight`);
+    if (data.brainCount) parts.push(`${data.brainCount} notes in the second brain`);
+    if (!parts.length) return 'Nothing outstanding — a clean start.';
+    return parts.join(' · ') + '.';
+  }
+
+  function card(color, title, count, body, empty){
+    return `<div class="b-card" style="--c:var(${color})"><h5><span class="bc-dot"></span>${title}${count != null ? `<span class="bc-n">${count}</span>` : ''}</h5>
+      <div class="bc-body">${body || `<span class="bc-empty">${empty || ''}</span>`}</div></div>`;
+  }
+
+  function render(){
+    const host = document.getElementById('brief');
+    if (!host) return;
+    if (data.collapsed){
+      host.innerHTML = `<div class="brief"><div class="b-head"><span class="b-sentence">${esc(data.greeting || 'Good day.')} <b style="color:var(--cyan)">${esc(sentence())}</b></span></div>
+        <div class="b-actions"><button class="ctl aux" data-brief="expand">Show full brief ▴</button></div></div>`;
+      return;
+    }
+    const running = data.agents.filter(a => a.status === 'running' || a.status === 'stalled');
+    const recent = data.agents.filter(a => !(a.status === 'running' || a.status === 'stalled')).slice(0, 3);
+    const runningHtml = running.length
+      ? running.slice(0, 3).map(a => `<div class="bc-item"><span class="bci-t">${esc(a.name)}</span><span class="bci-m">${esc(a.step || 'working…')}</span></div>`).join('')
+      : '<span class="bc-empty">No agents running.</span>';
+    const overnightHtml = recent.length
+      ? recent.map(a => `<div class="bc-item"><span class="bci-t">${esc(a.name)}</span><span class="bci-m">${esc(a.status)}${a.started ? ' · ' + fmtWhen(a.started) : ''}${a.elapsed ? ' · ' + dur(a.elapsed) : ''}</span></div>`).join('')
+      : '<span class="bc-empty">Nothing finished overnight.</span>';
+    const brainHtml = data.brainCount
+      ? `${data.brainCount} notes. ${data.brainDepts.length ? data.brainDepts.slice(0, 5).map(d => `<span class="bc-pill"><span class="bci-s">§</span>${esc(d)}</span>`).join('') : ''}`
+      : '<span class="bc-empty">No brain folder found yet.</span>';
+    host.innerHTML = `<div class="brief">
+      <div class="b-head"><div><div class="b-date">${esc(data.date)}</div><div class="b-sentence" style="margin-top:4px">${esc(data.greeting || 'Good day.')}</div></div>
+        <div class="b-actions"><button class="ctl aux" data-brief="play">▶ Play my brief</button><button class="ctl aux" data-brief="collapse">Collapse ▴</button></div></div>
+      <div class="b-sentence">${esc(sentence())}</div>
+      <div class="b-grid">
+        ${card('--amber', 'Needs your decision', 0, '<span class="bc-empty">Nothing needs your approval right now.</span>')}
+        ${card('--cyan', 'Running', data.running, runningHtml)}
+        ${card('--green', 'Overnight', recent.length, overnightHtml)}
+        ${card('--dept-3', 'Second brain', data.brainCount, brainHtml)}
+        ${card('--dept-4', 'Business pulse', null, '<span class="bc-empty">Connect a store to see sales, orders and ad spend.</span>')}
+        ${card('--dept-5', 'Family & calendar', null, '<span class="bc-empty">Connect a calendar to see the dates that matter.</span>')}
+      </div></div>`;
+    host.querySelectorAll('[data-brief]').forEach(b => b.addEventListener('click', () => {
+      const act = b.dataset.brief;
+      if (act === 'collapse'){ data.collapsed = true; render(); }
+      else if (act === 'expand'){ data.collapsed = false; render(); }
+      else if (act === 'play') playBrief();
+    }));
+  }
+
+  function playBrief(){
+    if (typeof speak !== 'function' || muted) return;
+    const lines = [
+      data.greeting || 'Good day.',
+      sentence(),
+      data.running ? `${data.running} missions are running now.` : 'No missions are running.',
+      data.agents.filter(a => a.status === 'done' || a.status === 'failed').length
+        ? `${data.agents.filter(a => a.status === 'done' || a.status === 'failed').length} missions finished overnight.`
+        : 'Nothing finished overnight.',
+      data.brainCount ? `Your second brain holds ${data.brainCount} notes.` : 'Your second brain is empty.',
+      'Business and calendar are not connected yet. Connect them to hear the full brief.'
+    ];
+    speak(lines.join(' '));
+  }
+
+  const resp = document.getElementById('response');
+  const obs = new MutationObserver(() => {
+    const welcome = resp.querySelector('.welcome');
+    if (!welcome || document.getElementById('brief')) return;
+    const brief = document.createElement('div');
+    brief.id = 'brief';
+    welcome.insertBefore(brief, welcome.firstChild);
+    refresh();
+  });
+  obs.observe(resp, {childList: true, subtree: true});
+  if (resp.querySelector('.welcome')) {
+    const brief = document.createElement('div'); brief.id = 'brief';
+    resp.querySelector('.welcome').insertBefore(brief, resp.querySelector('.welcome').firstChild);
+    refresh();
+  }
+  document.addEventListener('atlas-brief', () => { if (window.AtlasAmbient) AtlasAmbient.onBriefData(data); });
+})();
+
+// ══════════ IIFE · ambient wall-display mode on the focus layout ══════════
+(() => {
+  'use strict';
+  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+  const ov = document.createElement('div');
+  ov.className = 'ambient-overlay'; ov.id = 'ambientOverlay'; ov.hidden = true;
+  ov.innerHTML = `<div class="am-orb" id="amOrb"><div id="amReactor"></div></div>
+    <div class="am-bottom">
+      <div class="am-clock" id="amClock">00:00</div>
+      <div class="am-date" id="amDate"></div>
+      <div class="am-brief" id="amBrief">Atlas is standing by.</div>
+      <div class="am-glances">
+        <span class="am-glance" id="amGlanceJobs"><i></i><span id="amJobsTxt">0 running</span></span>
+        <span class="am-glance" id="amGlanceOk"><i></i><span id="amOkTxt">nothing needs you</span></span>
+        <span class="am-glance"><i></i><span id="amLatTxt">latency —</span></span>
+      </div>
+      <div class="am-hint">press Space to talk · <kbd>G</kbd> <kbd>W</kbd> or Esc to exit</div>
+    </div>
+    <button id="amExit" class="iconbtn am-exit" title="Exit ambient display">✕</button>`;
+  document.body.appendChild(ov);
+
+  let active = false, briefLines = [], briefIdx = 0, briefTimer = null, clockTimer = null;
+  let nightTimer = null;
+
+  function setNight(){
+    const h = new Date().getHours();
+    ov.classList.toggle('night', h >= 22 || h < 7);
+  }
+
+  function moveOrb(){
+    const reactor = document.getElementById('reactor');
+    const host = ov.querySelector('#amReactor');
+    if (reactor && host && reactor.parentElement !== host){
+      host.appendChild(reactor);
+    }
+  }
+  function restoreOrb(){
+    const reactor = document.getElementById('reactor');
+    const pane = document.querySelector('.reactorpane');
+    if (reactor && pane && reactor.parentElement !== pane){
+      pane.insertBefore(reactor, pane.querySelector('.micbar') || null);
+    }
+  }
+
+  function on(){
+    if (active) return;
+    active = true;
+    document.documentElement.dataset.ambient = '1';
+    document.documentElement.dataset.layout = 'focus';
+    try { localStorage.setItem('jarvis.layout', 'focus'); } catch (_) {}
+    ov.hidden = false;
+    moveOrb();
+    document.getElementById('ambientBtn')?.setAttribute('aria-pressed', 'true');
+    document.getElementById('scrim')?.click();
+    document.querySelector('.stage')?.style.setProperty('--orb-scale', '3.4');
+    tickClock(); clockTimer = setInterval(tickClock, 1000);
+    setNight(); nightTimer = setInterval(setNight, 60000);
+    refreshBrief(); briefTimer = setInterval(() => { briefIdx = (briefIdx + 1) % Math.max(1, briefLines.length); showBrief(); }, 9000);
+    poll();
+  }
+  function off(){
+    if (!active) return;
+    active = false;
+    delete document.documentElement.dataset.ambient;
+    ov.hidden = true;
+    restoreOrb();
+    document.getElementById('ambientBtn')?.setAttribute('aria-pressed', 'false');
+    document.querySelector('.stage')?.style.removeProperty('--orb-scale');
+    clearInterval(clockTimer); clearInterval(briefTimer); clearInterval(nightTimer);
+  }
+  function toggle(){ active ? off() : on(); }
+
+  function tickClock(){
+    const d = new Date();
+    document.getElementById('amClock').textContent = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+    document.getElementById('amDate').textContent = d.toLocaleDateString([], {weekday: 'long', month: 'long', day: 'numeric'});
+  }
+
+  function showBrief(){
+    const el = document.getElementById('amBrief');
+    if (!el) return;
+    const line = briefLines.length ? briefLines[briefIdx % briefLines.length] : null;
+    if (line) el.innerHTML = line;
+  }
+
+  function refreshBrief(){
+    const B = window.AtlasBrief && AtlasBrief.data;
+    briefLines = [];
+    if (B){
+      if (B.greeting) briefLines.push(esc(B.greeting));
+      const running = B.running || 0;
+      const done = (B.agents || []).filter(a => a.status === 'done' || a.status === 'failed').length;
+      briefLines.push(running ? `<b>${running}</b> mission${running > 1 ? 's' : ''} running` : 'No missions running');
+      if (done) briefLines.push(`<b>${done}</b> finished overnight`);
+      if (B.brainCount) briefLines.push(`Second brain: <b>${B.brainCount}</b> notes`);
+    }
+    briefLines.push('Business and calendar are not connected yet — connect them to see live data here.');
+    briefIdx = 0; showBrief();
+  }
+
+  async function poll(){
+    try {
+      const a = await fetch('/api/agents', {headers: apiHeaders()}).then(r => r.json());
+      const n = a.running || 0;
+      document.getElementById('amGlanceJobs').classList.toggle('on', n > 0);
+      document.getElementById('amJobsTxt').textContent = `${n} running`;
+      if (n) refreshBrief();
+    } catch (_) {}
+  }
+  window.AtlasAmbient = {
+    on, off, toggle, isOn: () => active,
+    onBriefData(d){ if (active && d) refreshBrief(); }
+  };
+
+  document.getElementById('amExit').addEventListener('click', off);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && active){ e.preventDefault(); off(); } });
+  document.getElementById('ambientBtn')?.addEventListener('click', toggle);
+
+  let idleMin = 0;
+  try { idleMin = parseInt(localStorage.getItem('jarvis.ambientIdle') ?? '0', 10) || 0; } catch (_) {}
+  if (idleMin > 0){
+    let lastAct = Date.now();
+    ['pointerdown', 'keydown', 'pointermove'].forEach(t => document.addEventListener(t, () => { lastAct = Date.now(); }, {passive: true}));
+    setInterval(() => { if (!active && !document.hidden && Date.now() - lastAct > idleMin * 60000) on(); }, 30000);
+  }
+
+  if (/mode=ambient|ambient=1/.test(location.hash)) setTimeout(on, 200);
 })();

@@ -38,6 +38,7 @@
 .status{text-shadow:0 1px 10px rgba(0,0,0,.45)}
 .stbrand,.strun,.stword{color:var(--orb-ink)!important}
 body.done .stword{color:#b8ffe3!important}body.error .stword{color:#ffc4ca!important}
+body.waiting .stword{color:var(--amber)!important}
 .navbtn{white-space:nowrap}
 .reactor::before,.reactor::after{content:"";position:absolute;pointer-events:none}
 .reactor::before{display:none}
@@ -542,8 +543,8 @@ body.done .stword{color:#b8ffe3!important}body.error .stword{color:#ffc4ca!impor
   :root[data-layout="command"] .teamrail{display:flex;flex-direction:column;gap:8px;grid-column:1;grid-row:1;align-self:start;padding-top:6px}
 }
 
-/* orb stays clean: no brand/state text inside the animation */
-.status,.stbrand,.stword,.strun{display:none!important}
+/* orb stays clean: no words inside the orb */
+.status,.stbrand,.strun,.stword{display:none!important}
 
 /* top-bar quick theme picker */
 .themewrap{position:relative;display:inline-flex}

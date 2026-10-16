@@ -26,9 +26,37 @@
     <button class="navbtn" id="settingsBtn">Settings</button>
   </nav>
   <div class="menu-right">
-    <div class="pill ok" title="Gateway"><i></i><span id="top-gw">Gateway: probing</span></div>
-    <div class="pill hide-sm"><span id="top-profile">Profile: default</span></div>
-    <div class="pill warn hide-md"><i></i><span id="top-voice">Voice: browser</span></div>
+    <div class="status-wrap" id="statusWrap">
+      <button type="button" class="pill ok status-badge" id="statusBadge" aria-haspopup="dialog" aria-expanded="false" title="Live status &amp; latency">
+        <i id="sbDot"></i>
+        <b class="sb-state" id="sbState">Live</b>
+        <span class="sb-sep">·</span>
+        <span class="sb-lat" id="sbLat">0.3s</span>
+        <span class="sb-sr" id="top-gw">Gateway: probing</span>
+      </button>
+      <div class="status-pop card" id="statusPop" hidden role="dialog" aria-label="Gateway &amp; Latency Status">
+        <div class="sp-head"><span id="spTitle">UPLINK HEALTH</span><span class="sp-tier" id="spTier">FAST</span></div>
+        <div class="sp-grid">
+          <div class="sp-row"><span>Gateway</span><b id="spGw">online</b></div>
+          <div class="sp-row"><span>Runtime</span><b id="spRt">Hermes Agent</b></div>
+          <div class="sp-row"><span>Voice</span><b id="top-voice">Browser</b></div>
+          <div class="sp-row"><span>Profile</span><b id="top-profile">default</b></div>
+          <div class="sp-row"><span>First token</span><b id="spFirst">—</b></div>
+          <div class="sp-row"><span>Uptime</span><b id="spUp">0m 00s</b></div>
+        </div>
+        <div class="sp-stages" id="spStages">
+          <div class="sp-st"><span>Heard</span><b id="spStHeard">—</b></div>
+          <div class="sp-st"><span>Thinking</span><b id="spStThink">—</b></div>
+          <div class="sp-st"><span>First word</span><b id="spStWord">—</b></div>
+        </div>
+        <div class="sp-spark-wrap">
+          <div class="sp-spark-lbl"><span>Last 20 replies (first-token ms)</span><b id="spAvg">avg —</b></div>
+          <svg class="sp-spark" id="spSpark" viewBox="0 0 220 38" preserveAspectRatio="none" aria-label="Latency sparkline"></svg>
+        </div>
+      </div>
+    </div>
+    <button id="ambientBtn" class="iconbtn" title="Ambient wall display (G then W)" aria-pressed="false" aria-label="Ambient wall display">⛶</button>
+    <button id="helpBtn" class="iconbtn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
     <button id="callBtn" class="iconbtn" title="Call mode — silent, mic locked closed (Alt+C)" aria-pressed="false">📞</button>
     <span class="themewrap"><button id="themeBtn" class="iconbtn" title="Choose theme" aria-label="Choose theme" aria-haspopup="true" aria-expanded="false">◐</button>
       <div id="themePop" class="themepop" hidden role="menu" aria-label="Themes"></div></span>
@@ -65,8 +93,10 @@
         <div class="stbrand">ATLAS</div>
         <div class="stword" id="stword">STANDBY</div>
         <div class="strun" id="strun">awaiting uplink</div>
+        <div class="sttool" id="stTool" hidden></div>
       </div>
     </div>
+    <div class="orbcaption" id="orbCaption" hidden aria-live="polite"><span class="oc-kind" id="ocKind">VOICE</span><span class="oc-text" id="ocText"></span></div>
     <div class="micbar" id="micbar" data-state="closed" role="status" aria-live="polite">
       <span class="bulb" id="bulb"></span>
       <div class="miclabel"><b id="micWord">MIC CLOSED</b><span id="micHint">Press <kbd>Space</kbd> to open</span></div>
@@ -159,6 +189,10 @@
       <div class="pickgrid modegrid" id="modeGrid"></div>
       <div class="picklabel">Layout</div>
       <div class="pickgrid layoutgrid" id="layoutGrid"></div>
+      <div class="picklabel">Orb Visualizer</div>
+      <div class="pickgrid modegrid" id="orbStyleGrid"></div>
+      <div class="picklabel">Display Mode</div>
+      <div class="pickgrid" id="displayModeGrid" style="grid-template-columns:repeat(2,1fr)"></div>
       <label class="sfield">Provider
         <input id="set-provider" type="text" readonly tabindex="-1">
       </label>

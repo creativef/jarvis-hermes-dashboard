@@ -87,12 +87,9 @@ def departments():
 
 def graph():
     notes = _notes()
-    nodes, edges, seen = [], [], set()
+    nodes, edges, seen, kinds = [], [], set(), {}
     for name, path in notes.items():
-        kind, group = _classify(name, path)
-        if kind == "other":          # README and stray notes would only float unconnected
-            continue
-        nodes.append({"id": name, "type": kind, "group": group})
+        kinds[name] = _classify(name, path)
         try:
             text = path.read_text(encoding="utf-8")[:_MAX_NOTE]
         except OSError:
@@ -103,6 +100,11 @@ def graph():
                 if key not in seen:
                     seen.add(key)
                     edges.append({"source": name, "target": tgt})
+    linked = {e["source"] for e in edges} | {e["target"] for e in edges}
+    for name, (kind, group) in kinds.items():
+        if kind == "other" and name not in linked:   # unlinked strays would only float
+            continue
+        nodes.append({"id": name, "type": kind, "group": group})
     return {"nodes": nodes, "links": edges, "root": str(ROOT), "exists": ROOT.is_dir()}
 
 
