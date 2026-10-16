@@ -106,3 +106,52 @@
   .dept-switch button{padding:7px 10px}.dv-ico{display:none}
   .dp-grid{grid-template-columns:1fr}
 }
+
+/* ── shared header: view tabs (Departments | Brain) used by both overlays ── */
+.view-tabs{display:flex;gap:3px;padding:3px;border:1px solid var(--edge);border-radius:var(--r2);background:rgba(var(--field-rgb),.5);margin-left:16px}
+.view-tabs button{cursor:pointer;padding:7px 14px;border:1px solid transparent;border-radius:calc(var(--r2) - 3px);background:transparent;color:var(--mut);font-family:var(--disp);font-size:13px;font-weight:600;letter-spacing:.04em;transition:.15s}
+.view-tabs button:hover{color:var(--ink)}
+.view-tabs button[aria-selected=true]{color:var(--ink-strong);background:rgba(var(--accent-rgb),.16);border-color:var(--edge-2)}
+.dept-switch{border-radius:var(--r2)}
+.dept-switch button{border-radius:calc(var(--r2) - 3px);font-family:var(--disp)}
+.dept-overlay .rhead,.brain-overlay .rhead{gap:10px;flex-wrap:wrap}
+.dept-overlay .rhead .dept-switch{margin-left:auto}
+.brain-overlay .rhead .brain-tools{margin-left:auto}
+.dp-card footer{display:flex;gap:14px;flex-wrap:wrap}
+.dd-actions{display:flex;gap:10px;flex-wrap:wrap}
+.dp-detail .dp-brain{border-color:var(--edge-2)}
+.dept-panel{overflow:hidden}
+.brain-legend .lg-hint{margin-left:auto}
+.brto{align-self:flex-start;white-space:normal;text-align:left;font-size:12px;padding:8px 12px}
+.brto[hidden]{display:none}
+.dept-overlay .ctl.aux,.dept-overlay .dp-brief{font-size:12.5px}
+
+/* themes whose header bar is a solid accent block (brutal): keep the tab/switcher legible on it */
+:root[data-theme="brutal"] .view-tabs,:root[data-theme="brutal"] .dept-switch{background:var(--card-solid);border-color:var(--edge)}
+:root[data-theme="brutal"] .view-tabs button,:root[data-theme="brutal"] .dept-switch button{color:var(--ink)}
+:root[data-theme="brutal"] .view-tabs button[aria-selected=true],:root[data-theme="brutal"] .dept-switch button[aria-pressed=true]{background:var(--ink);color:var(--card-solid)}
+
+@media (max-width:700px){
+  .dept-overlay,.brain-overlay{padding:6px}
+  .dept-overlay .rhead,.brain-overlay .rhead{padding:10px 12px}
+  .dept-overlay .rhead>span:first-child,.brain-overlay .rhead>span:first-child{display:none}
+  .view-tabs{margin-left:0}
+  .view-tabs button{padding:6px 10px}
+  .dept-overlay .rhead .dept-switch{margin-left:0;order:3}
+  .dept-overlay .rhead #deptClose,.brain-overlay .rhead #brainClose{margin-left:auto}
+  .brain-overlay .rhead .brain-tools{margin-left:0;flex-wrap:wrap;gap:8px;width:100%;order:3}
+  .dept-body{padding:12px}
+  .dp-grid{grid-template-columns:1fr}
+  .dp-detail{padding:18px 16px;border-left:0}
+  .ds-main .dp-detail{padding:18px 16px}
+  .dp-detail h2{font-size:22px}
+  .brain-legend{gap:8px 12px;padding:8px 12px}
+  .brain-legend .lg-hint{margin-left:0;flex-basis:100%}
+}
+:root[data-theme="brutal"] .brain-overlay .btog{color:var(--on-accent)}
+:root[data-theme="brutal"] .brain-overlay .btog input{accent-color:#111}
+.ob-scroll{min-width:0;min-height:0;overflow:hidden}
+@media (max-width:900px){
+  .ob-scroll{overflow:auto;border-bottom:1px solid var(--edge)}
+  .dp-orbit .ob-scroll svg{width:880px;max-width:none;height:600px}
+}

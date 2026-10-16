@@ -225,6 +225,100 @@ def take_finished():
     return done
 
 
+# ── Agents tab: every running / recent sub-agent job (read-only) ────────
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _worker_pids():
+    """{job id: pid} of live `handoff.py --worker <id>` processes (covers jobs
+    that started before pids were recorded in the job file)."""
+    found = {}
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return found
+    for line in out.splitlines():
+        m = re.match(r"\s*(\d+)\s+.*handoff\.py --worker (\w+)", line)
+        if m:
+            found[m.group(2)] = int(m.group(1))
+    return found
+
+
+def _last_log_line(jid):
+    """(timestamp, text) of the newest progress line; reads only the file tail."""
+    try:
+        with open(HANDOFF_DIR / f"{jid}.log", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 4096))
+            tail = f.read().decode("utf-8", "replace")
+        lines = [ln for ln in tail.splitlines() if ln.strip()]
+        ts, _, text = lines[-1].partition("\t")
+        return float(ts), text
+    except (OSError, IndexError, ValueError):
+        return None, ""
+
+
+def _agent_name(mission):
+    m = " ".join((mission or "").split())
+    if "diagnostic" in m.lower():
+        return "Diagnostic agent"
+    first = re.split(r"(?<=[.!?])\s", m, maxsplit=1)[0]
+    first = re.sub(r"^(In|At|For) \S+,?\s+", "", first)
+    if len(first) > 48:
+        first = first[:48].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
+    return (first[:1].upper() + first[1:]) or "Sub-agent"
+
+
+def agents_snapshot(limit=40):
+    """Running and recent handoff jobs (+ in-memory /background missions),
+    running first then newest first. Never mutates job files."""
+    now = time.time()
+    jobs = []
+    for j in _handoff_jobs():
+        j.pop("_path", None)
+        j["kind"] = "handoff"
+        jobs.append(j)
+    with _JOB_LOCK:
+        for j in JOBS.values():
+            jobs.append(dict(j, kind="background"))
+    pids = _worker_pids() if any(j.get("status") == "running" for j in jobs) else {}
+    out = []
+    for j in jobs:
+        jid = j.get("id") or ""
+        status = j.get("status") or "unknown"
+        started, finished = j.get("started"), j.get("finished")
+        step, step_at = "", None
+        if j["kind"] == "handoff":
+            step_at, step = _last_log_line(jid)
+            if status == "running":
+                pid = pids.get(jid) or j.get("pid")
+                if not (pid and _pid_alive(pid)):
+                    status = "stalled"
+                    step = step or "worker process is no longer running"
+                elif not step:
+                    step = "working… (no live output captured for this job)"
+        elif status == "running":
+            step = "working inside the dashboard server"
+        mission = j.get("mission") or ""
+        out.append(dict(
+            id=jid, kind=j["kind"], name=_agent_name(mission), brief=mission,
+            status=status, step=step, step_at=step_at, started=started, finished=finished,
+            elapsed=max(0, (finished or now) - started) if started else None,
+            result=j.get("result") or "",
+            diagnostic="diagnostic" in mission.lower()))
+    out.sort(key=lambda a: (a["status"] not in ("running", "stalled"), -(a["started"] or 0)))
+    return dict(now=now, agents=out[:limit],
+                running=sum(1 for a in out if a["status"] == "running"))
+
+
 _CMD = re.compile(r"^\s*/(new|profile|goal|personality|kanban|mission|missions|background|tools|toolsets|connectors|connect|status|commands|help|browser|clear)\b\s*(.*)$", re.I | re.S)
 
 

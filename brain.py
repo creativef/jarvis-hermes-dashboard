@@ -45,6 +45,46 @@ def _classify(name, path):
     return "other", ""
 
 
+_ORDER = ["research-strategy", "design-content", "marketing", "business-operations", "finance"]
+_SUB = re.compile(r"^-\s*\[\[([^\]|#]+)\]\]\s+-\s+(.+?)\s+-\s+(.+?)\s*$")
+
+
+def _section(text, title):
+    m = re.search(r"^##\s+" + re.escape(title) + r"\s*\n(.*?)(?=^##\s|\Z)", text, re.S | re.M)
+    return m.group(1).strip() if m else ""
+
+
+def _pretty(s):
+    return s.strip().replace(" and ", " & ")
+
+
+def departments():
+    """Departments (with their sub-teams) read from <brain>/departments/<slug>/<slug>.md.
+
+    Read-only; slugs come from directory names, never from the caller."""
+    base = ROOT / "departments"
+    out = []
+    if not base.is_dir():
+        return {"departments": out, "root": str(base), "exists": False}
+    slugs = sorted((p.name for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")),
+                   key=lambda s: (_ORDER.index(s) if s in _ORDER else len(_ORDER), s))
+    for slug in slugs:
+        f = base / slug / (slug + ".md")
+        try:
+            text = f.read_text(encoding="utf-8")[:_MAX_NOTE]
+        except OSError:
+            continue
+        head = re.search(r"^#\s+(.+?)\s*$", text, re.M)
+        name = _pretty(re.sub(r"\s+department$", "", head.group(1), flags=re.I)) if head else slug
+        teams = []
+        for line in _section(text, "Sub-teams").splitlines():
+            m = _SUB.match(line.strip())
+            if m and (base / slug / m.group(1)).is_dir():
+                teams.append({"slug": m.group(1), "name": _pretty(m.group(2)), "remit": m.group(3)})
+        out.append({"slug": slug, "name": name, "remit": _section(text, "Remit"), "teams": teams})
+    return {"departments": out, "root": str(base), "exists": True}
+
+
 def graph():
     notes = _notes()
     nodes, edges, seen = [], [], set()

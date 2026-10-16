@@ -1,43 +1,22 @@
 /* Atlas · Departments view — three switchable layouts (grid · sidebar · orbit).
-   Self-contained: builds its own overlay and nav button; styles live in departments.css. */
+   Data: window.AtlasData (atlas-data.js — loaded from /api/departments, with a built-in fallback).
+   Self-contained overlay; styles live in departments.css and use theme variables only.
+   Linked to the Brain view through window.AtlasNav (open the matching notes / come back from a note). */
 (() => {
   'use strict';
-  // slug, name, remit, colour variable, sub-teams [slug, name, remit] — mirrors ~/Atlas/departments (team.py list)
-  const D = [
-    ['research-strategy', 'Research & Strategy', 'Find out what is true about markets, products, competitors and opportunities, then turn it into recommendations.', '--cyan', [
-      ['competitor-intel', 'Competitor Intelligence', 'Who else is selling, what works for them, gaps to exploit.'],
-      ['market-research', 'Market Research', 'Demand, niches, audiences, trends.'],
-      ['product-research', 'Product Research', 'What to make and sell: ideas, validation, pricing signals.'],
-      ['strategy', 'Strategy', 'Positioning, roadmap, priorities, opportunity scoring.']]],
-    ['design-content', 'Design & Content', 'Create the products and everything creative around them: designs, copy, video, images, ads and content.', '--violet', [
-      ['ads-creative', 'Ad Creative', 'Ad concepts, copy and visuals ready to run (placement belongs to Marketing).'],
-      ['copywriting', 'Copywriting', 'Product pages, emails, hooks, scripts, slogans.'],
-      ['images-graphics', 'Images & Graphics', 'Brand visuals, thumbnails, product imagery.'],
-      ['long-form', 'Long-form Content', 'Articles, guides, newsletters, written series.'],
-      ['pod-design', 'Print on Demand Design', 'T-shirts, mugs and other products: concepts, layouts, mockups.'],
-      ['product-development', 'Product Development', 'Turning researched ideas into finished, sellable products.'],
-      ['short-form', 'Short-form Content', 'Posts, reels, captions, short clips.'],
-      ['video', 'Video', 'Promo, explainer and short-form video.']]],
-    ['marketing', 'Marketing', 'Get the right audience to the right offer: channels, campaigns, funnels and measurement.', '--amber', [
-      ['analytics', 'Analytics', 'What is working, what is not, and what to do next.'],
-      ['email-funnels', 'Email & Funnels', 'Lists, sequences, landing pages, conversion.'],
-      ['paid-advertising', 'Paid Advertising', 'Campaign setup, targeting, budgets (advice only), testing.'],
-      ['social-media', 'Social Media', 'Calendar, posting plan, community, platform tactics.']]],
-    ['business-operations', 'Business & Operations', 'Keep the business running: operations, legal housekeeping, customers and the tools that automate it.', '--green', [
-      ['customer-support', 'Customer Support', 'Replies, FAQs, refunds, feedback loops.'],
-      ['legal-compliance', 'Legal & Compliance', 'Contracts, trademarks, policies, platform rules. Flags risk plainly.'],
-      ['operations', 'Operations', 'Suppliers, fulfilment, workflows, checklists.'],
-      ['tech-automation', 'Tech & Automation', 'Stores, integrations, scripts, dashboards.']]],
-    ['finance', 'Finance', 'Know the numbers: budgets, pricing, revenue and costs, tax and cash flow. Advise only; never move money.', '--red', [
-      ['bookkeeping-tax', 'Bookkeeping & Tax', 'Records, categories, deadlines, what to ask the accountant.'],
-      ['budgeting', 'Budgeting & Cash Flow', 'Budgets, forecasts, runway.'],
-      ['pricing', 'Pricing & Margins', 'Unit economics, price tests, margins.']]],
-  ];
+  const AD = window.AtlasData, NAV = window.AtlasNav;
+  // [slug, name, remit, colour variable, sub-teams [slug, name, remit]] — rebuilt from AtlasData on every render
+  let D = [], byId = {};
+  const sync = () => {
+    D = AD.depts.map(d => [d.slug, d.name, d.remit, AD.colorVar(d.slug), d.teams.map(t => [t.slug, t.name, t.remit])]);
+    byId = Object.fromEntries(D.map(d => [d[0], d]));
+    if (!byId[sel.dept]) sel = {dept: D[0] ? D[0][0] : null, team: null};
+    else if (sel.team && !byId[sel.dept][4].some(t => t[0] === sel.team)) sel.team = null;
+  };
   const VIEWS = [['grid', 'Grid'], ['sidebar', 'Sidebar'], ['orbit', 'Orbit']];
   const KEY = 'jarvis.deptview';
   const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
-  const byId = Object.fromEntries(D.map(d => [d[0], d]));
-  let view = 'grid', sel = {dept: D[0][0], team: null};
+  let view = 'grid', sel = {dept: null, team: null};
   try { const v = localStorage.getItem(KEY); if (VIEWS.some(x => x[0] === v)) view = v; } catch (_) {}
   const h = /deptview=([a-z]+)/.exec(location.hash); if (h && VIEWS.some(x => x[0] === h[1])) view = h[1];
 
@@ -45,16 +24,16 @@
   const ov = document.createElement('div');
   ov.id = 'deptOverlay'; ov.className = 'dept-overlay'; ov.hidden = true;
   ov.innerHTML = `<div class="dept-panel glass" role="dialog" aria-label="Departments">
-    <div class="rhead"><span>Departments</span>
+    <div class="rhead"><span>Atlas workspace</span>${NAV ? NAV.tabs('departments') : ''}
       <div class="dept-switch" role="group" aria-label="Layout">${VIEWS.map(([id, n]) =>
-        `<button type="button" data-view="${id}"><i class="dv-ico dv-${id}"></i>${n}</button>`).join('')}</div>
+        `<button type="button" data-view="${id}"><i class="dv-ico dv-${id}"></i><span>${n}</span></button>`).join('')}</div>
       <button class="ctl aux" id="deptClose" aria-label="Close departments">✕</button></div>
     <div class="dept-body" id="deptBody"></div></div>`;
   document.body.appendChild(ov);
   const body = ov.querySelector('#deptBody');
 
   const state = id => {                       // live status borrowed from the department rail
-    const el = document.querySelectorAll('#teamRail .tr-item')[D.findIndex(d => d[0] === id)];   // rail order matches D
+    const el = document.querySelector(`#teamRail .tr-item[data-dept="${id}"]`);
     return el ? (el.classList.contains('working') ? 'working' : el.classList.contains('done') ? 'done' : '') : '';
   };
   const dot = id => `<span class="dp-state ${state(id)}" title="${state(id) || 'idle'}"></span>`;
@@ -67,27 +46,30 @@
     inp.dispatchEvent(new Event('input', {bubbles: true}));
   }
   const briefBtn = (slug, name) => `<button type="button" class="ctl run dp-brief" data-brief="${slug}" data-name="${esc(name)}">Brief ${esc(name)} ▸</button>`;
+  const brainBtn = (id, label) => `<button type="button" class="ctl aux dp-brain" data-brain="${id}">${label} ▸</button>`;
 
   // ── layout 1: grid of department cards ──
   const gridView = () => `<div class="dp-grid">${D.map(d => `
     <article class="dp-card" ${cv(d)}>
       <header><span class="dp-dot"></span><h3>${esc(d[1])}</h3>${dot(d[0])}<em>${d[4].length} teams</em></header>
       <p>${esc(d[2])}</p>
-      <ul>${d[4].map(t => `<li><button type="button" data-brief="${t[0]}" data-name="${esc(t[1])}" title="${esc(t[2])}">
+      <ul>${d[4].map(t => `<li><button type="button" data-brief="${t[0]}" data-name="${esc(t[1])}" title="Brief ${esc(t[1])}: ${esc(t[2])}">
         <b>${esc(t[1])}</b><span>${esc(t[2])}</span></button></li>`).join('')}</ul>
-      <footer><button type="button" class="dp-link" data-brief="${d[0]}" data-name="${esc(d[1])}">Brief whole department ▸</button></footer>
+      <footer><button type="button" class="dp-link" data-brief="${d[0]}" data-name="${esc(d[1])}">Brief whole department ▸</button>
+        <button type="button" class="dp-link" data-brain="${d[0]}">Notes in Brain ▸</button></footer>
     </article>`).join('')}</div>`;
 
   // ── detail pane (sidebar + orbit) ──
   function detail(){
-    const d = byId[sel.dept], t = sel.team && d[4].find(x => x[0] === sel.team);
+    const d = byId[sel.dept]; if (!d) return '';
+    const t = sel.team && d[4].find(x => x[0] === sel.team);
     const head = t ? `<div class="dd-crumb"><button type="button" data-pick="${d[0]}">${esc(d[1])}</button> / ${esc(t[1])}</div>
         <h2>${esc(t[1])}</h2><p class="dd-remit">${esc(t[2])}</p>
         <div class="dd-meta"><span>team</span><code>${t[0]}</code><span>dept</span><code>${d[0]}</code></div>
-        ${briefBtn(t[0], t[1])}`
+        <div class="dd-actions">${briefBtn(t[0], t[1])}${brainBtn(t[0], 'View in Brain')}</div>`
       : `<div class="dd-crumb">Department ${dot(d[0])}</div><h2>${esc(d[1])}</h2><p class="dd-remit">${esc(d[2])}</p>
         <div class="dd-meta"><span>folder</span><code>${d[0]}</code><span>teams</span><code>${d[4].length}</code></div>
-        ${briefBtn(d[0], d[1])}`;
+        <div class="dd-actions">${briefBtn(d[0], d[1])}${brainBtn(d[0], 'View in Brain')}</div>`;
     return `<aside class="dp-detail" ${cv(d)}>${head}
       <div class="dd-label">Sub-teams</div>
       <ul class="dd-list">${d[4].map(x => `<li><button type="button" class="${x[0] === sel.team ? 'on' : ''}" data-team="${x[0]}">
@@ -102,10 +84,10 @@
 
   // ── layout 3: orbit map ──
   function orbitView(){
-    const W = 1120, H = 760, cx = W / 2, cy = H / 2 + 6, R = 270, rad = a => a * Math.PI / 180;
+    const W = 1120, H = 760, cx = W / 2, cy = H / 2 + 6, R = 270, rad = a => a * Math.PI / 180, step = 360 / Math.max(1, D.length);
     let ring = '', lines = '', nodes = '';
     const orbs = D.map((d, i) => {
-      const a = -90 + i * 72;
+      const a = -90 + i * step;
       return {d, a, x: cx + R * Math.cos(rad(a)), y: cy + 240 * Math.sin(rad(a))};
     });
     for (const o of orbs){
@@ -128,17 +110,22 @@
         <text x="${o.x.toFixed(1)}" y="${(o.y + 4).toFixed(1)}" text-anchor="middle" class="ob-ini">${d[4].length}</text>
         <text x="${o.x.toFixed(1)}" y="${(o.y - 36).toFixed(1)}" text-anchor="middle" class="ob-name">${esc(d[1])}</text></g>`;
     }
-    return `<div class="dp-orbit"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" aria-label="Department orbit map">
+    return `<div class="dp-orbit"><div class="ob-scroll"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" aria-label="Department orbit map">
       <ellipse cx="${cx}" cy="${cy}" rx="${R}" ry="240" class="ob-ring"/><ellipse cx="${cx}" cy="${cy}" rx="${R * 1.45}" ry="${240 * 1.45}" class="ob-ring faint"/>
       ${ring}${lines}
       <g class="ob-hub"><circle cx="${cx}" cy="${cy}" r="48"/><circle cx="${cx}" cy="${cy}" r="62" class="pulse"/>
-        <text x="${cx}" y="${cy + 5}" text-anchor="middle">ATLAS</text></g>${nodes}</svg>${detail()}</div>`;
+        <text x="${cx}" y="${cy + 5}" text-anchor="middle">ATLAS</text></g>${nodes}</svg></div>${detail()}</div>`;
   }
 
   function render(){
+    sync();
     ov.querySelectorAll('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === view)));
     ov.dataset.view = view;
+    const keep = body.scrollTop;
     body.innerHTML = view === 'sidebar' ? sidebarView() : view === 'orbit' ? orbitView() : gridView();
+    body.scrollTop = keep;
+    const ob = body.querySelector(".ob-scroll"); if (ob && !keep) ob.scrollLeft = (ob.scrollWidth - ob.clientWidth) / 2;
+    body.querySelector(".ds-nav .on")?.scrollIntoView({block: "nearest", inline: "center"});
   }
   function setView(v){ view = v; try { localStorage.setItem(KEY, v); } catch (_) {} render(); }
 
@@ -148,25 +135,31 @@
     if (t.id === 'deptClose') return close();
     if (t.dataset.view) return setView(t.dataset.view);
     if (t.dataset.brief) return brief(t.dataset.brief, t.dataset.name);
+    if (t.dataset.brain) return NAV ? NAV.go('brain', t.dataset.brain) : undefined;      // team and department slugs are note names
     if (t.dataset.pick){ sel = {dept: t.dataset.pick, team: null}; return render(); }
     if (t.dataset.team){ sel = {dept: t.dataset.dept || sel.dept, team: t.dataset.team}; return render(); }
   });
   ov.addEventListener('keydown', e => {
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role=button]')){ e.preventDefault(); e.target.dispatchEvent(new MouseEvent('click', {bubbles: true})); }
   });
-  function open(){ ov.hidden = false; render(); document.getElementById('navDepts')?.setAttribute('aria-expanded', 'true'); (ov.querySelector('[aria-pressed=true]') || ov).focus?.(); }
-  function close(){ ov.hidden = true; document.getElementById('navDepts')?.setAttribute('aria-expanded', 'false'); }
+  const btn = document.getElementById('navDepts');
+  function open(arg){
+    sync();
+    if (arg && arg.dept && byId[arg.dept]) sel = {dept: arg.dept, team: arg.team || null};
+    // grid has no detail pane — a requested team/department selection needs the sidebar layout
+    if (arg && arg.dept && view === 'grid') view = 'sidebar';
+    ov.hidden = false; render(); btn?.setAttribute('aria-expanded', 'true');
+    (ov.querySelector('[aria-pressed=true]') || ov).focus?.();
+  }
+  function close(){ ov.hidden = true; btn?.setAttribute('aria-expanded', 'false'); }
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !ov.hidden){ e.stopPropagation(); close(); } }, true);
 
-  let btn = document.getElementById('navDepts');
-  if (!btn){
-    btn = document.createElement('button'); btn.className = 'navbtn'; btn.id = 'navDepts'; btn.textContent = 'Departments'; btn.setAttribute('aria-expanded', 'false');
-    const brain = document.getElementById('navBrain'); brain ? brain.before(btn) : document.querySelector('.menu')?.appendChild(btn);
-  }
-  btn.addEventListener('click', () => ov.hidden ? open() : close());
-  // keep status dots live while the view is open
+  if (btn) btn.addEventListener('click', () => ov.hidden ? (NAV ? NAV.go('departments') : open()) : close());
+  if (NAV) NAV.views.departments = {open, close, isOpen: () => !ov.hidden};
+  // keep status dots live while the view is open; re-render when the department list changes
   const rail = document.getElementById('teamRail');
   if (rail) new MutationObserver(() => { if (!ov.hidden) render(); }).observe(rail, {subtree: true, attributes: true, attributeFilter: ['class']});
+  AD.onChange(() => { if (!ov.hidden) render(); });
   window.AtlasDepartments = {open, close, setView};
   if (/deptview=/.test(location.hash)) open();
 })();

@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="themes.css">
 <link rel="stylesheet" href="departments.css">
+<link rel="stylesheet" href="agents.css">
 </head>
 <body>
 <div class="ambient a1"></div><div class="ambient a2"></div>
@@ -19,7 +20,9 @@
   <nav class="menu">
     <button class="navbtn" id="navCmds" aria-expanded="false" title="Command Matrix (⌘K)">Command Matrix</button>
     <button class="navbtn" id="navLogs" aria-expanded="false">Action Logs</button>
-    <button class="navbtn" id="navBrain">Brain</button>
+    <button class="navbtn" id="navDepts" aria-expanded="false">Departments</button>
+    <button class="navbtn" id="navBrain" aria-expanded="false">Brain</button>
+    <button class="navbtn" id="navAgents" aria-expanded="false" title="Live sub-agent activity">Agents</button>
     <button class="navbtn" id="settingsBtn">Settings</button>
   </nav>
   <div class="menu-right">
@@ -193,7 +196,7 @@
 <div id="brainOverlay" class="brain-overlay" hidden>
   <div class="brain-panel glass">
     <div class="rhead">
-      <span>Second Brain</span>
+      <span>Atlas workspace</span>
       <div class="brain-tools">
         <label class="btog"><input type="checkbox" id="brNotebooks"> Notebooks</label>
         <label class="btog"><input type="checkbox" id="brShared"> Shared &amp; log</label>
@@ -206,6 +209,7 @@
       <aside class="brain-note">
         <div id="brTitle" class="brtitle">Click a node</div>
         <div id="brPath" class="brpath"></div>
+        <button id="brToDept" class="ctl aux brto" type="button" hidden>Open in Departments ▸</button>
         <div id="brLinks" class="brlinks"></div>
         <pre id="brText"></pre>
       </aside>
@@ -214,7 +218,9 @@
   </div>
 </div>
 
+<script src="atlas-data.js"></script>
 <script src="app.js"></script>
 <script src="departments.js"></script>
+<script src="agents.js"></script>
 </body>
 </html>

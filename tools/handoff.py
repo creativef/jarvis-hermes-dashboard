@@ -4,7 +4,7 @@
 Usage:  python3 tools/handoff.py "the job, written as a full brief"
 
 Prints a job id and returns immediately. The helper runs in its own process,
-writes its outcome to logs/handoff/<id>.json, and the dashboard announces it
+writes its outcome to logs/handoff/<id>.json (live progress lines: <id>.log), and the dashboard announces it
 once when it lands. Nothing here binds a port or touches the network.
 """
 import json
@@ -46,31 +46,69 @@ def launch(mission):
     return jid
 
 
+def _brief_event(ev):
+    """One short human line for a stream-json event (the dashboard's live 'step')."""
+    kind = str(ev.get("type") or "event")
+    detail = ev.get("text") or ev.get("name") or ev.get("tool") or ev.get("message") or ""
+    if isinstance(detail, (dict, list)):
+        detail = json.dumps(detail)
+    detail = " ".join(str(detail).split())
+    return (f"{kind}: {detail}" if detail else kind)[:240]
+
+
 def worker(jid, mission):
     sys.path.insert(0, str(ROOT))
     import runtime
+    import threading
     path = HANDOFF_DIR / f"{jid}.json"
+    log_path = HANDOFF_DIR / f"{jid}.log"
+    err_path = HANDOFF_DIR / f"{jid}.err"
     job = json.loads(path.read_text(encoding="utf-8"))
-    status, text = "done", ""
+    job["pid"] = os.getpid()
+    _write(path, job)
+    status, text, final = "done", "", ""
     try:
-        proc = subprocess.run(runtime.build_command(mission, None), input=RULES + mission,
-                              text=True, capture_output=True, cwd=runtime.WORKDIR,
-                              timeout=3600)
-        final = ""
-        for line in proc.stdout.splitlines():
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                continue
-            if ev.get("type") == "result":
-                final = ev.get("text") or final
-            elif ev.get("type") == "text" and not final:
-                text += ev.get("text") or ""
+        with open(log_path, "a", encoding="utf-8") as log, open(err_path, "w") as err:
+            proc = subprocess.Popen(runtime.build_command(mission, None), stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=err, text=True,
+                                    cwd=runtime.WORKDIR)
+
+            def feed():
+                try:
+                    proc.stdin.write(RULES + mission)
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            threading.Thread(target=feed, daemon=True).start()
+            killer = threading.Timer(3600, proc.kill)
+            killer.daemon = True
+            killer.start()
+            for line in proc.stdout:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                log.write(f"{time.time():.3f}\t{_brief_event(ev)}\n")
+                log.flush()
+                if ev.get("type") == "result":
+                    final = ev.get("text") or final
+                elif ev.get("type") == "text" and not final:
+                    text += ev.get("text") or ""
+            proc.wait()
+            proc.stdout.close()
+            killer.cancel()
         text = (final or text).strip()
         if proc.returncode != 0 and not text:
-            status, text = "failed", (proc.stderr or "helper exited with an error")[-260:]
+            try:
+                tail = err_path.read_text(errors="replace")
+            except OSError:
+                tail = ""
+            status, text = "failed", (tail or "helper exited with an error")[-260:]
     except Exception as e:  # noqa: BLE001
         status, text = "failed", f"{e}"[:260]
+    job = json.loads(path.read_text(encoding="utf-8"))
     job.update(status=status, result=text or "Finished with nothing to report.",
                finished=time.time())
     _write(path, job)

@@ -1229,27 +1229,42 @@ setInterval(async () => {
   const ov = document.getElementById('brainOverlay'); if (!ov) return;
   const cv = document.getElementById('brainCanvas'), ctx = cv.getContext('2d');
   const $b = id => document.getElementById(id);
-  const GROUP = {'research-strategy':[79,230,245], 'design-content':[168,132,255], 'marketing':[255,182,72],
-                 'business-operations':[62,232,168], 'finance':[255,120,170]};
-  const NAMES = {'research-strategy':'Research & Strategy', 'design-content':'Design & Content', 'marketing':'Marketing',
-                 'business-operations':'Business & Operations', 'finance':'Finance'};
+  const GROUP = {};                                   // dept slug -> [r,g,b], resolved from theme variables
   const RADIUS = {hub:16, dept:11, sub:6.5, notebook:3.5, commons:6, log:4, other:4};
-  const colorOf = n => n.type === 'hub' ? HUB : (GROUP[n.group] || [130,160,180]);
-  let INK = '234,246,250', HUB = [240,250,255];
+  const colorOf = n => n.type === 'hub' ? HUB : (GROUP[n.group] || NEUTRAL);
+  let INK = '234,246,250', HUB = [240,250,255], NEUTRAL = [130,160,180], FONT = 'system-ui, sans-serif', LIGHT = false;
+  const probe = document.createElement('i'); probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none';
+  ov.appendChild(probe);
+  const rgbOf = (css, dflt) => {                      // any CSS colour/var -> [r,g,b]
+    probe.style.color = ''; probe.style.color = css;
+    const m = getComputedStyle(probe).color.match(/[\d.]+/g);
+    if (!m || m.length < 3) return dflt;
+    const v = /srgb/.test(getComputedStyle(probe).color) ? m.slice(0, 3).map(x => Math.round(x * 255)) : m.slice(0, 3).map(Math.round);
+    return v.every(Number.isFinite) ? v : dflt;
+  };
+  const deptList = () => (window.AtlasData ? AtlasData.depts : []);
   const readTheme = () => {
     const cs = getComputedStyle(document.documentElement);
     INK = cs.getPropertyValue('--ink-rgb').trim() || INK;
     const h = cs.getPropertyValue('--hub-rgb').trim().split(',').map(Number);
     if (h.length === 3 && h.every(Number.isFinite)) HUB = h;
+    NEUTRAL = rgbOf('var(--dim)', NEUTRAL);
+    LIGHT = document.documentElement.dataset.mode === 'light';
+    FONT = getComputedStyle(document.body).fontFamily || FONT;
+    for (const d of deptList()) GROUP[d.slug] = rgbOf(`var(${AtlasData.colorVar(d.slug)})`, NEUTRAL);
+    if (!ov.hidden && W) draw();                      // repaint straight away on a theme/mode switch
   };
-  readTheme(); addEventListener('atlas-theme', readTheme);
-  $b('brLegend').innerHTML = Object.keys(GROUP).map(k =>
-    `<span><i style="background:rgb(${GROUP[k].join(',')})"></i>${NAMES[k]}</span>`).join('')
-    + '<span><i style="background:rgb(var(--hub-rgb))"></i>Atlas hub</span><span style="margin-left:auto">drag nodes · scroll to zoom · click to read</span>';
-
+  const legend = () => {
+    $b('brLegend').innerHTML = deptList().map(d =>
+      `<span><i style="background:var(${AtlasData.colorVar(d.slug)})"></i>${d.name.replace(/&/g, '&amp;')}</span>`).join('')
+      + '<span><i style="background:rgb(var(--hub-rgb))"></i>Atlas hub</span><span class="lg-hint">drag nodes · scroll to zoom · click to read</span>';
+  };
   let nodes = [], links = [], byId = new Map(), adj = new Map();
   let W = 0, H = 0, dpr = 1, raf = 0, alpha = 1;
   let view = {x:0, y:0, k:1}, hover = null, selected = null, drag = null, pan = null, moved = false;
+  readTheme(); legend();
+  addEventListener('atlas-theme', readTheme);
+  if (window.AtlasData) AtlasData.onChange(() => { readTheme(); legend(); if (!ov.hidden) load(); });
 
   const fit = () => {
     dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -1353,11 +1368,11 @@ setInterval(async () => {
       const dim = focus && n !== focus && !(near && near.has(n.id));
       ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
       ctx.fillStyle = `rgba(${c.join(',')},${dim ? .18 : .95})`;
-      ctx.shadowColor = `rgba(${c.join(',')},.8)`; ctx.shadowBlur = dim ? 0 : (n.type === 'notebook' ? 4 : 14);
+      ctx.shadowColor = `rgba(${c.join(',')},.8)`; ctx.shadowBlur = dim ? 0 : (n.type === 'notebook' ? 4 : LIGHT ? 6 : 14);
       ctx.fill(); ctx.shadowBlur = 0;
       if (n === selected){ ctx.lineWidth = 2 / view.k; ctx.strokeStyle = `rgb(${INK})`; ctx.stroke(); }
     }
-    ctx.font = `${11 / Math.max(.7, Math.min(1.4, view.k))}px -apple-system, system-ui, sans-serif`;
+    ctx.font = `${11 / Math.max(.7, Math.min(1.4, view.k))}px ${FONT}`;
     ctx.textAlign = 'center';
     for (const n of nodes){
       if (!visible(n)) continue;
@@ -1374,7 +1389,7 @@ setInterval(async () => {
   function loop(){ raf = requestAnimationFrame(loop); if (W) { step(); draw(); } }
 
   async function openNote(n){
-    selected = n; alpha = Math.max(alpha, .15);
+    selected = n; alpha = Math.max(alpha, .15); syncToDept(n);
     $b('brTitle').textContent = n.id; $b('brPath').textContent = ''; $b('brText').textContent = 'loading…';
     const box = $b('brLinks'); box.textContent = '';
     for (const id of [...(adj.get(n.id) || [])].sort()){
@@ -1403,7 +1418,7 @@ setInterval(async () => {
   });
   cv.addEventListener('pointerup', e => {
     const [px, py] = pos(e);
-    if (!moved){ const n = pick(px, py); if (n) openNote(n); else selected = null; }
+    if (!moved){ const n = pick(px, py); if (n) openNote(n); else { selected = null; syncToDept(null); } }
     drag = null; pan = null; cv.classList.remove('drag');
   });
   cv.addEventListener('pointerleave', () => { hover = null; });
@@ -1414,12 +1429,35 @@ setInterval(async () => {
     view.x = px - W / 2 - before.x * view.k; view.y = py - H / 2 - before.y * view.k;
   }, {passive: false});
 
-  const open = async () => {
-    ov.hidden = false; fit(); view = {x: 0, y: 0, k: 1};
+  const navBtn = $b('navBrain'), isOpen = () => !ov.hidden;
+  const open = async arg => {
+    const want = arg && typeof arg === 'string' ? arg : arg && arg.id;
+    ov.hidden = false; navBtn.setAttribute('aria-expanded', 'true'); fit(); view = {x: 0, y: 0, k: 1};
     await load(); fitView(); cancelAnimationFrame(raf); loop();
+    const n = want && byId.get(want);
+    if (n){                                           // jump to a specific note (e.g. from Departments)
+      if (!visible(n)) { if (n.type === 'notebook') $b('brNotebooks').checked = true; else $b('brShared').checked = true; }
+      view.k = Math.max(view.k, 1); view.x = -n.x * view.k; view.y = -n.y * view.k; openNote(n);
+    }
   };
-  const close = () => { ov.hidden = true; cancelAnimationFrame(raf); };
-  $b('navBrain').addEventListener('click', open);
+  const close = () => { ov.hidden = true; navBtn.setAttribute('aria-expanded', 'false'); cancelAnimationFrame(raf); };
+  const NAV = () => window.AtlasNav;
+  const goDept = () => {                              // the selected note's department / team, if it belongs to one
+    const n = selected; if (!n || !NAV()) return;
+    const d = n.type === 'dept' ? n.id : n.group;
+    const team = n.type === 'sub' ? n.id : n.type === 'notebook' ? n.id.replace(/-notebook$/, '') : null;
+    NAV().go('departments', {dept: d, team: AtlasData.dept(d)?.teams.some(t => t.slug === team) ? team : null});
+  };
+  const syncToDept = n => {
+    const b = $b('brToDept'), ok = n && (n.type === 'dept' || n.type === 'sub' || n.type === 'notebook') && n.group && AtlasData.dept(n.group);
+    b.hidden = !ok;
+    if (ok) b.textContent = 'Open ' + (AtlasData.dept(n.group).name) + ' in Departments ▸';
+  };
+  $b('brToDept').addEventListener('click', goDept);
+  if (window.AtlasNav) AtlasNav.views.brain = {open, close, isOpen};
+  const tabs = document.createElement('div'); tabs.innerHTML = window.AtlasNav ? AtlasNav.tabs('brain') : '';
+  if (tabs.firstElementChild) ov.querySelector('.rhead > span').after(tabs.firstElementChild);
+  navBtn.addEventListener('click', () => isOpen() ? close() : (NAV() ? NAV().go('brain') : open()));
   $b('brainClose').addEventListener('click', close);
   $b('brRefresh').addEventListener('click', load);
   ov.addEventListener('click', e => { if (e.target === ov) close(); });
@@ -1521,24 +1559,33 @@ setInterval(async () => {
   mark(); dispatchEvent(new Event('atlas-theme'));
 
   // ── department rail: lights up when a team is briefed / finishes ──
-  const DEPTS = [['research-strategy', 'Research & Strategy', '#4fe6f5'], ['design-content', 'Design & Content', '#a884ff'],
-                 ['marketing', 'Marketing', '#ffb648'], ['business-operations', 'Business & Ops', '#3ee8a8'], ['finance', 'Finance', '#ff78aa']];
   const rail = $('#teamRail'), els = {}, timers = {}, teamDept = {};
-  rail.innerHTML = '<div class="tr-title">Departments</div>';
-  for (const [id, name, col] of DEPTS){
-    const b = document.createElement('button'); b.className = 'tr-item'; b.style.setProperty('--c', col); b.type = 'button';
-    b.innerHTML = `<span class="tr-dot"></span><span class="tr-name">${name}</span><span class="tr-state">idle</span>`;
-    b.onclick = () => $('#navBrain') && $('#navBrain').click();
-    rail.appendChild(b); els[id] = b; teamDept[id] = id;
+  const railState = {};                                // slug -> 'working' | 'done', survives a rebuild
+  function buildRail(){
+    rail.innerHTML = '<div class="tr-title">Departments</div>';
+    for (const k in els) delete els[k];
+    for (const d of AtlasData.depts){
+      const id = d.slug, name = d.name.replace('Business & Operations', 'Business & Ops');
+      const b = document.createElement('button'); b.className = 'tr-item'; b.style.setProperty('--c', `var(${AtlasData.colorVar(id)})`);
+      b.type = 'button'; b.dataset.dept = id; b.title = `${d.name} — open in Departments`;
+      b.innerHTML = `<span class="tr-dot"></span><span class="tr-name">${name.replace(/&/g, '&amp;')}</span><span class="tr-state">idle</span>`;
+      b.onclick = () => window.AtlasNav ? AtlasNav.go('departments', {dept: id}) : $('#navDepts')?.click();
+      rail.appendChild(b); els[id] = b; teamDept[id] = id;
+      d.teams.forEach(t => { teamDept[t.slug] = id; });
+      if (railState[id]) setState(id, railState[id]);
+    }
   }
-  fetch('/api/brain/graph', {headers: apiHeaders()}).then(r => r.json())
-    .then(g => (g.nodes || []).forEach(n => { if (n.type === 'sub' || n.type === 'dept') teamDept[n.id] = n.group || n.id; }))
-    .catch(() => {});
   const setState = (id, st) => {
+    railState[id] = st || '';
     const b = els[id]; if (!b) return;
     b.classList.remove('working', 'done'); if (st) b.classList.add(st);
     b.querySelector('.tr-state').textContent = st === 'working' ? 'working…' : st === 'done' ? 'done' : 'idle';
   };
+  buildRail();
+  AtlasData.onChange(buildRail);
+  fetch('/api/brain/graph', {headers: apiHeaders()}).then(r => r.json())
+    .then(g => (g.nodes || []).forEach(n => { if (n.type === 'sub' || n.type === 'dept') teamDept[n.id] = n.group || n.id; }))
+    .catch(() => {});
   const settle = id => { setState(id, 'done'); clearTimeout(timers[id]); timers[id] = setTimeout(() => setState(id, null), 5000); };
   const prevHandle = handle;
   handle = ev => {

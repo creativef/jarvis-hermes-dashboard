@@ -22,7 +22,7 @@
 }
 
 /* ── shared shape language: every theme just sets the radii ── */
-.card,.glass,.drawer,.settings-panel,.brain-panel{border-radius:var(--r);border-width:var(--bw);-webkit-backdrop-filter:blur(var(--card-blur));backdrop-filter:blur(var(--card-blur))}
+.card,.glass,.drawer,.settings-panel,.brain-panel,.dept-panel{border-radius:var(--r);border-width:var(--bw);-webkit-backdrop-filter:blur(var(--card-blur));backdrop-filter:blur(var(--card-blur))}
 :is(.ctl,.field,.cmd,.starter,.navbtn,.swatch,.tr-item,.apcmd,.sfield input,.sfield select,.jsonblk,.approval,.slashmenu,.miniBtns button,.sysgrid,.toast,.slashitem){border-radius:var(--r2)}
 :is(.pill,.rtag,.micbar,.chip,.armedchip,.brlinks button){border-radius:var(--rp)}
 .iconbtn{border-radius:var(--ri)}
@@ -30,7 +30,7 @@
 .turn>.tjarvis+.ttext{border-radius:var(--rb) var(--rb) var(--rb) var(--rbt)}
 .sysrow{background:var(--card-solid)}
 .bulb{background:var(--bulb-off)}
-.brain-panel,.settings-panel{background:var(--card-solid)}
+.brain-panel,.dept-panel,.settings-panel{background:var(--card-solid)}
 .settings-panel{display:flex;flex-direction:column;max-height:calc(100vh - 40px)}
 .settings-body{overflow-y:auto;min-height:0;flex:1}
 :root[data-mode="light"] .ctl.run{background:var(--cyan);border-color:var(--cyan2);color:var(--on-accent)}
@@ -182,7 +182,7 @@ body.done .stword{color:#b8ffe3!important}body.error .stword{color:#ffc4ca!impor
   .pill{height:28px;font-size:12px;font-style:italic;border-color:var(--edge)}
   /* panels: double-framed pages, no glass */
   .card,.glass,.drawer,.settings-panel{box-shadow:0 0 0 4px var(--bg),0 0 0 5px var(--edge);border-color:var(--edge-2);background:var(--card)}
-  .drawer,.settings-panel,.brain-panel{background:var(--card-solid)}
+  .drawer,.settings-panel,.brain-panel,.dept-panel{background:var(--card-solid)}
   .chathead{justify-content:center;gap:18px;padding:14px 22px;border-bottom:3px double var(--edge)}
   .chathead span:first-child,.rhead span:first-child{font-size:14px;letter-spacing:.34em;text-transform:uppercase;font-variant:small-caps;color:var(--ink);font-weight:700}
   .chathead span:first-child::before{content:"❦  ";color:var(--cyan)}
@@ -255,7 +255,7 @@ body.done .stword{color:#b8ffe3!important}body.error .stword{color:#ffc4ca!impor
   .pill i{border-radius:0}
   .iconbtn{background:#fff;border:2px solid #111;box-shadow:3px 3px 0 #111;color:#111}
   .iconbtn:active{transform:translate(3px,3px);box-shadow:none}
-  .card,.glass,.drawer,.settings-panel,.brain-panel{border:var(--bw) solid var(--edge);box-shadow:9px 9px 0 var(--hard)}
+  .card,.glass,.drawer,.settings-panel,.brain-panel,.dept-panel{border:var(--bw) solid var(--edge);box-shadow:9px 9px 0 var(--hard)}
   .chathead,.rhead{background:var(--cyan);color:var(--on-accent);border-bottom:var(--bw) solid var(--edge)}
   .chathead span:first-child,.rhead span:first-child{color:var(--on-accent);font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;font-weight:900;font-size:13px;letter-spacing:.14em}
   .rtag{background:var(--disc);color:#111;border:2px solid var(--edge);transform:rotate(-4deg);font-weight:800;box-shadow:3px 3px 0 var(--hard)}
@@ -333,7 +333,7 @@ body.done .stword{color:#b8ffe3!important}body.error .stword{color:#ffc4ca!impor
   .navbtn{border-radius:999px;font-weight:500;letter-spacing:.03em}
   .navbtn:hover,.navbtn[aria-expanded="true"]{background:rgba(var(--accent-rgb),.14);border-color:transparent}
   .card,.glass{backdrop-filter:blur(26px) saturate(1.5);box-shadow:0 24px 70px rgba(var(--shadow-rgb),.25),inset 0 1px 0 rgba(255,255,255,.18)}
-  .drawer,.settings-panel,.brain-panel{background:var(--card-solid)}
+  .drawer,.settings-panel,.brain-panel,.dept-panel{background:var(--card-solid)}
   .stage{padding-top:20px}
   .chathead span:first-child,.rhead span:first-child{font-weight:600;letter-spacing:.16em}
   .turn>.tuser+.ttext{background:linear-gradient(135deg,rgba(var(--accent-rgb),.22),rgba(255,140,210,.14));border-color:rgba(var(--accent-rgb),.3)}
@@ -393,7 +393,7 @@ body.done .stword{color:#b8ffe3!important}body.error .stword{color:#ffc4ca!impor
       linear-gradient(var(--cyan),var(--cyan)) 0 100%/16px 2px,linear-gradient(var(--cyan),var(--cyan)) 0 100%/2px 16px,
       linear-gradient(var(--cyan),var(--cyan)) 100% 100%/16px 2px,linear-gradient(var(--cyan),var(--cyan)) 100% 100%/2px 16px,
       var(--card);background-repeat:no-repeat}
-  .drawer,.settings-panel,.brain-panel{background-color:var(--card-solid)}
+  .drawer,.settings-panel,.brain-panel,.dept-panel{background-color:var(--card-solid)}
   .chathead,.rhead{padding:0;height:42px;align-items:stretch;border-bottom:1px solid var(--edge-2)}
   .chathead span:first-child,.rhead span:first-child{display:flex;align-items:center;padding:0 20px;border-right:1px solid var(--edge-2);color:var(--ink);letter-spacing:.2em}
   .chathead span:first-child::before{content:"SHEET 01 · ";color:var(--dim);margin-right:6px}
@@ -455,7 +455,7 @@ body.done .stword{color:#b8ffe3!important}body.error .stword{color:#ffc4ca!impor
   .iconbtn{border:0;box-shadow:var(--raise-s);background:var(--bg)}
   .iconbtn:active,.iconbtn[aria-pressed="true"]{box-shadow:var(--sink)}
   .card,.glass,.drawer{border:0;background:var(--bg);box-shadow:var(--raise)}
-  .drawer,.settings-panel,.brain-panel{background:var(--card-solid)}
+  .drawer,.settings-panel,.brain-panel,.dept-panel{background:var(--card-solid)}
   .chathead,.rhead{border-bottom:0;padding:20px 28px 8px}
   .composer{border-top:0;background:none;padding:12px 24px 22px}
   .rbody{padding:12px 28px}
@@ -550,3 +550,20 @@ body.done .stword{color:#b8ffe3!important}body.error .stword{color:#ffc4ca!impor
 .themepop{position:absolute;top:calc(100% + 8px);right:0;z-index:60;display:grid;grid-template-columns:repeat(2,1fr);gap:6px;padding:10px;min-width:230px;background:rgb(var(--bg-rgb));border:1px solid var(--edge,rgba(255,255,255,.18));border-radius:var(--r,10px);box-shadow:0 18px 40px rgba(0,0,0,.35)}
 .themepop[hidden]{display:none}
 #themeBtn{font-size:15px}
+
+/* ═══════════ Department colours — one hue per department, shared by the rail, Departments view and Brain graph.
+   Picked per theme/mode so the five stay distinct (the accent colour alone collides with red/violet/green in some themes). ═══════════ */
+:root{--dept-1:#4fe6f5;--dept-2:#a884ff;--dept-3:#ffb648;--dept-4:#3ee8a8;--dept-5:#ff78aa}
+:root[data-theme="atlas"][data-mode="light"]{--dept-1:#1f6fe0;--dept-2:#7a4ad8;--dept-3:#b86a00;--dept-4:#1b8a5a;--dept-5:#d02a6a}
+:root[data-theme="terminal"][data-mode="dark"]{--dept-1:#5ee6ff;--dept-2:#b794ff;--dept-3:#ffd24a;--dept-4:#3dff8a;--dept-5:#ff6b8b}
+:root[data-theme="terminal"][data-mode="light"]{--dept-1:#0a5fa8;--dept-2:#5b3bb5;--dept-3:#8a5a00;--dept-4:#0a6b34;--dept-5:#b3261e}
+:root[data-theme="folio"][data-mode="dark"]{--dept-1:#6fb7d9;--dept-2:#b79ad6;--dept-3:#e2b765;--dept-4:#8fbf7a;--dept-5:#e0675a}
+:root[data-theme="folio"][data-mode="light"]{--dept-1:#1f5f8a;--dept-2:#5b3f8c;--dept-3:#8a5a14;--dept-4:#3b6e2a;--dept-5:#a8261c}
+:root[data-theme="brutal"][data-mode="dark"]{--dept-1:#4fd8ff;--dept-2:#b79bff;--dept-3:#ffe14a;--dept-4:#4cf0a0;--dept-5:#ff5c8a}
+:root[data-theme="brutal"][data-mode="light"]{--dept-1:#0a5fd6;--dept-2:#5b2fd1;--dept-3:#b35a00;--dept-4:#0b7a3b;--dept-5:#d6125a}
+:root[data-theme="aurora"][data-mode="dark"]{--dept-1:#8ddcff;--dept-2:#c4a8ff;--dept-3:#ffc978;--dept-4:#6ff0c0;--dept-5:#ff7f9a}
+:root[data-theme="aurora"][data-mode="light"]{--dept-1:#1a78c2;--dept-2:#6a3fd8;--dept-3:#a8620a;--dept-4:#14805a;--dept-5:#d02a5e}
+:root[data-theme="blueprint"][data-mode="dark"]{--dept-1:#8fd6ff;--dept-2:#c3b2ff;--dept-3:#ffd479;--dept-4:#7be0b0;--dept-5:#ff9090}
+:root[data-theme="blueprint"][data-mode="light"]{--dept-1:#12509e;--dept-2:#5a43b5;--dept-3:#8f5b00;--dept-4:#16704a;--dept-5:#b3261e}
+:root[data-theme="clay"][data-mode="dark"]{--dept-1:#7cc4f0;--dept-2:#b9a3ff;--dept-3:#ffc46b;--dept-4:#6fe0ae;--dept-5:#ff7b86}
+:root[data-theme="clay"][data-mode="light"]{--dept-1:#2a6fa8;--dept-2:#6a4fb8;--dept-3:#96610c;--dept-4:#2b7d57;--dept-5:#b8322f}

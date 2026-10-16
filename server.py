@@ -249,12 +249,23 @@ class Handler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
             return self._json(brain.graph())
+        if p == "/api/departments":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json(brain.departments())
         if p == "/api/brain/note":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
             name = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
             found = brain.note(name)
             return self._json(found if found else {"error": "not found"}, 200 if found else 404)
+        if p == "/api/agents":
+            # local-only: loopback peer AND loopback Host, plus the session token
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json(commands.agents_snapshot())
         if p == "/api/jobs":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)

@@ -279,7 +279,7 @@ body.micopen .reactor{transition:opacity .4s,filter .4s}
 /* ── second brain graph ── */
 .brain-overlay{position:fixed;inset:0;z-index:55;background:rgba(var(--scrim-rgb),.72);display:grid;place-items:center;backdrop-filter:blur(4px);padding:18px}
 .brain-overlay[hidden]{display:none}
-.brain-panel{width:min(1280px,100%);height:min(820px,100%);display:flex;flex-direction:column;box-shadow:0 0 60px rgba(var(--shadow-rgb),.5)}
+.brain-panel{width:min(1320px,100%);height:min(840px,100%);display:flex;flex-direction:column;box-shadow:0 0 60px rgba(var(--shadow-rgb),.5)}
 .brain-tools{display:flex;align-items:center;gap:14px}
 .btog{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--mut);cursor:pointer}
 .btog input{accent-color:var(--cyan)}
