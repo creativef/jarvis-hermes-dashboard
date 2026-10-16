@@ -4,18 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="jarvis-token" content="__JARVIS_TOKEN__">
-<title>JARVIS · Hermes Mission Control</title>
+<title>ATLAS · Hermes Mission Control</title>
 <link rel="stylesheet" href="fonts.css">
+<script src="theme-boot.js"></script>
 <link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="themes.css">
+<link rel="stylesheet" href="departments.css">
 </head>
 <body>
 <div class="ambient a1"></div><div class="ambient a2"></div>
 
 <header class="menubar">
-  <div class="brand"><span class="dot"></span><b>JARVIS</b></div>
+  <div class="brand"><span class="dot"></span><b>ATLAS</b></div>
   <nav class="menu">
     <button class="navbtn" id="navCmds" aria-expanded="false" title="Command Matrix (⌘K)">Command Matrix</button>
     <button class="navbtn" id="navLogs" aria-expanded="false">Action Logs</button>
+    <button class="navbtn" id="navBrain">Brain</button>
     <button class="navbtn" id="settingsBtn">Settings</button>
   </nav>
   <div class="menu-right">
@@ -23,14 +27,18 @@
     <div class="pill hide-sm"><span id="top-profile">Profile: default</span></div>
     <div class="pill warn hide-md"><i></i><span id="top-voice">Voice: browser</span></div>
     <button id="callBtn" class="iconbtn" title="Call mode — silent, mic locked closed (Alt+C)" aria-pressed="false">📞</button>
-    <button id="mute" class="iconbtn mute on" title="Mute Jarvis speech" aria-label="Mute Jarvis">🔊</button>
+    <span class="themewrap"><button id="themeBtn" class="iconbtn" title="Choose theme" aria-label="Choose theme" aria-haspopup="true" aria-expanded="false">◐</button>
+      <div id="themePop" class="themepop" hidden role="menu" aria-label="Themes"></div></span>
+    <button id="modeBtn" class="iconbtn" title="Switch light / dark" aria-label="Switch light or dark mode">☾</button>
+    <button id="mute" class="iconbtn mute on" title="Mute Atlas speech" aria-label="Mute Atlas">🔊</button>
   </div>
 </header>
 
 <main class="stage">
   <section class="reactorpane">
     <div class="reactor" id="reactor">
-      <svg viewBox="0 0 520 520" id="core" aria-label="JARVIS reactor visualizer">
+      <canvas id="orbCanvas" aria-hidden="true"></canvas>
+      <svg viewBox="0 0 520 520" id="core" aria-label="ATLAS reactor visualizer">
         <defs>
           <radialGradient id="orb" cx="50%" cy="45%" r="55%">
             <stop offset="0%" stop-color="#ffffff"/><stop offset="25%" stop-color="#7ff7ff"/>
@@ -51,7 +59,7 @@
         <circle class="orbrim" cx="260" cy="260" r="64"/>
       </svg>
       <div class="status">
-        <div class="stbrand">JARVIS</div>
+        <div class="stbrand">ATLAS</div>
         <div class="stword" id="stword">STANDBY</div>
         <div class="strun" id="strun">awaiting uplink</div>
       </div>
@@ -79,7 +87,7 @@
       <div class="armedchip" id="armedChip" hidden><span>Armed</span><b id="armedName"></b><button id="armedX" aria-label="Disarm command">✕</button></div>
       <div class="slashmenu" id="slashMenu" role="listbox" hidden></div>
       <div class="field">
-        <textarea id="input" rows="2" spellcheck="false" placeholder="Message JARVIS…   ( / for commands )"></textarea>
+        <textarea id="input" rows="2" spellcheck="false" placeholder="Message ATLAS…   ( / for commands )"></textarea>
       </div>
       <div class="actions">
         <button id="mic" class="ctl mic" title="Voice / microphone">◉ Browser Voice</button>
@@ -89,6 +97,7 @@
       <div class="tip" id="tip">Use <b>Browser Voice</b> for local speech recognition, or local Parakeet/Kokoro if installed. Try <b>/browser</b> “open Chrome and inspect the current tab”.</div>
     </div>
   </section>
+  <nav class="teamrail" id="teamRail" aria-label="Departments"></nav>
 </main>
 
 <div class="scrim" id="scrim" hidden></div>
@@ -141,6 +150,18 @@
   <div class="settings-panel glass">
     <div class="rhead"><span>Settings</span><button id="settingsClose" class="ctl aux" aria-label="Close settings">✕</button></div>
     <div class="settings-body">
+      <div class="picklabel">Theme</div>
+      <div class="pickgrid" id="themeGrid"></div>
+      <div class="picklabel">Appearance</div>
+      <div class="pickgrid modegrid" id="modeGrid"></div>
+      <div class="picklabel">Layout</div>
+      <div class="pickgrid layoutgrid" id="layoutGrid"></div>
+      <label class="sfield">Provider
+        <input id="set-provider" type="text" readonly tabindex="-1">
+      </label>
+      <label class="sfield">Model
+        <input id="set-model" type="text" readonly tabindex="-1">
+      </label>
       <label class="sfield">Permission
         <select id="set-permission">
           <option value="normal">Normal — ask before running tools</option>
@@ -169,6 +190,31 @@
   </div>
 </div>
 
+<div id="brainOverlay" class="brain-overlay" hidden>
+  <div class="brain-panel glass">
+    <div class="rhead">
+      <span>Second Brain</span>
+      <div class="brain-tools">
+        <label class="btog"><input type="checkbox" id="brNotebooks"> Notebooks</label>
+        <label class="btog"><input type="checkbox" id="brShared"> Shared &amp; log</label>
+        <button id="brRefresh" class="ctl aux">Refresh</button>
+        <button id="brainClose" class="ctl aux" aria-label="Close brain">✕</button>
+      </div>
+    </div>
+    <div class="brain-body">
+      <div class="brain-stage"><canvas id="brainCanvas"></canvas></div>
+      <aside class="brain-note">
+        <div id="brTitle" class="brtitle">Click a node</div>
+        <div id="brPath" class="brpath"></div>
+        <div id="brLinks" class="brlinks"></div>
+        <pre id="brText"></pre>
+      </aside>
+    </div>
+    <div class="brain-legend" id="brLegend"></div>
+  </div>
+</div>
+
 <script src="app.js"></script>
+<script src="departments.js"></script>
 </body>
 </html>

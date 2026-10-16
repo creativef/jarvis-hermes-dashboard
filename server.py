@@ -19,7 +19,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = pathlib.Path(__file__).resolve().parent
 UI = ROOT / "ui"
@@ -52,6 +52,7 @@ if _env.exists():
     _load_dotenv(_env)
 
 import commands         # noqa: E402
+import brain            # noqa: E402
 import runtime          # noqa: E402
 import voice            # noqa: E402
 
@@ -231,7 +232,8 @@ class Handler(BaseHTTPRequestHandler):
                 profile=runtime.PROFILE,
                 source=runtime.SOURCE,
                 workdir=runtime.WORKDIR,
-                model=runtime.MODEL or "Hermes default",
+                model=runtime.model_info()["model_name"],
+                model_provider=runtime.model_info()["model_provider"],
                 tools=runtime.hermes_tools_snapshot(),
                 browser_stt=True,
                 browser_tts=True,
@@ -243,6 +245,16 @@ class Handler(BaseHTTPRequestHandler):
                 session=SESSION["id"],
                 backend=("api" if runtime.api_backend_ready() else "cli"),
                 approvals=runtime.api_backend_ready()))
+        if p == "/api/brain/graph":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json(brain.graph())
+        if p == "/api/brain/note":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            name = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+            found = brain.note(name)
+            return self._json(found if found else {"error": "not found"}, 200 if found else 404)
         if p == "/api/jobs":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -330,7 +342,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/run":
             if not RUN_LOCK.acquire(blocking=False):
-                return self._json({"error": "JARVIS is already processing a request"}, 409)
+                return self._json({"error": "ATLAS is already processing a request"}, 409)
             try:
                 return self._stream_run(raw)
             finally:
@@ -366,17 +378,13 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write((json.dumps(ev) + "\n").encode())
             self.wfile.flush()
 
-        # Foreground always wins: stop any in-flight background mission so this
-        # request runs now instead of silently blocking behind it on the shared
-        # Hermes execution lock.
-        if commands.running_background():
-            runtime.cancel_active()
-            emit(dict(t="note", message="Interrupted a background mission to answer you."))
+        # Background missions run in their own process, outside the execution
+        # lock, so they neither block nor get interrupted by this conversation.
 
         # ── the command matrix: /new /profile /goal /personality /kanban /mission /background /tools /status /browser
         cmd = commands.handle(
             message,
-            runner=lambda m: runtime.run(m, None, persona()))
+            runner=lambda m: runtime.run_background(m, persona()))
         if cmd:
             if cmd.get("note"):
                 emit(dict(t="note", message=cmd["note"]))
@@ -435,7 +443,7 @@ def main():
                  if perm == "bypass" else "")
 
     print(f"""
-  JARVIS · Hermes Live HUD
+  ATLAS · Hermes Live HUD
   ──────────────────────────────────────────────
   brain        {brain}
   profile      {runtime.PROFILE}

@@ -36,6 +36,6 @@ fi
 
 chmod +x start.sh install.sh
 
-printf '\nJARVIS is ready. Launching with the configured Hermes profile.\n'
+printf '\nATLAS is ready. Launching with the configured Hermes profile.\n'
 printf "Dashboard: http://127.0.0.1:${JARVIS_PORT:-8730}\n\n"
 exec ./start.sh

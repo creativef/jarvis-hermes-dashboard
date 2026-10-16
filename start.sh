@@ -7,7 +7,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global
 export JARVIS_RUNTIME="${JARVIS_RUNTIME:-auto}"
 
 if ! command -v python3 >/dev/null 2>&1; then
-  printf 'JARVIS needs Python 3. Install Python, then run this script again.\n' >&2
+  printf 'ATLAS needs Python 3. Install Python, then run this script again.\n' >&2
   exit 1
 fi
 

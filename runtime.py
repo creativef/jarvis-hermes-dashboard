@@ -70,7 +70,8 @@ def apply_settings(settings):
 
 
 def current_settings():
-    return {"permission": PERMISSION, "timeout": IDLE_TIMEOUT, "workdir": WORKDIR}
+    return {"permission": PERMISSION, "timeout": IDLE_TIMEOUT, "workdir": WORKDIR,
+            **model_info()}
 
 
 def _profile_home():
@@ -78,6 +79,34 @@ def _profile_home():
     if PROFILE and PROFILE != "default":
         return pathlib.Path(base) / "profiles" / PROFILE
     return pathlib.Path(base)
+
+
+def model_info():
+    """Provider + model Hermes will actually use, read from the profile's config.yaml.
+
+    Read-only and dependency-free: scans only the top-level `model:` block.
+    JARVIS_MODEL (the --model override) wins over the configured default.
+    """
+    provider = name = ""
+    try:
+        text = (_profile_home() / "config.yaml").read_text(encoding="utf-8")
+        block = re.search(r"^model:[ \t]*\n((?:[ \t]+.*\n?|\n)*)", text, re.M)
+        if block:
+            for key, val in re.findall(r"^[ \t]+(default|provider):[ \t]*(\S+)", block.group(1), re.M):
+                val = val.strip("'\"")
+                if key == "default":
+                    name = val
+                else:
+                    provider = val
+        else:
+            m = re.search(r"^model:[ \t]*(\S+)", text, re.M)
+            if m:
+                name = m.group(1).strip("'\"")
+    except OSError:
+        pass
+    if MODEL:
+        name = MODEL
+    return {"model_provider": provider or "Hermes default", "model_name": name or "Hermes default"}
 
 
 def user_name():
@@ -207,7 +236,7 @@ def build_prompt(message, system=None):
     if not system:
         return message
     return (f"{system}\n\n## Current user request\n{message}\n\n"
-            "Answer the request now. Return only the words JARVIS should say aloud; "
+            "Answer the request now. Return only the words ATLAS should say aloud; "
             "never include session IDs, runtime metadata, headings, or process narration.")
 
 
@@ -263,7 +292,13 @@ def run_hermes(message, session_id=None, system=None):
         yield from _run_hermes_locked(message, session_id, system)
 
 
-def _run_hermes_locked(message, session_id=None, system=None):
+def run_background(message, system=None):
+    """Run a mission in its own Hermes process, outside the execution lock, so the
+    foreground conversation is never blocked or interrupted by it."""
+    yield from _run_hermes_locked(message, None, system, background=True)
+
+
+def _run_hermes_locked(message, session_id=None, system=None, background=False):
     global _ACTIVE_PROC
     started = _mono_ms()
     cmd = build_command(message, session_id)
@@ -290,8 +325,9 @@ def _run_hermes_locked(message, session_id=None, system=None):
         proc = subprocess.Popen(cmd, cwd=WORKDIR, text=True, bufsize=1,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, env=child_env)
-        with _ACTIVE_LOCK:
-            _ACTIVE_PROC = proc
+        if not background:
+            with _ACTIVE_LOCK:
+                _ACTIVE_PROC = proc
     except FileNotFoundError:
         raise RuntimeError("Hermes CLI not found. Set HERMES_CMD to your Hermes executable.")
 

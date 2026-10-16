@@ -183,11 +183,11 @@ function renderConversation(finaldone){
   let html = '';
   for (const t of history){
     html += `<div class="turn"><div class="tuser">You</div><div class="ttext">${esc(t.user)}</div>`
-          + `<div class="tjarvis">JARVIS</div><div class="ttext">${esc(t.assistant)}</div></div>`;
+          + `<div class="tjarvis">ATLAS</div><div class="ttext">${esc(t.assistant)}</div></div>`;
   }
   if (currentUser || answer){
     html += `<div class="turn current"><div class="tuser">You</div><div class="ttext">${esc(currentUser)}</div>`
-          + `<div class="tjarvis">JARVIS</div><div class="ttext">${esc(answer)}${finaldone ? '' : '<span class="cur"></span>'}</div></div>`;
+          + `<div class="tjarvis">ATLAS</div><div class="ttext">${esc(answer)}${finaldone ? '' : '<span class="cur"></span>'}</div></div>`;
   }
   el.innerHTML = html || '<span class="rplaceholder">Standing by. Transmit an instruction.</span>';
   el.scrollTop = el.scrollHeight;
@@ -219,7 +219,7 @@ let recognition = null;
 let micStream=null, recorder=null, chunks=[], actx=null, analyser=null, vdata=null;
 let vad=null, spoke=false, loudAt=0, turnStart=0;
 let floorSum=0, floorN=0, threshold=0.02, peak=0, calibrating=true;
-const SILENCE=900, MIN_TURN_MS=350, MAX_TURN_MS=18000, NO_SPEECH_MS=10000;
+const SILENCE=5000, MIN_TURN_MS=350, MAX_TURN_MS=60000, NO_SPEECH_MS=10000;
 
 // ── voice out ──
 let muted = false, player = null;
@@ -453,7 +453,7 @@ $('#cmds').addEventListener('click', e => {
   const b = e.target.closest('.cmd'); if (!b) return;
   const cmd = b.dataset.cmd;
   if (running){
-    log('note','BUSY',`${cmd} not sent — JARVIS is still working.`);
+    log('note','BUSY',`${cmd} not sent — ATLAS is still working.`);
     return;
   }
 
@@ -543,7 +543,7 @@ document.addEventListener('keydown', e => {
 $('#mute').onclick = () => {
   muted = !muted; const b=$('#mute');
   b.textContent = muted?'🔇':'🔊'; b.classList.toggle('on',!muted); b.classList.toggle('off',muted);
-  b.setAttribute('aria-label', muted ? 'Unmute Jarvis' : 'Mute Jarvis');
+  b.setAttribute('aria-label', muted ? 'Unmute Atlas' : 'Mute Atlas');
   if (muted && player) player.pause();
 };
 $('#input').addEventListener('keydown', e => {
@@ -741,7 +741,7 @@ setInterval(async () => {
   // ── tab title + favicon so the state is visible even from another window ──
   const fav = document.createElement('link'); fav.rel = 'icon'; document.head.appendChild(fav);
   const COLORS = {ask:'#ffb648', closed:'#4a5f6a', listening:'#ff5566', busy:'#ffb648', call:'#a884ff', closing:'#ff5566'};
-  const TITLES = {ask:'🟠 JARVIS · needs your OK', closed:'JARVIS · mic closed', listening:'🔴 JARVIS · listening', busy:'🟠 JARVIS · working', call:'🟣 JARVIS · call mode', closing:'🔴 JARVIS · closing…'};
+  const TITLES = {ask:'🟠 ATLAS · needs your OK', closed:'ATLAS · mic closed', listening:'🔴 ATLAS · listening', busy:'🟠 ATLAS · working', call:'🟣 ATLAS · call mode', closing:'🔴 ATLAS · closing…'};
 
   function stateNow(){
     if (callMode) return 'call';
@@ -768,7 +768,7 @@ setInterval(async () => {
       listening:['LISTENING', 'Press <kbd>Space</kbd> to close'],
       closing:  ['LISTENING', `Closing in ${Math.max(left,0)}s — speak to keep it open`],
       ask:      ['AWAITING YOUR ANSWER', 'Say <kbd>yes</kbd> or <kbd>no</kbd> — or <kbd>Enter</kbd> / <kbd>Esc</kbd>'],
-      busy:     ['PAUSED', 'Jarvis is working — mic resumes after'],
+      busy:     ['PAUSED', 'Atlas is working — mic resumes after'],
       call:     ['CALL MODE', 'Silent · mic locked · <kbd>Alt</kbd>+<kbd>C</kbd> to exit'],
     }[st];
     word.textContent = T[0]; hint.innerHTML = T[1];
@@ -939,7 +939,7 @@ setInterval(async () => {
     const high = ev.risk === 'high';
     $('#apBadge').textContent = high ? 'NEEDS YOUR OK · CONFIRM WITH KEYBOARD' : 'NEEDS YOUR OK';
     $('#apBadge').classList.toggle('high', high);
-    $('#apTitle').textContent = `Jarvis wants to run: ${ev.description}.`;
+    $('#apTitle').textContent = `Atlas wants to run: ${ev.description}.`;
     $('#apCmd').textContent = ev.command || '(no command text)';
     $('#apHint').textContent = high
       ? 'This kind of action needs a deliberate keypress — a spoken "yes" is not accepted. You can still say "no".'
@@ -1062,5 +1062,495 @@ setInterval(async () => {
     if (ev.t === 'approval_done' && cur && ev.request_id === cur.request_id) close();
     if ((ev.t === 'complete' || ev.t === 'error') && cur) close();
     return original(ev);
+  };
+})();
+
+// ══════════ settings: provider + model (read-only) ══════════
+(() => {
+  const btn = $('#settingsBtn'); if (!btn) return;
+  btn.addEventListener('click', async () => {
+    try {
+      const s = await fetch('/api/settings', {headers: apiHeaders()}).then(r => r.json());
+      $('#set-provider').value = s.model_provider || '';
+      $('#set-model').value = s.model_name || '';
+    } catch (_) {}
+  });
+})();
+
+// ══════════ living orb: breathes idle · tightens to your voice · vibrates to Jarvis ══════════
+(() => {
+  const cv = document.getElementById('orbCanvas'); if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let W = 0, H = 0, dpr = 1;
+  const fit = () => {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    const r = cv.getBoundingClientRect(); W = r.width; H = r.height;
+    cv.width = Math.max(1, Math.round(W * dpr)); cv.height = Math.max(1, Math.round(H * dpr));
+  };
+  new ResizeObserver(fit).observe(cv); fit();
+
+  // ── input levels ──
+  let micLvl = 0;                                   // fed by the existing mic meter
+  const prevMeter = window.meter;
+  if (typeof prevMeter === 'function') window.meter = rms => { micLvl = Math.min(1, rms * 7); return prevMeter(rms); };
+
+  let outCtx = null, outAn = null, outData = null, wired = null;
+  function outLevel(){                              // real loudness of Jarvis's voice
+    try {
+      if (player && wired !== player){
+        outCtx = outCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const src = outCtx.createMediaElementSource(player);
+        outAn = outCtx.createAnalyser(); outAn.fftSize = 512; outData = new Uint8Array(outAn.fftSize);
+        src.connect(outAn); outAn.connect(outCtx.destination);
+        outCtx.resume().catch(() => {}); wired = player;
+      }
+      if (outAn && player && !player.paused && wired === player){
+        outAn.getByteTimeDomainData(outData);
+        let s = 0; for (const v of outData){ const x = (v - 128) / 128; s += x * x; }
+        return Math.min(1, Math.sqrt(s / outData.length) * 5);
+      }
+    } catch (_) { wired = player; }
+    return null;
+  }
+
+  // ── look per state ──
+  const LOOK = {
+    idle:      {c:[79,170,245],  glow:.35, r:.19},
+    listening: {c:[79,235,230],  glow:.65, r:.20},
+    speaking:  {c:[168,132,255], glow:.75, r:.20},
+    thinking:  {c:[255,182,72],  glow:.55, r:.19},
+    error:     {c:[255,107,120], glow:.6,  r:.19},
+    done:      {c:[62,232,168],  glow:.55, r:.19},
+  };
+  const cur = {c:[79,170,245], glow:.35, r:.19, lvl:0, spin:0};
+  // orb colours come from the active theme (--orb-* variables), so every theme has its own palette
+  const rgbVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim().split(',').map(Number);
+  const readLook = () => {
+    const src = {idle:'--orb-idle', listening:'--orb-listen', speaking:'--orb-speak', thinking:'--orb-think'};
+    for (const k in src){ const v = rgbVar(src[k]); if (v.length === 3 && v.every(Number.isFinite)) LOOK[k].c = v; }
+    const st = document.querySelector('.stage');                 // layouts shrink the canvas, so they also scale the orb
+    const sc = parseFloat(st && getComputedStyle(st).getPropertyValue('--orb-scale'));
+    orbScale = Number.isFinite(sc) && sc > 0 ? sc : 1;
+  };
+  let orbScale = 1;
+  readLook(); cur.c = LOOK.idle.c.slice();
+  addEventListener('atlas-theme', readLook);
+  const mix = (a, b, k) => a + (b - a) * k;
+  const ripples = []; let lastRip = 0;
+  let t0 = performance.now();
+
+  function frame(now){
+    requestAnimationFrame(frame);
+    if (!W) return;
+    const t = (now - t0) / 1000, cl = document.body.classList;
+    const state = cl.contains('error') ? 'error'
+                : cl.contains('speaking') ? 'speaking'
+                : cl.contains('listening') ? 'listening'
+                : cl.contains('running') ? 'thinking'
+                : cl.contains('done') ? 'done' : 'idle';
+    const L = LOOK[state];
+
+    // target level for this state
+    let target = 0;
+    if (state === 'speaking'){
+      const o = outLevel();
+      target = o != null ? o : 0.35 + 0.25 * Math.sin(t * 9) * Math.sin(t * 3.1) + 0.12 * Math.sin(t * 17);
+    } else if (state === 'listening'){
+      target = micLvl;
+    } else if (state === 'thinking'){
+      target = 0.18 + 0.1 * Math.sin(t * 2.4);
+    }
+    micLvl *= 0.9;                                  // decay when the meter goes quiet
+    const k = target > cur.lvl ? 0.35 : 0.08;       // fast attack, slow release
+    cur.lvl = mix(cur.lvl, Math.max(0, target), k);
+    for (let i = 0; i < 3; i++) cur.c[i] = mix(cur.c[i], L.c[i], 0.06);
+    cur.glow = mix(cur.glow, L.glow, 0.06); cur.r = mix(cur.r, L.r, 0.06);
+    cur.spin += (state === 'thinking' ? 0.9 : 0.15) / 60;
+
+    const S = Math.min(W, H), cx = W / 2, cy = H / 2;
+    const breathe = reduce ? 0 : Math.sin(t * 1.5) * 0.025;
+    // listening: orb tightens as you speak; speaking: swells with the voice
+    let R = S * cur.r * orbScale * (1 + breathe);
+    if (state === 'listening') R *= 1 - cur.lvl * 0.16;
+    else if (state === 'speaking') R *= 1 + cur.lvl * 0.14;
+    const [r, g, b] = cur.c.map(Math.round), col = a => `rgba(${r},${g},${b},${a})`;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    // soft outer glow
+    const gr = ctx.createRadialGradient(cx, cy, R * 0.4, cx, cy, S * 0.5);
+    gr.addColorStop(0, col(0.30 * cur.glow + cur.lvl * 0.25));
+    gr.addColorStop(0.45, col(0.10 * cur.glow));
+    gr.addColorStop(1, col(0));
+    ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
+
+    // ripples: your voice sends rings inward-out, mine sends them outward
+    if (!reduce && (state === 'speaking' || state === 'listening') && cur.lvl > 0.12 && now - lastRip > 260 - cur.lvl * 120){
+      ripples.push({born: now, dir: state === 'speaking' ? 1 : -1, a: 0.2 + cur.lvl * 0.4}); lastRip = now;
+    }
+    for (let i = ripples.length - 1; i >= 0; i--){
+      const p = ripples[i], age = (now - p.born) / 1400;
+      if (age >= 1){ ripples.splice(i, 1); continue; }
+      const e = 1 - Math.pow(1 - age, 2);
+      const rr = p.dir > 0 ? mix(R * 1.05, S * 0.48, e) : mix(S * 0.48, R * 1.05, e);
+      ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+      ctx.strokeStyle = col(p.a * (1 - age)); ctx.lineWidth = 1.5; ctx.stroke();
+    }
+
+    // the orb body: a soft blob whose edge vibrates with the level
+    const N = 96, amp = reduce ? 0 : (state === 'speaking' ? 0.10 : state === 'listening' ? 0.05 : state === 'thinking' ? 0.03 : 0.012) * (0.3 + cur.lvl * 2.2);
+    ctx.beginPath();
+    for (let i = 0; i <= N; i++){
+      const a = (i / N) * Math.PI * 2;
+      const wob = Math.sin(a * 3 + t * 2.1 + cur.spin * 6) * 0.5
+                + Math.sin(a * 5 - t * 3.3) * 0.3
+                + Math.sin(a * 9 + t * (state === 'speaking' ? 14 : 5)) * 0.2 * (0.4 + cur.lvl * 2);
+      const rad = R * (1 + wob * amp * 2.2);
+      const x = cx + Math.cos(a) * rad, y = cy + Math.sin(a) * rad;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+    const body = ctx.createRadialGradient(cx - R * 0.25, cy - R * 0.3, R * 0.1, cx, cy, R * 1.15);
+    body.addColorStop(0, `rgba(255,255,255,${0.85})`);
+    body.addColorStop(0.35, col(0.95));
+    body.addColorStop(1, `rgba(${Math.round(r * 0.18)},${Math.round(g * 0.18)},${Math.round(b * 0.28)},0.95)`);
+    ctx.shadowColor = col(0.8); ctx.shadowBlur = 28 + cur.lvl * 50;
+    ctx.fillStyle = body; ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(234,246,250,.55)'; ctx.stroke();
+  }
+  requestAnimationFrame(frame);
+})();
+
+// ══════════ second brain: force-directed graph of the Atlas notes ══════════
+(() => {
+  const ov = document.getElementById('brainOverlay'); if (!ov) return;
+  const cv = document.getElementById('brainCanvas'), ctx = cv.getContext('2d');
+  const $b = id => document.getElementById(id);
+  const GROUP = {'research-strategy':[79,230,245], 'design-content':[168,132,255], 'marketing':[255,182,72],
+                 'business-operations':[62,232,168], 'finance':[255,120,170]};
+  const NAMES = {'research-strategy':'Research & Strategy', 'design-content':'Design & Content', 'marketing':'Marketing',
+                 'business-operations':'Business & Operations', 'finance':'Finance'};
+  const RADIUS = {hub:16, dept:11, sub:6.5, notebook:3.5, commons:6, log:4, other:4};
+  const colorOf = n => n.type === 'hub' ? HUB : (GROUP[n.group] || [130,160,180]);
+  let INK = '234,246,250', HUB = [240,250,255];
+  const readTheme = () => {
+    const cs = getComputedStyle(document.documentElement);
+    INK = cs.getPropertyValue('--ink-rgb').trim() || INK;
+    const h = cs.getPropertyValue('--hub-rgb').trim().split(',').map(Number);
+    if (h.length === 3 && h.every(Number.isFinite)) HUB = h;
+  };
+  readTheme(); addEventListener('atlas-theme', readTheme);
+  $b('brLegend').innerHTML = Object.keys(GROUP).map(k =>
+    `<span><i style="background:rgb(${GROUP[k].join(',')})"></i>${NAMES[k]}</span>`).join('')
+    + '<span><i style="background:rgb(var(--hub-rgb))"></i>Atlas hub</span><span style="margin-left:auto">drag nodes · scroll to zoom · click to read</span>';
+
+  let nodes = [], links = [], byId = new Map(), adj = new Map();
+  let W = 0, H = 0, dpr = 1, raf = 0, alpha = 1;
+  let view = {x:0, y:0, k:1}, hover = null, selected = null, drag = null, pan = null, moved = false;
+
+  const fit = () => {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    const r = cv.getBoundingClientRect(); W = r.width; H = r.height;
+    cv.width = Math.max(1, Math.round(W * dpr)); cv.height = Math.max(1, Math.round(H * dpr));
+  };
+  new ResizeObserver(fit).observe(cv);
+
+  const showNb = () => $b('brNotebooks').checked, showSh = () => $b('brShared').checked;
+  const visible = n => n.type === 'notebook' ? showNb() : (n.type === 'commons' || n.type === 'log') ? showSh() : true;
+
+  async function load(){
+    try {
+      const g = await fetch('/api/brain/graph', {headers: apiHeaders()}).then(r => r.json());
+      if (!g.nodes) throw 0;
+      const old = new Map(nodes.map(n => [n.id, n]));
+      nodes = g.nodes.map((n, i) => {
+        const o = old.get(n.id), a = (i / g.nodes.length) * Math.PI * 2;
+        return Object.assign(n, {x: o ? o.x : Math.cos(a) * 220 + Math.random() * 20,
+                                 y: o ? o.y : Math.sin(a) * 220 + Math.random() * 20, vx: 0, vy: 0});
+      });
+      byId = new Map(nodes.map(n => [n.id, n]));
+      links = g.links.map(l => ({a: byId.get(l.source), b: byId.get(l.target)})).filter(l => l.a && l.b);
+      adj = new Map(nodes.map(n => [n.id, new Set()]));
+      links.forEach(l => { adj.get(l.a.id).add(l.b.id); adj.get(l.b.id).add(l.a.id); });
+      alpha = 1;
+      for (let i = 0; i < 320; i++) step();     // open already settled, not mid-scramble
+      alpha = .05;
+      if (!g.exists) $b('brTitle').textContent = 'No brain folder found at ' + g.root;
+    } catch (_) { $b('brTitle').textContent = 'Could not load the brain'; }
+  }
+
+  const structural = l => { const t = [l.a.type, l.b.type]; return t.includes('hub') || t.includes('notebook') || (t.includes('dept') && t.includes('sub')); };
+  const restLen = l => {
+    const t = [l.a.type, l.b.type];
+    return t.includes('hub') ? 160 : (t.includes('dept') && t.includes('sub')) ? 100 : t.includes('notebook') ? 34 : 190;
+  };
+
+  function step(){
+    const vis = nodes.filter(visible), n = vis.length;
+    for (let i = 0; i < n; i++){
+      const a = vis[i];
+      for (let j = i + 1; j < n; j++){
+        const b = vis[j];
+        let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 0.01;
+        if (d2 > 160000) continue;
+        const f = (4200 / d2) * alpha, d = Math.sqrt(d2);
+        dx = dx / d * f; dy = dy / d * f;
+        a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
+      }
+    }
+    for (const l of links){
+      if (!visible(l.a) || !visible(l.b)) continue;
+      const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const f = (d - restLen(l)) * (structural(l) ? 0.035 : 0.008) * alpha, fx = dx / d * f, fy = dy / d * f;
+      l.a.vx += fx; l.a.vy += fy; l.b.vx -= fx; l.b.vy -= fy;
+    }
+    for (const a of vis){
+      a.vx -= a.x * 0.004 * alpha; a.vy -= a.y * 0.004 * alpha;
+      if (a === drag){ a.vx = a.vy = 0; continue; }
+      a.vx *= 0.82; a.vy *= 0.82; a.x += a.vx; a.y += a.vy;
+    }
+    alpha = Math.max(0.02, alpha * 0.985);
+    let mx = 0, my = 0;                                   // keep the whole graph centred on the canvas
+    for (const a of vis){ mx += a.x; my += a.y; }
+    if (n){ mx /= n; my /= n; for (const a of vis){ a.x -= mx * 0.2; a.y -= my * 0.2; } }
+  }
+
+  function fitView(){                                     // zoom so every visible node fits with margin
+    const vis = nodes.filter(visible); if (!vis.length || !W) return;
+    let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (const a of vis){ x0 = Math.min(x0, a.x); x1 = Math.max(x1, a.x); y0 = Math.min(y0, a.y); y1 = Math.max(y1, a.y); }
+    const k = Math.min((W - 140) / Math.max(1, x1 - x0), (H - 110) / Math.max(1, y1 - y0));
+    view.k = Math.max(.45, Math.min(1.5, k)); view.x = -((x0 + x1) / 2) * view.k; view.y = -((y0 + y1) / 2) * view.k;
+  }
+
+  const toWorld = (px, py) => ({x: (px - W / 2 - view.x) / view.k, y: (py - H / 2 - view.y) / view.k});
+  const pick = (px, py) => {
+    const w = toWorld(px, py); let best = null, bd = 1e9;
+    for (const n of nodes){
+      if (!visible(n)) continue;
+      const r = (RADIUS[n.type] || 4) + 5 / view.k, d = Math.hypot(n.x - w.x, n.y - w.y);
+      if (d < r && d < bd){ best = n; bd = d; }
+    }
+    return best;
+  };
+
+  function draw(){
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+    ctx.save(); ctx.translate(W / 2 + view.x, H / 2 + view.y); ctx.scale(view.k, view.k);
+    const focus = selected || hover, near = focus ? adj.get(focus.id) : null;
+    for (const l of links){
+      if (!visible(l.a) || !visible(l.b)) continue;
+      const hot = focus && (l.a === focus || l.b === focus), c = colorOf(l.a.type === 'hub' ? l.b : l.a);
+      ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y);
+      ctx.strokeStyle = `rgba(${c.join(',')},${hot ? .85 : focus ? .06 : .22})`; ctx.lineWidth = (hot ? 1.8 : 1) / view.k; ctx.stroke();
+    }
+    for (const n of nodes){
+      if (!visible(n)) continue;
+      const c = colorOf(n), r = RADIUS[n.type] || 4;
+      const dim = focus && n !== focus && !(near && near.has(n.id));
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${c.join(',')},${dim ? .18 : .95})`;
+      ctx.shadowColor = `rgba(${c.join(',')},.8)`; ctx.shadowBlur = dim ? 0 : (n.type === 'notebook' ? 4 : 14);
+      ctx.fill(); ctx.shadowBlur = 0;
+      if (n === selected){ ctx.lineWidth = 2 / view.k; ctx.strokeStyle = `rgb(${INK})`; ctx.stroke(); }
+    }
+    ctx.font = `${11 / Math.max(.7, Math.min(1.4, view.k))}px -apple-system, system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    for (const n of nodes){
+      if (!visible(n)) continue;
+      const show = n.type === 'hub' || n.type === 'dept' || n === focus || (near && near.has(n.id) && n.type !== 'notebook')
+                   || (n.type === 'sub' && view.k > .85);
+      if (!show) continue;
+      const dim = focus && n !== focus && !(near && near.has(n.id));
+      ctx.fillStyle = dim ? `rgba(${INK},.3)` : `rgba(${INK},.92)`;
+      ctx.fillText(n.id.replace(/-/g, ' '), n.x, n.y + (RADIUS[n.type] || 4) + 13 / Math.max(.7, view.k));
+    }
+    ctx.restore();
+  }
+
+  function loop(){ raf = requestAnimationFrame(loop); if (W) { step(); draw(); } }
+
+  async function openNote(n){
+    selected = n; alpha = Math.max(alpha, .15);
+    $b('brTitle').textContent = n.id; $b('brPath').textContent = ''; $b('brText').textContent = 'loading…';
+    const box = $b('brLinks'); box.textContent = '';
+    for (const id of [...(adj.get(n.id) || [])].sort()){
+      const b = document.createElement('button'); b.textContent = id.replace(/-/g, ' ');
+      b.onclick = () => { const t = byId.get(id); if (t){ if (!visible(t)) { if (t.type === 'notebook') $b('brNotebooks').checked = true; else $b('brShared').checked = true; } openNote(t); } };
+      box.appendChild(b);
+    }
+    try {
+      const r = await fetch('/api/brain/note?id=' + encodeURIComponent(n.id), {headers: apiHeaders()}).then(r => r.json());
+      if (selected !== n) return;
+      $b('brPath').textContent = r.path || ''; $b('brText').textContent = r.text || r.error || '';
+    } catch (_) { $b('brText').textContent = 'could not load note'; }
+  }
+
+  const pos = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  cv.addEventListener('pointerdown', e => {
+    cv.setPointerCapture(e.pointerId); const [px, py] = pos(e); moved = false;
+    const n = pick(px, py);
+    if (n){ drag = n; } else { pan = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; cv.classList.add('drag'); }
+  });
+  cv.addEventListener('pointermove', e => {
+    const [px, py] = pos(e);
+    if (drag){ const w = toWorld(px, py); drag.x = w.x; drag.y = w.y; alpha = Math.max(alpha, .3); moved = true; }
+    else if (pan){ view.x = pan.vx + e.clientX - pan.x; view.y = pan.vy + e.clientY - pan.y; moved = true; }
+    else hover = pick(px, py);
+  });
+  cv.addEventListener('pointerup', e => {
+    const [px, py] = pos(e);
+    if (!moved){ const n = pick(px, py); if (n) openNote(n); else selected = null; }
+    drag = null; pan = null; cv.classList.remove('drag');
+  });
+  cv.addEventListener('pointerleave', () => { hover = null; });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const [px, py] = pos(e), before = toWorld(px, py);
+    view.k = Math.max(.35, Math.min(3, view.k * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+    view.x = px - W / 2 - before.x * view.k; view.y = py - H / 2 - before.y * view.k;
+  }, {passive: false});
+
+  const open = async () => {
+    ov.hidden = false; fit(); view = {x: 0, y: 0, k: 1};
+    await load(); fitView(); cancelAnimationFrame(raf); loop();
+  };
+  const close = () => { ov.hidden = true; cancelAnimationFrame(raf); };
+  $b('navBrain').addEventListener('click', open);
+  $b('brainClose').addEventListener('click', close);
+  $b('brRefresh').addEventListener('click', load);
+  ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !ov.hidden) close(); });
+  [$b('brNotebooks'), $b('brShared')].forEach(c => c.addEventListener('change', () => { alpha = 1; }));
+})();
+
+// ══════════ themes · layouts · department rail ══════════
+(() => {
+  const root = document.documentElement;
+  // each theme ships a light and a dark variant (see themes.css); sw = [bg, accent] preview, r = corner radius preview
+  const THEMES = [
+    {id:'atlas',     label:'Atlas',     r:'8px',  d:['#071420', '#4fe6f5'], l:['#eaf2fb', '#1f6fe0']},
+    {id:'terminal',  label:'Terminal',  r:'0',    d:['#06120a', '#3dff8a'], l:['#e9ecdc', '#0a6b34']},
+    {id:'folio',     label:'Folio',     r:'1px',  d:['#1c1813', '#e2b765'], l:['#f1ecdf', '#8c2f24']},
+    {id:'brutal',    label:'Brutal',    r:'0',    d:['#0c0c0c', '#ffe14a'], l:['#fff1c9', '#d6125a']},
+    {id:'aurora',    label:'Aurora',    r:'14px', d:['#15173a', '#c58bff'], l:['#f5f0ff', '#6a3fd8']},
+    {id:'blueprint', label:'Blueprint', r:'1px',  d:['#0a2540', '#8fd6ff'], l:['#f2f6fb', '#12509e']},
+    {id:'clay',      label:'Clay',      r:'12px', d:['#25272d', '#ff9a6a'], l:['#e6e0d6', '#c4562a']},
+  ];
+  const MODES = [{id:'dark', label:'Dark', ico:'☾'}, {id:'light', label:'Light', ico:'☀'}, {id:'auto', label:'Auto', ico:'◐'}];
+  const LAYOUTS = [
+    {id:'classic', label:'Classic', parts:2},
+    {id:'focus',   label:'Focus',   parts:2},
+    {id:'command', label:'Command', parts:3},
+  ];
+  const curTheme = () => root.dataset.theme || 'atlas';
+  const curPref = () => root.dataset.pref || 'dark';
+  const curMode = () => root.dataset.mode || 'dark';
+  const mq = matchMedia('(prefers-color-scheme: light)');
+  const curLayout = () => root.dataset.layout || 'classic';
+  const store = (k, v) => { try { v ? localStorage.setItem('jarvis.' + k, v) : localStorage.removeItem('jarvis.' + k); } catch (_) {} };
+
+  function mark(){
+    document.querySelectorAll('[data-theme-id]').forEach(b => {
+      b.setAttribute('aria-pressed', String(b.dataset.themeId === curTheme()));
+      const t = THEMES.find(x => x.id === b.dataset.themeId), c = curMode() === 'light' ? t.l : t.d;
+      const i = b.querySelector('i'); i.style.background = `linear-gradient(135deg,${c[0]} 52%,${c[1]} 52%)`;
+    });
+    document.querySelectorAll('[data-mode-id]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.modeId === curPref())));
+    document.querySelectorAll('[data-layout-id]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.layoutId === curLayout())));
+    const mb = $('#modeBtn'); if (mb){ mb.textContent = curMode() === 'light' ? '☀' : '☾'; mb.title = `${curMode() === 'light' ? 'Light' : 'Dark'} mode — click to switch`; }
+  }
+  function setTheme(id){
+    root.dataset.theme = id; store('theme', id);
+    mark(); dispatchEvent(new Event('atlas-theme'));
+  }
+  function setMode(pref){                       // dark | light | auto (follows the system)
+    root.dataset.pref = pref; store('mode', pref);
+    root.dataset.mode = pref === 'auto' ? (mq.matches ? 'light' : 'dark') : pref;
+    mark(); dispatchEvent(new Event('atlas-theme'));
+  }
+  mq.addEventListener && mq.addEventListener('change', () => { if (curPref() === 'auto') setMode('auto'); });
+  function setLayout(id){
+    if (id === 'classic') delete root.dataset.layout; else root.dataset.layout = id;
+    store('layout', id === 'classic' ? '' : id);
+    mark(); dispatchEvent(new Event('resize')); dispatchEvent(new Event('atlas-theme'));
+  }
+
+  const build = (host, items, mk) => items.forEach(it => host.appendChild(mk(it)));
+  const swatch = t => {
+    const b = document.createElement('button'); b.className = 'swatch'; b.dataset.themeId = t.id; b.type = 'button';
+    b.innerHTML = `<i style="border-radius:${t.r}"></i>${t.label}`;
+    b.onclick = () => setTheme(t.id); return b;
+  };
+  const modeBtn = m => {
+    const b = document.createElement('button'); b.className = 'swatch mode'; b.dataset.modeId = m.id; b.type = 'button';
+    b.innerHTML = `<span>${m.ico}</span>${m.label}`;
+    b.onclick = () => setMode(m.id); return b;
+  };
+  const layBtn = l => {
+    const b = document.createElement('button'); b.className = 'swatch lay l-' + l.id; b.dataset.layoutId = l.id; b.type = 'button';
+    b.innerHTML = `<i>${'<b></b>'.repeat(l.parts)}</i>${l.label}`;
+    b.onclick = () => setLayout(l.id); return b;
+  };
+  build($('#themeGrid'), THEMES, swatch);
+  build($('#modeGrid'), MODES, modeBtn);
+  const mbtn = $('#modeBtn'); if (mbtn) mbtn.onclick = () => setMode(curMode() === 'light' ? 'dark' : 'light');
+  build($('#layoutGrid'), LAYOUTS, layBtn);
+
+  // quick theme picker in the top bar, so Settings isn't needed to change look
+  const tBtn = $('#themeBtn'), tPop = $('#themePop');
+  if (tBtn && tPop){
+    build(tPop, THEMES, t => {
+      const b = swatch(t), pick = b.onclick;
+      b.onclick = () => { pick(); closePop(); };
+      return b;
+    });
+    const closePop = () => { tPop.hidden = true; tBtn.setAttribute('aria-expanded', 'false'); };
+    tBtn.onclick = e => {
+      e.stopPropagation();
+      tPop.hidden = !tPop.hidden;
+      tBtn.setAttribute('aria-expanded', String(!tPop.hidden));
+      mark();
+    };
+    document.addEventListener('click', e => { if (!tPop.hidden && !tPop.contains(e.target)) closePop(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && !tPop.hidden) closePop(); });
+  }
+  mark(); dispatchEvent(new Event('atlas-theme'));
+
+  // ── department rail: lights up when a team is briefed / finishes ──
+  const DEPTS = [['research-strategy', 'Research & Strategy', '#4fe6f5'], ['design-content', 'Design & Content', '#a884ff'],
+                 ['marketing', 'Marketing', '#ffb648'], ['business-operations', 'Business & Ops', '#3ee8a8'], ['finance', 'Finance', '#ff78aa']];
+  const rail = $('#teamRail'), els = {}, timers = {}, teamDept = {};
+  rail.innerHTML = '<div class="tr-title">Departments</div>';
+  for (const [id, name, col] of DEPTS){
+    const b = document.createElement('button'); b.className = 'tr-item'; b.style.setProperty('--c', col); b.type = 'button';
+    b.innerHTML = `<span class="tr-dot"></span><span class="tr-name">${name}</span><span class="tr-state">idle</span>`;
+    b.onclick = () => $('#navBrain') && $('#navBrain').click();
+    rail.appendChild(b); els[id] = b; teamDept[id] = id;
+  }
+  fetch('/api/brain/graph', {headers: apiHeaders()}).then(r => r.json())
+    .then(g => (g.nodes || []).forEach(n => { if (n.type === 'sub' || n.type === 'dept') teamDept[n.id] = n.group || n.id; }))
+    .catch(() => {});
+  const setState = (id, st) => {
+    const b = els[id]; if (!b) return;
+    b.classList.remove('working', 'done'); if (st) b.classList.add(st);
+    b.querySelector('.tr-state').textContent = st === 'working' ? 'working…' : st === 'done' ? 'done' : 'idle';
+  };
+  const settle = id => { setState(id, 'done'); clearTimeout(timers[id]); timers[id] = setTimeout(() => setState(id, null), 5000); };
+  const prevHandle = handle;
+  handle = ev => {
+    try {
+      if (ev.t === 'tool' && ev.phase === 'use'){
+        const m = /team\.py\s+(brief|remember|publish)\s+([a-z0-9-]+)/.exec(String(ev.input || ''));
+        const d = m && teamDept[m[2]];
+        if (d){ if (m[1] === 'brief'){ clearTimeout(timers[d]); setState(d, 'working'); } else settle(d); }
+      } else if (ev.t === 'complete' || ev.t === 'error'){
+        for (const id in els) if (els[id].classList.contains('working')) settle(id);
+      }
+    } catch (_) {}
+    return prevHandle(ev);
   };
 })();

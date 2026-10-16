@@ -127,7 +127,7 @@ def context_block():
     d = load()
     out = []
     if d["profile"]:
-        out.append("## User profile notes from JARVIS dashboard\n" + "\n".join(f"- {x}" for x in d["profile"][-40:]))
+        out.append("## User profile notes from ATLAS dashboard\n" + "\n".join(f"- {x}" for x in d["profile"][-40:]))
     if d["goal"]:
         out.append(f"## Standing objective\n{d['goal']}\nKeep it in mind; mention it only when relevant.")
     if d["personality"]:
@@ -175,9 +175,32 @@ def start_background(mission, runner):
     return jid
 
 
+HANDOFF_DIR = ROOT / "logs" / "handoff"
+
+
+def _handoff_jobs():
+    """Jobs launched by tools/handoff.py (detached processes that survive restarts)."""
+    out = []
+    try:
+        paths = sorted(HANDOFF_DIR.glob("*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            j = json.loads(path.read_text(encoding="utf-8"))
+            j["_path"] = str(path)
+            out.append(j)
+        except (OSError, ValueError):
+            continue
+    return out
+
+
 def jobs_snapshot():
     with _JOB_LOCK:
-        return [dict(j) for j in JOBS.values()]
+        mem = [dict(j) for j in JOBS.values()]
+    files = [{k: v for k, v in j.items() if k != "_path"}
+             for j in _handoff_jobs() if j.get("status") == "running"]
+    return mem + files
 
 
 def running_background():
@@ -190,7 +213,16 @@ def take_finished():
         done = [dict(j) for j in JOBS.values() if j["status"] == "done"]
         for j in done:
             JOBS.pop(j["id"], None)
-        return done
+    for j in _handoff_jobs():
+        if j.get("status") in ("done", "failed") and not j.get("reported"):
+            path = j.pop("_path")
+            j["reported"] = True
+            try:
+                pathlib.Path(path).write_text(json.dumps(j), encoding="utf-8")
+            except OSError:
+                continue
+            done.append(j)
+    return done
 
 
 _CMD = re.compile(r"^\s*/(new|profile|goal|personality|kanban|mission|missions|background|tools|toolsets|connectors|connect|status|commands|help|browser|clear)\b\s*(.*)$", re.I | re.S)
@@ -220,7 +252,7 @@ def _commands_reply():
 /new — reset the Hermes thread
 /goal <text|status|clear> — set/read/clear standing objective
 /profile <fact> — add a local profile note injected into Hermes prompts
-/personality <tone> — set Jarvis tone overlay
+/personality <tone> — set Atlas tone overlay
 /kanban [task] — read/add mission queue item
 /mission [task] — alias for /kanban
 /background <mission> — run a Hermes mission asynchronously
@@ -250,7 +282,7 @@ def handle(message, runner=None):
         return dict(message=None, reply="Display cleared. Hermes session is unchanged.", note="display clear")
 
     if cmd == "new":
-        return dict(fresh=True, message=arg or "Start a fresh Hermes dashboard session. Greet me in one concise JARVIS-style line.", note="Hermes thread reset")
+        return dict(fresh=True, message=arg or "Start a fresh Hermes dashboard session. Greet me in one concise ATLAS-style line.", note="Hermes thread reset")
 
     if cmd == "status":
         profile = os.environ.get("HERMES_PROFILE", os.environ.get("JARVIS_PROFILE", "default"))
@@ -301,7 +333,7 @@ def handle(message, runner=None):
 
     if cmd == "personality":
         if not arg:
-            return dict(message=None, reply=d["personality"] or "Running default JARVIS persona.", note="persona read")
+            return dict(message=None, reply=d["personality"] or "Running default ATLAS persona.", note="persona read")
         update_state(lambda state: state.__setitem__("personality", arg))
         return dict(message=f'Tone overlay changed to: "{arg}". Reply in one short line using that tone.', note=f"persona: {arg[:50]}")
 
