@@ -1583,7 +1583,7 @@ setInterval(async () => {
 (() => {
   'use strict';
   const G = {
-    HIT_PAD: 10,                    // extra CSS px of clickable margin drawn around a node
+    HIT_PAD: 12,                    // extra *screen* px of clickable margin around every node (generous, zoom-consistent)
     DRAG_THRESHOLD: 4,              // CSS px the pointer may drift before it counts as a drag
     pickRadius: (r, k) => r + G.HIT_PAD / (k || 1),
     moved: (a, b, th) => Math.hypot(b.x - a.x, b.y - a.y) > (th == null ? G.DRAG_THRESHOLD : th),
@@ -1615,8 +1615,14 @@ setInterval(async () => {
   const GROUP = {};                                   // dept slug -> [r,g,b], resolved from theme variables
   const RADIUS = {hub:16, dept:11, sub:6.5, inbox:6.5, notebook:3.5, commons:6, log:4, other:4};
   const INBOX_GROUP = '__inbox';                      // synthetic group key so the inbox cluster reads as a cluster
+  // Depth layering: 0 = nearest the viewer (biggest, brightest, most shadow), higher = pushed back.
+  // hub → dept → inbox/commons cluster → sub → notebook/log strays. Drives size, shade and ambient shadow.
+  const LAYER = {hub:0, dept:1, inbox:2, commons:2, sub:3, log:4, notebook:4, other:4};
+  const LAYER_N = 5;
+  const layerOf = n => (LAYER[n.type] == null ? 3 : LAYER[n.type]);
   const colorOf = n => n.type === 'hub' ? HUB : n.type === 'inbox' ? INBOX : (GROUP[n.group] || NEUTRAL);
   let INK = '234,246,250', HUB = [240,250,255], INBOX = [79,230,245], NEUTRAL = [130,160,180], FONT = 'system-ui, sans-serif', LIGHT = false;
+  let ACCENT = '79,230,245', BG = '5,11,18', SH = '0,0,0';
   const probe = document.createElement('i'); probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none';
   ov.appendChild(probe);
   const rgbOf = (css, dflt) => {                      // any CSS colour/var -> [r,g,b]
@@ -1630,6 +1636,9 @@ setInterval(async () => {
   const readTheme = () => {
     const cs = getComputedStyle(document.documentElement);
     INK = cs.getPropertyValue('--ink-rgb').trim() || INK;
+    ACCENT = cs.getPropertyValue('--accent-rgb').trim() || ACCENT;   // gradient tint
+    BG = cs.getPropertyValue('--bg-rgb').trim() || BG;               // gradient base = theme background
+    SH = cs.getPropertyValue('--shadow-rgb').trim() || SH;           // vignette + ambient node shadow
     const h = cs.getPropertyValue('--hub-rgb').trim().split(',').map(Number);
     if (h.length === 3 && h.every(Number.isFinite)) HUB = h;
     NEUTRAL = rgbOf('var(--dim)', NEUTRAL);
@@ -1652,6 +1661,17 @@ setInterval(async () => {
   let searchQuery = '', searchMatches = [], searchIdx = 0, flyAnim = null, viewSaved = null;
   let downX = 0, downY = 0, downId = null, lastPX = null, lastPY = null, pointerIn = false;
   const edgePulses = [], nodeSparks = new Map();
+  // Depth & life: gentle parallax, breathing, a staggered fade-in, and an idle animation loop.
+  const par = {x: 0, y: 0};                            // pointer parallax offset in CSS px (part of the draw transform)
+  let lastDraw = 0, revealT0 = 0, revealTotal = 0;     // fade-in stagger bookkeeping
+  const hash = s => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
+  let REDUCE = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  if (window.matchMedia){
+    const rmq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onRm = () => { REDUCE = rmq.matches; par.x = par.y = 0; if (!ov.hidden && !raf) loop(); else draw(); };
+    if (rmq.addEventListener) rmq.addEventListener('change', onRm);
+    else if (rmq.addListener) rmq.addListener(onRm);
+  }
   readTheme(); legend();
   addEventListener('atlas-theme', readTheme);
   if (window.AtlasData) AtlasData.onChange(() => { readTheme(); legend(); if (!ov.hidden) load(); });
@@ -1764,6 +1784,7 @@ setInterval(async () => {
       alpha = 1;
       for (let i = 0; i < 320; i++) step();     // open already settled, not mid-scramble
       alpha = .05;
+      revealT0 = performance.now(); revealTotal = nodes.length;   // fade-in stagger for the fresh layout
       if (!g.exists) $b('brTitle').textContent = 'No brain folder found at ' + g.root;
       legend(); renderOutline();
     } catch (_) { $b('brTitle').textContent = 'Could not load the brain'; }
@@ -1814,8 +1835,48 @@ setInterval(async () => {
   }
 
   const radiusOf = t => RADIUS[t] || 4.5;
-  const toWorld = (px, py) => ({x: (px - W / 2 - view.x) / view.k, y: (py - H / 2 - view.y) / view.k});
-  const pick = (px, py) => GM.pick(nodes, toWorld(px, py), view.k, visible, radiusOf);
+  // ONE transform pair for the whole canvas. draw() translates by (W/2 + view.x + par.x, …) then
+  // scales by view.k, and the hit test inverts exactly that — including devicePixelRatio, which the
+  // ctx.setTransform(dpr,…) applies to the bitmap only, so both sides work in CSS pixels.
+  const offX = () => W / 2 + view.x + par.x, offY = () => H / 2 + view.y + par.y;
+  const toScreen = (wx, wy) => ({x: offX() + wx * view.k, y: offY() + wy * view.k});
+  const toWorld = (px, py) => ({x: (px - offX()) / view.k, y: (py - offY()) / view.k});
+
+  // Which labels are painted at the moment — shared by draw() and the label hit test so a
+  // node's caption is exactly as clickable as the node itself.
+  const labelVisible = n => {
+    if (!visible(n)) return false;
+    const focus = selected || hover, near = focus ? adj.get(focus.id) : null;
+    const hoverNear = hover && hover !== focus ? adj.get(hover.id) : null;
+    const isMatch = searchMatches.some(m => m.id === n.id);
+    return n.type === 'hub' || n.type === 'dept' || n.type === 'inbox' || n === focus || n === hover || isMatch
+        || (near && near.has(n.id) && n.type !== 'notebook')
+        || (hoverNear && hoverNear.has(n.id) && n.type !== 'notebook')
+        || (n.type === 'sub' && view.k > .85);
+  };
+  const labelFontPx = () => 11 / Math.max(.7, Math.min(1.4, view.k));
+  function labelBand(n){                                 // screen-space box around a node's caption
+    const txt = n.id.replace(/-/g, ' ');
+    ctx.save(); ctx.font = `${labelFontPx()}px ${FONT}`;
+    const w = ctx.measureText(txt).width * view.k;       // world font × zoom → on-screen width
+    ctx.restore();
+    const s = toScreen(n.x, n.y);
+    const gap = ((RADIUS[n.type] || 4.5) + 13 / Math.max(.7, view.k)) * view.k;
+    return {x: s.x, y: s.y + gap, w: Math.max(18, w) + 14, h: Math.max(15, labelFontPx() * view.k * 1.6)};
+  }
+  // Nearest node wins; on overlap the front-most (last drawn) node wins; if no blob is hit, the
+  // node whose *label* sits under the pointer is picked. This is the whole clickable surface.
+  const pick = (px, py) => {
+    const n = GM.pick(nodes, toWorld(px, py), view.k, visible, radiusOf);
+    if (n) return n;
+    for (let i = nodes.length - 1; i >= 0; i--){
+      const c = nodes[i];
+      if (!labelVisible(c)) continue;
+      const b = labelBand(c);
+      if (Math.abs(px - b.x) <= b.w / 2 && Math.abs(py - b.y) <= b.h / 2) return c;
+    }
+    return null;
+  };
 
   function draw(){
     const now = performance.now();
@@ -1828,7 +1889,25 @@ setInterval(async () => {
       if (u >= 1) flyAnim = null;
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
-    ctx.save(); ctx.translate(W / 2 + view.x, H / 2 + view.y); ctx.scale(view.k, view.k);
+
+    // Pointer parallax: ease a few px toward the pointer. It is folded into offX()/offY(), i.e. the
+    // SAME transform the hit test inverts, so a click still lands exactly on the node it looks like.
+    const ptx = (!REDUCE && pointerIn && lastPX != null) ? (lastPX / W - .5) * 16 : 0;
+    const pty = (!REDUCE && pointerIn && lastPY != null) ? (lastPY / H - .5) * 16 : 0;
+    par.x += (ptx - par.x) * .08; par.y += (pty - par.y) * .08;
+    if (REDUCE){ par.x = 0; par.y = 0; }
+
+    drawBackdrop();                                    // soft gradient + vignette, drawn from theme tokens
+
+    ctx.save(); ctx.translate(offX(), offY()); ctx.scale(view.k, view.k);
+
+    // Fade-in stagger when the graph opens: a quick whole-scene fade plus a per-node stagger.
+    const sceneFade = (!revealT0 || REDUCE) ? 1 : Math.min(1, (now - revealT0) / 320);
+    const revealAt = i => {
+      if (!revealT0 || REDUCE) return 1;
+      const u = (now - revealT0 - (revealTotal ? (i / revealTotal) * 380 : 0)) / 340;
+      return u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u);
+    };
     const focus = selected || hover, near = focus ? adj.get(focus.id) : null;
     const hoverNear = hover && hover !== focus ? adj.get(hover.id) : null;
     // Hover is never shadowed by the selection: dimming still follows the selection
@@ -1855,17 +1934,29 @@ setInterval(async () => {
       const gx = g.x / g.count, gy = g.y / g.count;
       const rad = 85;
       const gr = ctx.createRadialGradient(gx, gy, 8, gx, gy, rad);
-      gr.addColorStop(0, `rgba(${g.c.join(',')},${LIGHT ? 0.08 : 0.12})`);
+      gr.addColorStop(0, `rgba(${g.c.join(',')},${(LIGHT ? 0.08 : 0.12) * sceneFade})`);
       gr.addColorStop(1, `rgba(${g.c.join(',')},0)`);
       ctx.fillStyle = gr;
       ctx.beginPath(); ctx.arc(gx, gy, rad, 0, Math.PI * 2); ctx.fill();
     }
 
+    // Curved links: a gentle quadratic bow (stable per pair) with a slow flow running along them.
+    const flowOff = REDUCE ? 0 : -((now * 0.02) / view.k) % 20;
     for (const l of links){
       if (!visible(l.a) || !visible(l.b)) continue;
-      const hot = (focus && (l.a === focus || l.b === focus)) || (hover && (l.a === hover || l.b === hover)), c = colorOf(l.a.type === 'hub' ? l.b : l.a);
-      ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y);
-      ctx.strokeStyle = `rgba(${c.join(',')},${hot ? .88 : focus ? .07 : .24})`; ctx.lineWidth = (hot ? 2 : 1) / view.k; ctx.stroke();
+      const hot = (focus && (l.a === focus || l.b === focus)) || (hover && (l.a === hover || l.b === hover)),
+            c = colorOf(l.a.type === 'hub' ? l.b : l.a);
+      const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y, d = Math.hypot(dx, dy) || 1;
+      const bow = Math.min(54, d * 0.12) * (hash(l.a.id + '~' + l.b.id) % 2 ? 1 : -1);
+      const cxp = (l.a.x + l.b.x) / 2 - (dy / d) * bow, cyp = (l.a.y + l.b.y) / 2 + (dx / d) * bow;
+      ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.quadraticCurveTo(cxp, cyp, l.b.x, l.b.y);
+      ctx.strokeStyle = `rgba(${c.join(',')},${(hot ? .88 : focus ? .07 : .24) * sceneFade})`;
+      ctx.lineWidth = (hot ? 2 : 1) / view.k; ctx.stroke();
+      if (!REDUCE){                                    // subtle flow travelling along the same curve
+        ctx.save(); ctx.setLineDash([5 / view.k, 15 / view.k]); ctx.lineDashOffset = flowOff;
+        ctx.strokeStyle = `rgba(${c.join(',')},${(hot ? .5 : .10) * sceneFade})`;
+        ctx.lineWidth = 1.4 / view.k; ctx.stroke(); ctx.restore();
+      }
     }
 
     // Live edge pulses travelling along links when notes are read/written/focused
@@ -1883,74 +1974,112 @@ setInterval(async () => {
       ctx.fill(); ctx.shadowBlur = 0;
     }
 
-    for (const n of nodes){
+    // Nodes, layered by depth: nearer layers are larger, brighter and cast a soft ambient shadow.
+    for (let i = 0; i < nodes.length; i++){
+      const n = nodes[i];
       if (!visible(n)) continue;
-      const c = colorOf(n), r = RADIUS[n.type] || 4.5;
+      const rv = revealAt(i) * sceneFade;
+      if (rv <= 0) continue;
+      const c = colorOf(n), lay = layerOf(n), dep = lay / LAYER_N;
+      const isHot = n === hover;
+      const breath = REDUCE ? 1 : 1 + 0.03 * Math.sin(now / 900 + (hash(n.id) % 7) * 1.1);
+      let r = (RADIUS[n.type] || 4.5) * (1.16 - dep * 0.30) * breath;   // size by layer
+      if (isHot) r *= 1.22;                                            // hover lift
+      const ny = n.y - (isHot && !REDUCE ? 3 / view.k : 0);
       const isMatch = matchSet && matchSet.has(n.id);
       const dim = (focus || matchSet) && !isMatch && !lit.has(n.id);
-      // Halo glow around hub, dept, selected, hovered, and search-matched nodes
-      if (!dim && (n.type === 'hub' || n.type === 'dept' || n === selected || n === hover || isMatch)){
-        ctx.beginPath(); ctx.arc(n.x, n.y, r * (isMatch ? 2.4 : 1.85), 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${c.join(',')},${isMatch ? 0.28 : 0.14})`;
+      if (lay <= 2 && !dim){                                           // soft ambient shadow
+        const sg = ctx.createRadialGradient(n.x, ny + r * .7, 0, n.x, ny + r * .7, r * 3.1);
+        sg.addColorStop(0, `rgba(${SH},${(LIGHT ? .10 : .34) * rv})`);
+        sg.addColorStop(1, `rgba(${SH},0)`);
+        ctx.fillStyle = sg;
+        ctx.beginPath(); ctx.arc(n.x, ny + r * .7, r * 3.1, 0, Math.PI * 2); ctx.fill();
+      }
+      if (n.type === 'hub' && !dim){                                   // the hub's own distinct aura
+        ctx.beginPath(); ctx.arc(n.x, ny, r * 3.2, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${c.join(',')},${.20 * rv})`; ctx.lineWidth = 1.4 / view.k; ctx.stroke();
+        ctx.beginPath(); ctx.arc(n.x, ny, r * 2.1, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${c.join(',')},${.10 * rv})`; ctx.fill();
+      } else if (!dim && (n.type === 'dept' || n === selected || isHot || isMatch)){
+        ctx.beginPath(); ctx.arc(n.x, ny, r * (isMatch ? 2.4 : 1.85), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${c.join(',')},${(isMatch ? 0.28 : 0.14) * rv})`;
         ctx.fill();
       }
       // Spark ring when a node is newly born or pulsed
       const sp = nodeSparks.get(n.id);
       if (sp && now - sp < 1100){
         const su = (now - sp) / 1100;
-        ctx.beginPath(); ctx.arc(n.x, n.y, r + su * 22, 0, Math.PI * 2);
+        ctx.beginPath(); ctx.arc(n.x, ny, r + su * 22, 0, Math.PI * 2);
         ctx.strokeStyle = `rgba(${c.join(',')},${(1 - su) * 0.9})`;
         ctx.lineWidth = 2 / view.k; ctx.stroke();
       } else if (sp){
         nodeSparks.delete(n.id);
       }
-      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${c.join(',')},${dim ? .18 : .96})`;
-      ctx.shadowColor = `rgba(${c.join(',')},.85)`; ctx.shadowBlur = dim ? 0 : (isMatch ? 20 : n.type === 'notebook' ? 5 : LIGHT ? 8 : 16);
+      ctx.beginPath(); ctx.arc(n.x, ny, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${c.join(',')},${(dim ? .16 : (.98 - dep * .22)) * rv})`;   // brighter foreground
+      ctx.shadowColor = `rgba(${c.join(',')},.85)`;
+      ctx.shadowBlur = dim ? 0 : (isMatch ? 20 : isHot ? 22 : lay <= 1 ? 16 : lay >= 4 ? 4 : 10);
       ctx.fill(); ctx.shadowBlur = 0;
       if (n === selected || isMatch){
         ctx.lineWidth = (isMatch ? 2.4 : 2) / view.k;
         ctx.strokeStyle = isMatch ? '#4fe6f5' : `rgb(${INK})`;
         ctx.stroke();
-      } else if (n === hover){
+      } else if (isHot){
         ctx.lineWidth = 1.6 / view.k;                 // hover ring, distinct from the selection ring
         ctx.strokeStyle = `rgba(${c.join(',')},.9)`;
         ctx.stroke();
       }
     }
-    ctx.font = `${11 / Math.max(.7, Math.min(1.4, view.k))}px ${FONT}`;
+    ctx.font = `${labelFontPx()}px ${FONT}`;
     ctx.textAlign = 'center';
-    for (const n of nodes){
-      if (!visible(n)) continue;
+    for (let i = 0; i < nodes.length; i++){
+      const n = nodes[i];
+      if (!labelVisible(n)) continue;
+      const rv = revealAt(i) * sceneFade;
+      if (rv <= 0) continue;
       const isMatch = matchSet && matchSet.has(n.id);
-      const show = n.type === 'hub' || n.type === 'dept' || n === focus || n === hover || isMatch
-                   || (near && near.has(n.id) && n.type !== 'notebook')
-                   || (hoverNear && hoverNear.has(n.id) && n.type !== 'notebook')
-                   || (n.type === 'sub' && view.k > .85)
-                   || (n.type === 'inbox' && view.k > .45);
-      if (!show) continue;
       const dim = (focus || matchSet) && !isMatch && !lit.has(n.id);
-      ctx.fillStyle = dim ? `rgba(${INK},.3)` : `rgba(${INK},.94)`;
-      ctx.fillText(n.id.replace(/-/g, ' '), n.x, n.y + (RADIUS[n.type] || 4) + 13 / Math.max(.7, view.k));
+      const dep = layerOf(n) / LAYER_N;
+      ctx.fillStyle = `rgba(${INK},${(dim ? .30 : (.96 - dep * .28)) * rv})`;
+      ctx.fillText(n.id.replace(/-/g, ' '), n.x, n.y + (RADIUS[n.type] || 4.5) + 13 / Math.max(.7, view.k));
     }
     ctx.restore();
   }
 
+  function drawBackdrop(){
+    const cx = W / 2 + par.x * .4, cy = H / 2 + par.y * .4;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * .78);
+    g.addColorStop(0, `rgba(${ACCENT},${LIGHT ? .10 : .16})`);
+    g.addColorStop(.5, `rgba(${BG},0)`);
+    g.addColorStop(1, `rgba(${BG},0)`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .34, W / 2, H / 2, Math.max(W, H) * .72);
+    v.addColorStop(0, `rgba(${SH},0)`);
+    v.addColorStop(1, `rgba(${SH},${LIGHT ? .10 : .40})`);
+    ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  }
+
   function loop(){
     if (ov.hidden || document.hidden){ raf = 0; return; }
+    const now = performance.now();
     if (W){
-      step();
+      const settled = alpha <= 0.021 && !drag;         // forces have stopped; skip the O(n²) pass
+      if (!settled) step();
       // Recompute hover from the last pointer position every frame, so the highlight
       // never goes stale while the graph settles, flies, or after a refresh.
       if (pointerIn && !drag && !pan && lastPX != null){
         const h = pick(lastPX, lastPY);
-        if (h !== hover) hover = h;
+        if (h !== hover){ hover = h; setCursor(); }
       }
-      draw();
+      const busy = !settled || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan;
+      // Idle motion (breathing / parallax / flow) redraws on a ~30fps budget; with reduced
+      // motion the canvas is static and only redraws on demand.
+      if (busy || (!REDUCE && now - lastDraw > 32)){ draw(); lastDraw = now; }
     }
-    const activeAnim = alpha > 0.021 || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan;
+    const activeAnim = alpha > 0.021 || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan || !REDUCE;
     raf = activeAnim ? requestAnimationFrame(loop) : 0;
   }
+  const setCursor = () => cv.classList.toggle('node-hover', !!(hover && !drag));
 
   async function openNote(n){
     selected = n; alpha = Math.max(alpha, .15); syncToDept(n);
@@ -2013,7 +2142,7 @@ setInterval(async () => {
         else { view.x = pan.vx + e.clientX - pan.x; view.y = pan.vy + e.clientY - pan.y; draw(); }
       }
     } else {
-      const h = pick(px, py); if (h !== hover){ hover = h; draw(); }
+      const h = pick(px, py); if (h !== hover){ hover = h; setCursor(); draw(); }
     }
   });
   cv.addEventListener('pointerup', e => {
@@ -2024,11 +2153,12 @@ setInterval(async () => {
     endPointer();
     if (!wasMoved){ const n = pick(px, py); if (n) openNote(n); else { selected = null; syncToDept(null); } }
     hover = pick(px, py);                              // clear a stale hover left by a drag/pan
+    setCursor();
     if (!raf) loop(); else draw();
   });
-  cv.addEventListener('pointercancel', () => { endPointer(); if (pointerIn) hover = pick(lastPX, lastPY); if (!raf) loop(); });
-  cv.addEventListener('lostpointercapture', () => { if (downId !== null) endPointer(); });
-  cv.addEventListener('pointerleave', () => { pointerIn = false; if (hover){ hover = null; draw(); } });
+  cv.addEventListener('pointercancel', () => { endPointer(); if (pointerIn) hover = pick(lastPX, lastPY); setCursor(); if (!raf) loop(); });
+  cv.addEventListener('lostpointercapture', () => { if (downId !== null){ endPointer(); setCursor(); } });
+  cv.addEventListener('pointerleave', () => { pointerIn = false; if (hover){ hover = null; setCursor(); draw(); } });
   cv.addEventListener('pointerenter', e => { const [px, py] = pos(e); pointerIn = true; lastPX = px; lastPY = py; });
   cv.addEventListener('wheel', e => {
     e.preventDefault();
@@ -2124,9 +2254,9 @@ setInterval(async () => {
     const want = arg && typeof arg === 'string' ? arg : arg && arg.id;
     // reset every piece of transient interaction state so nothing survives a close/reopen
     hover = null; selected = null; drag = null; pan = null; flyAnim = null; moved = false;
-    downId = null; pointerIn = false; lastPX = lastPY = null; viewSaved = null;
+    downId = null; pointerIn = false; lastPX = lastPY = null; viewSaved = null; par.x = par.y = 0;
     ov.hidden = false; navBtn.setAttribute('aria-expanded', 'true'); fit(); view = {x: 0, y: 0, k: 1};
-    await load(); fitView(); cancelAnimationFrame(raf); loop();
+    await load(); fitView(); cancelAnimationFrame(raf); setCursor(); loop();
     const n = want && byId.get(want);
     if (n){                                           // jump to a specific note (e.g. from Departments)
       flyTo(n, 1.25); openNote(n);
@@ -2134,9 +2264,25 @@ setInterval(async () => {
   };
   const close = () => {
     ov.hidden = true; navBtn.setAttribute('aria-expanded', 'false'); cancelAnimationFrame(raf); raf = 0;
-    hover = null; drag = null; pan = null; flyAnim = null; moved = false; downId = null; pointerIn = false;
+    hover = null; drag = null; pan = null; flyAnim = null; moved = false; downId = null; pointerIn = false; par.x = par.y = 0;
   };
-  window.AtlasBrain = {open, close, load, flyTo: id => { const n = byId.get(id); if (n){ flyTo(n, 1.3); openNote(n); } }, pulseNode};
+  window.AtlasBrain = {
+    open, close, load,
+    flyTo: id => { const n = byId.get(id); if (n){ flyTo(n, 1.3); openNote(n); } },
+    pulseNode,
+    // Read-only introspection (used by tests/automation): the exact screen position of a node in
+    // CSS px relative to the canvas, using the SAME transform draw() paints with.
+    screenOf: id => { const n = byId.get(id); return n ? toScreen(n.x, n.y) : null; },
+    pickAt: (px, py) => { const n = pick(px, py); return n ? n.id : null; },   // canvas CSS px → node id
+    nodeIds: () => nodes.filter(visible).map(n => n.id),
+    labelShown: id => { const n = byId.get(id); return !!(n && labelVisible(n)); },
+    labelOf: id => { const n = byId.get(id); return (n && labelVisible(n)) ? labelBand(n) : null; },
+    selectedId: () => (selected ? selected.id : null),
+    hoverId: () => (hover ? hover.id : null),
+    viewInfo: () => ({x: view.x, y: view.y, k: view.k, par: {x: par.x, y: par.y}, W, H, dpr}),
+    ready: () => nodes.length > 0,
+    settled: () => alpha <= 0.021 && !drag && !pan && !flyAnim,   // forces have stopped, nodes still
+  };
   const NAV = () => window.AtlasNav;
   const goDept = () => {                              // the selected note's department / team, if it belongs to one
     const n = selected; if (!n || !NAV()) return;
