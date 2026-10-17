@@ -46,6 +46,38 @@ def classify(description="", command=""):
     return "high" if _HIGH_RISK.search(f"{description} {command}") else "normal"
 
 
+_LOW_RISK = re.compile(
+    r"^\s*(ls|cat|head|tail|pwd|find|grep|rg|git\s+(status|log|diff|show|branch)|"
+    r"echo|which|whoami|date|uptime|wc|du|df|stat)\b",
+    re.I,
+)
+_MED_RISK = re.compile(
+    r"(write|edit|patch|mkdir|touch|cp\s|mv\s|install|pip\s|npm\s|brew\s|"
+    r"git\s+(add|commit|checkout|switch|merge|stash)|sed\s|awk\s|tee\s|>)",
+    re.I,
+)
+
+
+def classify_tier(description="", command=""):
+    """Return {'tier': 'low'|'medium'|'high', 'reason': str} for the UI risk badge."""
+    blob = f"{description} {command}".strip()
+    m = _HIGH_RISK.search(blob)
+    if m:
+        tok = m.group(0).strip()
+        if re.search(r"send|email|mail|message|post|publish|push|deploy", tok, re.I):
+            why = "Sends, publishes, or deploys externally — requires keyboard or tap confirmation."
+        elif re.search(r"purchase|buy|pay|transfer|charge", tok, re.I):
+            why = "Spends or moves money — requires deliberate keyboard or tap confirmation."
+        elif re.search(r"credential|secret|password|token|ssh|\.env", tok, re.I):
+            why = "Touches credentials or secrets — requires deliberate keyboard or tap confirmation."
+        else:
+            why = f"Destructive or privileged operation ({tok}) — spoken 'yes' disabled; confirm with keyboard or tap."
+        return {"tier": "high", "reason": why}
+    if _LOW_RISK.search(command or "") and not _MED_RISK.search(blob):
+        return {"tier": "low", "reason": "Read-only inspection — does not modify files, send messages, or spend money."}
+    return {"tier": "medium", "reason": "Modifies local files, packages, or workspace state — safe to approve by voice or tap."}
+
+
 def _headers(key):
     h = {"Content-Type": "application/json"}
     if key:
@@ -168,9 +200,11 @@ def run(message, session_id, prompt, *, base, key, idle_timeout, approval_timeou
                         resolve_approval(base, key, run_id, ev.get("request_id"), "once")
                         yield dict(t="note", message=f"Bypass mode: auto-approved {desc}"[:200])
                         continue
+                    info = classify_tier(desc, cmd)
                     yield dict(t="approval", run_id=run_id, request_id=ev.get("request_id"),
                                description=desc, command=cmd[:400],
-                               risk=classify(desc, cmd), timeout=approval_timeout)
+                               risk=classify(desc, cmd), risk_tier=info["tier"],
+                               reason=info["reason"], timeout=approval_timeout)
                 elif name == "approval.responded":
                     yield dict(t="approval_done", request_id=ev.get("request_id"),
                                choice=ev.get("choice"))

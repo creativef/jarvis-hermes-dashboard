@@ -930,20 +930,52 @@ setInterval(async () => {
   const YES = /\b(yes|yeah|yep|yup|sure|okay|ok|approve|approved|go ahead|do it|proceed|confirm|affirmative)\b/i;
   const NO  = /\b(no|nope|nah|don'?t|do not|deny|denied|stop|cancel|negative|abort|never)\b/i;
   let cur = null, shownAt = 0, tick = null, listening = null;
+  const queue = [];
   const callOn = () => $('#callBtn').getAttribute('aria-pressed') === 'true';
   const voiceOK = () => !callOn() && !muted;
 
   const parse = t => NO.test(t) ? 'deny' : (YES.test(t) ? 'once' : null);   // any "no" wins
 
+  const HIGH_RE = /(delet|remove|rm\s|rmdir|wipe|erase|format|overwrit|truncate|force|--hard|reset|sudo|chmod|chown|kill|pkill|shutdown|reboot|drop\s|send|email|mail|message|post|publish|push|deploy|purchase|buy|pay|transfer|charge|curl[^|]*\|\s*(ba)?sh|credential|secret|password|token|ssh|\.env)/i;
+  const LOW_RE = /^\s*(ls|cat|head|tail|pwd|find|grep|rg|git\s+(status|log|diff|show|branch)|echo|which|whoami|date|uptime|wc|du|df|stat)\b/i;
+
+  function assessRisk(ev){
+    const blob = `${ev.description || ''} ${ev.command || ''}`.trim();
+    const tier = ev.risk_tier || (ev.risk === 'high' || HIGH_RE.test(blob) ? 'high' : LOW_RE.test(ev.command || '') ? 'low' : 'medium');
+    let reason = ev.reason || '';
+    if (!reason){
+      if (tier === 'high') reason = 'Destructive, external, or financial operation — spoken "yes" is disabled; confirm with keyboard or tap.';
+      else if (tier === 'low') reason = 'Read-only inspection — does not modify files, send messages, or spend money.';
+      else reason = 'Modifies local files or workspace state — safe to approve by voice or tap.';
+    }
+    return {tier, reason};
+  }
+
   function render(ev){
-    const high = ev.risk === 'high';
-    $('#apBadge').textContent = high ? 'NEEDS YOUR OK · CONFIRM WITH KEYBOARD' : 'NEEDS YOUR OK';
+    const {tier, reason} = assessRisk(ev);
+    const high = tier === 'high' || ev.risk === 'high';
+    ev.risk = high ? 'high' : 'normal';
+    card.dataset.tier = tier;
+    $('#apBadge').textContent = high ? 'NEEDS YOUR OK · KEYBOARD ONLY' : 'NEEDS YOUR OK';
     $('#apBadge').classList.toggle('high', high);
-    $('#apTitle').textContent = `Atlas wants to run: ${ev.description}.`;
+    const tierEl = $('#apTier');
+    if (tierEl){
+      tierEl.dataset.tier = tier;
+      tierEl.textContent = tier === 'high' ? '● HIGH RISK' : tier === 'low' ? '○ LOW RISK · READ-ONLY' : '◐ MEDIUM RISK · CHANGES FILES';
+    }
+    const stackEl = $('#apStack');
+    if (stackEl){
+      const total = 1 + queue.length;
+      stackEl.hidden = total <= 1;
+      stackEl.textContent = `1 of ${total}`;
+    }
+    $('#apTitle').textContent = `Atlas wants to ${ev.description || 'run a command'}.`;
+    const reasonEl = $('#apReason');
+    if (reasonEl) reasonEl.textContent = reason;
     $('#apCmd').textContent = ev.command || '(no command text)';
     $('#apHint').textContent = high
-      ? 'This kind of action needs a deliberate keypress — a spoken "yes" is not accepted. You can still say "no".'
-      : (voiceOK() ? 'Say "yes" or "no", or use the buttons.' : 'Use the buttons or the keyboard.');
+      ? 'High-risk tier: spoken "yes" is disabled. Press Enter or click Approve once, or say "no" / press Esc to deny.'
+      : (voiceOK() ? 'Say "yes" or "no", or use the buttons below.' : 'Use the buttons or the keyboard.');
     card.hidden = false;
   }
 
@@ -951,6 +983,10 @@ setInterval(async () => {
     cur = null; window.__approvalOpen = false;
     clearInterval(tick); tick = null; card.hidden = true;
     if (listening){ listening.cancel(); listening = null; }
+    if (queue.length){
+      const next = queue.shift();
+      setTimeout(() => onApproval(next), 60);
+    }
   }
 
   async function answer(choice, via){
@@ -1026,13 +1062,17 @@ setInterval(async () => {
   }
 
   async function onApproval(ev){
-    if (cur) return;
+    if (cur){ queue.push(ev); render(cur); return; }
     cur = ev; shownAt = Date.now(); window.__approvalOpen = true;
-    render(ev); log('command', 'APPROVAL', `asked: ${ev.description} — ${(ev.command || '').slice(0, 120)}`);
+    render(ev); log('command', 'APPROVAL', `asked [${card.dataset.tier || 'medium'}]: ${ev.description} — ${(ev.command || '').slice(0, 120)}`);
     setState('', 'AWAITING OK', ev.description.slice(0, 32));
     let left = TTL; $('#apTimer').textContent = `${left}s`;
+    const ringEl = $('#apRing');
+    const setRing = s => { if (ringEl) ringEl.style.strokeDashoffset = String((1 - Math.max(0, s) / TTL) * 56.55); };
+    setRing(left);
     tick = setInterval(() => {
       left--; $('#apTimer').textContent = `${Math.max(left,0)}s`;
+      setRing(left);
       if (left <= 0){ toast('No answer — denied'); answer('deny', 'timeout'); }
     }, 1000);
     if (voiceOK()){
@@ -1534,15 +1574,49 @@ setInterval(async () => {
   requestAnimationFrame(frame);
 })();
 
+/* ── pure interaction math for the Atlas Brain graph ─────────────────────────
+   DOM-free helpers for picking (with a generous hit radius), the click/drag
+   movement threshold, and the drawn hit radius. Exported on
+   window.AtlasGraphMath and delimited by the @graph-math markers so the test in
+   tests/test_brain_graph_ui.py can drive the real shipped logic through Node. */
+/* @graph-math:start */
+(() => {
+  'use strict';
+  const G = {
+    HIT_PAD: 10,                    // extra CSS px of clickable margin drawn around a node
+    DRAG_THRESHOLD: 4,              // CSS px the pointer may drift before it counts as a drag
+    pickRadius: (r, k) => r + G.HIT_PAD / (k || 1),
+    moved: (a, b, th) => Math.hypot(b.x - a.x, b.y - a.y) > (th == null ? G.DRAG_THRESHOLD : th),
+    // nodes: [{x,y,type,…}]; world: {x,y} of the pointer; visible(n); radiusOf(type).
+    // Nearest centre wins; on a tie the last-drawn (visually front) node wins, so a
+    // click on overlapping nodes lands on the one you can actually see.
+    pick: (nodes, world, k, visible, radiusOf) => {
+      let best = null, bd = Infinity;
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        if (visible && !visible(n)) continue;
+        const r = G.pickRadius(radiusOf ? radiusOf(n.type) : 4.5, k);
+        const d = Math.hypot(n.x - world.x, n.y - world.y);
+        if (d < r && d < bd) { best = n; bd = d; }
+      }
+      return best;
+    },
+  };
+  if (typeof window !== 'undefined') window.AtlasGraphMath = G;
+})();
+/* @graph-math:end */
+
 // ══════════ second brain: force-directed graph of the Atlas notes ══════════
 (() => {
   const ov = document.getElementById('brainOverlay'); if (!ov) return;
   const cv = document.getElementById('brainCanvas'), ctx = cv.getContext('2d');
   const $b = id => document.getElementById(id);
+  const GM = window.AtlasGraphMath || {HIT_PAD: 10, DRAG_THRESHOLD: 4, pickRadius: r => r, moved: () => false, pick: () => null};
   const GROUP = {};                                   // dept slug -> [r,g,b], resolved from theme variables
-  const RADIUS = {hub:16, dept:11, sub:6.5, notebook:3.5, commons:6, log:4, other:4};
-  const colorOf = n => n.type === 'hub' ? HUB : (GROUP[n.group] || NEUTRAL);
-  let INK = '234,246,250', HUB = [240,250,255], NEUTRAL = [130,160,180], FONT = 'system-ui, sans-serif', LIGHT = false;
+  const RADIUS = {hub:16, dept:11, sub:6.5, inbox:6.5, notebook:3.5, commons:6, log:4, other:4};
+  const INBOX_GROUP = '__inbox';                      // synthetic group key so the inbox cluster reads as a cluster
+  const colorOf = n => n.type === 'hub' ? HUB : n.type === 'inbox' ? INBOX : (GROUP[n.group] || NEUTRAL);
+  let INK = '234,246,250', HUB = [240,250,255], INBOX = [79,230,245], NEUTRAL = [130,160,180], FONT = 'system-ui, sans-serif', LIGHT = false;
   const probe = document.createElement('i'); probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none';
   ov.appendChild(probe);
   const rgbOf = (css, dflt) => {                      // any CSS colour/var -> [r,g,b]
@@ -1559,19 +1633,25 @@ setInterval(async () => {
     const h = cs.getPropertyValue('--hub-rgb').trim().split(',').map(Number);
     if (h.length === 3 && h.every(Number.isFinite)) HUB = h;
     NEUTRAL = rgbOf('var(--dim)', NEUTRAL);
+    INBOX = rgbOf('var(--inbox-rgb)', INBOX);
     LIGHT = document.documentElement.dataset.mode === 'light';
     FONT = getComputedStyle(document.body).fontFamily || FONT;
     for (const d of deptList()) GROUP[d.slug] = rgbOf(`var(${AtlasData.colorVar(d.slug)})`, NEUTRAL);
     if (!ov.hidden && W) draw();                      // repaint straight away on a theme/mode switch
   };
   const legend = () => {
+    const hasInbox = nodes.some(n => n.type === 'inbox');
     $b('brLegend').innerHTML = deptList().map(d =>
       `<span><i style="background:var(${AtlasData.colorVar(d.slug)})"></i>${d.name.replace(/&/g, '&amp;')}</span>`).join('')
+      + (hasInbox ? '<span class="lg-inbox"><i></i>Inbox</span>' : '')
       + '<span><i style="background:rgb(var(--hub-rgb))"></i>Atlas hub</span><span class="lg-hint">drag nodes · scroll to zoom · click to read</span>';
   };
   let nodes = [], links = [], byId = new Map(), adj = new Map();
   let W = 0, H = 0, dpr = 1, raf = 0, alpha = 1;
   let view = {x:0, y:0, k:1}, hover = null, selected = null, drag = null, pan = null, moved = false;
+  let searchQuery = '', searchMatches = [], searchIdx = 0, flyAnim = null, viewSaved = null;
+  let downX = 0, downY = 0, downId = null, lastPX = null, lastPY = null, pointerIn = false;
+  const edgePulses = [], nodeSparks = new Map();
   readTheme(); legend();
   addEventListener('atlas-theme', readTheme);
   if (window.AtlasData) AtlasData.onChange(() => { readTheme(); legend(); if (!ov.hidden) load(); });
@@ -1580,30 +1660,112 @@ setInterval(async () => {
     dpr = Math.min(2, window.devicePixelRatio || 1);
     const r = cv.getBoundingClientRect(); W = r.width; H = r.height;
     cv.width = Math.max(1, Math.round(W * dpr)); cv.height = Math.max(1, Math.round(H * dpr));
+    if (!ov.hidden && W) draw();                      // setting .width/.height clears the bitmap: repaint at once
   };
   new ResizeObserver(fit).observe(cv);
+  // Re-fit when the display's pixel ratio changes (e.g. the window moves to a monitor
+  // with a different scale factor), so the bitmap is never left at the old resolution.
+  let dprMq = null;
+  const watchDpr = () => {
+    if (!window.matchMedia) return;
+    if (dprMq && dprMq.removeEventListener) dprMq.removeEventListener('change', watchDpr);
+    dprMq = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    if (dprMq.addEventListener) dprMq.addEventListener('change', watchDpr);
+    fit();
+  };
+  watchDpr();
 
   const showNb = () => $b('brNotebooks').checked, showSh = () => $b('brShared').checked;
   const visible = n => n.type === 'notebook' ? showNb() : (n.type === 'commons' || n.type === 'log') ? showSh() : true;
+
+  function pulseNode(nodeId, kind = 'read'){
+    const n = byId.get(nodeId);
+    if (!n) return;
+    const now = performance.now();
+    nodeSparks.set(n.id, now);
+    for (const l of links){
+      if (l.a.id === n.id || l.b.id === n.id){
+        const from = l.a.id === n.id ? l.a : l.b;
+        const to = l.a.id === n.id ? l.b : l.a;
+        edgePulses.push({from, to, born: now, dur: 950, kind});
+      }
+    }
+    if (!ov.hidden && !raf) loop();
+  }
+
+  function flyTo(n, zoom = 1.25){
+    if (!n) return;
+    if (!visible(n)){
+      if (n.type === 'notebook') $b('brNotebooks').checked = true;
+      else if (n.type === 'commons' || n.type === 'log') $b('brShared').checked = true;
+    }
+    const tk = Math.max(view.k, zoom);
+    flyAnim = {
+      t0: performance.now(), dur: 380,
+      x0: view.x, y0: view.y, k0: view.k,
+      x1: -n.x * tk, y1: -n.y * tk, k1: tk,
+    };
+    pulseNode(n.id, 'focus');
+    if (!ov.hidden && !raf) loop();
+  }
+
+  function renderOutline(){
+    const box = $b('brOutline'); if (!box || box.hidden) return;
+    const groups = new Map();
+    const matchSet = new Set(searchMatches.map(m => m.id));
+    for (const n of nodes){
+      if (!visible(n)) continue;
+      const g = n.group || n.type || 'other';
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(n);
+    }
+    let html = '';
+    for (const [g, list] of groups){
+      html += `<div class="bo-group"><h4>${esc(g.replace(/-/g, ' '))} (${list.length})</h4><div class="bo-items">`
+        + list.map(n => `<button type="button" class="bo-btn${matchSet.has(n.id) ? ' match' : ''}" data-node="${esc(n.id)}">${esc(n.id)}</button>`).join('')
+        + `</div></div>`;
+    }
+    box.innerHTML = html || '<div class="pal-empty">No visible nodes.</div>';
+  }
 
   async function load(){
     try {
       const g = await fetch('/api/brain/graph', {headers: apiHeaders()}).then(r => r.json());
       if (!g.nodes) throw 0;
       const old = new Map(nodes.map(n => [n.id, n]));
+      const now = performance.now();
       nodes = g.nodes.map((n, i) => {
         const o = old.get(n.id), a = (i / g.nodes.length) * Math.PI * 2;
+        if (!o && old.size > 0) nodeSparks.set(n.id, now);
         return Object.assign(n, {x: o ? o.x : Math.cos(a) * 220 + Math.random() * 20,
                                  y: o ? o.y : Math.sin(a) * 220 + Math.random() * 20, vx: 0, vy: 0});
       });
       byId = new Map(nodes.map(n => [n.id, n]));
+      // Re-point live references at the freshly built objects (ids survive a reload),
+      // instead of leaving them holding the previous node objects.
+      const reRef = o => (o ? byId.get(o.id) || null : null);
+      selected = reRef(selected); hover = reRef(hover); drag = reRef(drag);
+      if (searchMatches.length) searchMatches = searchMatches.map(reRef).filter(Boolean);
       links = g.links.map(l => ({a: byId.get(l.source), b: byId.get(l.target)})).filter(l => l.a && l.b);
       adj = new Map(nodes.map(n => [n.id, new Set()]));
       links.forEach(l => { adj.get(l.a.id).add(l.b.id); adj.get(l.b.id).add(l.a.id); });
+      // Anchor any note that links to nothing (e.g. a big inbox source file) to the hub —
+      // inbox notes to the inbox hub — so a stray note cannot drift off to the edge and
+      // sit there as an unfindable speck.
+      const hub = byId.get('Atlas') || nodes.find(n => n.type === 'hub');
+      const inboxHub = nodes.find(n => n.type === 'inbox' && n.id === 'inbox');
+      for (const n of nodes){
+        if (adj.get(n.id).size) continue;
+        const a = (n.type === 'inbox' && inboxHub && inboxHub !== n) ? inboxHub : hub;
+        if (!a || a === n) continue;
+        links.push({a: n, b: a, anchor: true});
+        adj.get(n.id).add(a.id); adj.get(a.id).add(n.id);
+      }
       alpha = 1;
       for (let i = 0; i < 320; i++) step();     // open already settled, not mid-scramble
       alpha = .05;
       if (!g.exists) $b('brTitle').textContent = 'No brain folder found at ' + g.root;
+      legend(); renderOutline();
     } catch (_) { $b('brTitle').textContent = 'Could not load the brain'; }
   }
 
@@ -1640,7 +1802,7 @@ setInterval(async () => {
     alpha = Math.max(0.02, alpha * 0.985);
     let mx = 0, my = 0;                                   // keep the whole graph centred on the canvas
     for (const a of vis){ mx += a.x; my += a.y; }
-    if (n){ mx /= n; my /= n; for (const a of vis){ a.x -= mx * 0.2; a.y -= my * 0.2; } }
+    if (n){ mx /= n; my /= n; for (const a of vis){ if (a === drag) continue; a.x -= mx * 0.2; a.y -= my * 0.2; } }
   }
 
   function fitView(){                                     // zoom so every visible node fits with margin
@@ -1651,106 +1813,330 @@ setInterval(async () => {
     view.k = Math.max(.45, Math.min(1.5, k)); view.x = -((x0 + x1) / 2) * view.k; view.y = -((y0 + y1) / 2) * view.k;
   }
 
+  const radiusOf = t => RADIUS[t] || 4.5;
   const toWorld = (px, py) => ({x: (px - W / 2 - view.x) / view.k, y: (py - H / 2 - view.y) / view.k});
-  const pick = (px, py) => {
-    const w = toWorld(px, py); let best = null, bd = 1e9;
-    for (const n of nodes){
-      if (!visible(n)) continue;
-      const r = (RADIUS[n.type] || 4) + 5 / view.k, d = Math.hypot(n.x - w.x, n.y - w.y);
-      if (d < r && d < bd){ best = n; bd = d; }
-    }
-    return best;
-  };
+  const pick = (px, py) => GM.pick(nodes, toWorld(px, py), view.k, visible, radiusOf);
 
   function draw(){
+    const now = performance.now();
+    if (flyAnim){
+      const u = Math.min(1, (now - flyAnim.t0) / flyAnim.dur);
+      const e = 1 - Math.pow(1 - u, 3);
+      view.x = flyAnim.x0 + (flyAnim.x1 - flyAnim.x0) * e;
+      view.y = flyAnim.y0 + (flyAnim.y1 - flyAnim.y0) * e;
+      view.k = flyAnim.k0 + (flyAnim.k1 - flyAnim.k0) * e;
+      if (u >= 1) flyAnim = null;
+    }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
     ctx.save(); ctx.translate(W / 2 + view.x, H / 2 + view.y); ctx.scale(view.k, view.k);
     const focus = selected || hover, near = focus ? adj.get(focus.id) : null;
-    for (const l of links){
-      if (!visible(l.a) || !visible(l.b)) continue;
-      const hot = focus && (l.a === focus || l.b === focus), c = colorOf(l.a.type === 'hub' ? l.b : l.a);
-      ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y);
-      ctx.strokeStyle = `rgba(${c.join(',')},${hot ? .85 : focus ? .06 : .22})`; ctx.lineWidth = (hot ? 1.8 : 1) / view.k; ctx.stroke();
-    }
+    const hoverNear = hover && hover !== focus ? adj.get(hover.id) : null;
+    // Hover is never shadowed by the selection: dimming still follows the selection
+    // (or hover when nothing is selected), but every hovered node keeps its own
+    // lit node + neighbours so a different node always responds to the cursor.
+    const lit = new Set();
+    if (focus){ lit.add(focus.id); for (const id of adj.get(focus.id) || []) lit.add(id); }
+    if (hover && hover !== focus){ lit.add(hover.id); for (const id of adj.get(hover.id) || []) lit.add(id); }
+    const matchSet = searchMatches.length ? new Set(searchMatches.map(m => m.id)) : null;
+
+    // Department colour halos behind clusters
+    const deptCenters = new Map();
     for (const n of nodes){
       if (!visible(n)) continue;
-      const c = colorOf(n), r = RADIUS[n.type] || 4;
-      const dim = focus && n !== focus && !(near && near.has(n.id));
-      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${c.join(',')},${dim ? .18 : .95})`;
-      ctx.shadowColor = `rgba(${c.join(',')},.8)`; ctx.shadowBlur = dim ? 0 : (n.type === 'notebook' ? 4 : LIGHT ? 6 : 14);
+      const key = n.group || (n.type === 'inbox' ? INBOX_GROUP : '');
+      if (!key) continue;
+      const c = key === INBOX_GROUP ? INBOX : (GROUP[key] || NEUTRAL);
+      const g = deptCenters.get(key) || {x: 0, y: 0, count: 0, c};
+      g.x += n.x; g.y += n.y; g.count++;
+      deptCenters.set(key, g);
+    }
+    for (const [, g] of deptCenters){
+      if (g.count < 2) continue;
+      const gx = g.x / g.count, gy = g.y / g.count;
+      const rad = 85;
+      const gr = ctx.createRadialGradient(gx, gy, 8, gx, gy, rad);
+      gr.addColorStop(0, `rgba(${g.c.join(',')},${LIGHT ? 0.08 : 0.12})`);
+      gr.addColorStop(1, `rgba(${g.c.join(',')},0)`);
+      ctx.fillStyle = gr;
+      ctx.beginPath(); ctx.arc(gx, gy, rad, 0, Math.PI * 2); ctx.fill();
+    }
+
+    for (const l of links){
+      if (!visible(l.a) || !visible(l.b)) continue;
+      const hot = (focus && (l.a === focus || l.b === focus)) || (hover && (l.a === hover || l.b === hover)), c = colorOf(l.a.type === 'hub' ? l.b : l.a);
+      ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y);
+      ctx.strokeStyle = `rgba(${c.join(',')},${hot ? .88 : focus ? .07 : .24})`; ctx.lineWidth = (hot ? 2 : 1) / view.k; ctx.stroke();
+    }
+
+    // Live edge pulses travelling along links when notes are read/written/focused
+    for (let i = edgePulses.length - 1; i >= 0; i--){
+      const p = edgePulses[i];
+      const u = (now - p.born) / p.dur;
+      if (u >= 1){ edgePulses.splice(i, 1); continue; }
+      if (!visible(p.from) || !visible(p.to)) continue;
+      const px = p.from.x + (p.to.x - p.from.x) * u;
+      const py = p.from.y + (p.to.y - p.from.y) * u;
+      const c = colorOf(p.to.type === 'hub' ? p.from : p.to);
+      ctx.beginPath(); ctx.arc(px, py, 3.2 / view.k, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${c.join(',')},${1 - u * 0.6})`;
+      ctx.shadowColor = `rgba(${c.join(',')},1)`; ctx.shadowBlur = 12;
       ctx.fill(); ctx.shadowBlur = 0;
-      if (n === selected){ ctx.lineWidth = 2 / view.k; ctx.strokeStyle = `rgb(${INK})`; ctx.stroke(); }
+    }
+
+    for (const n of nodes){
+      if (!visible(n)) continue;
+      const c = colorOf(n), r = RADIUS[n.type] || 4.5;
+      const isMatch = matchSet && matchSet.has(n.id);
+      const dim = (focus || matchSet) && !isMatch && !lit.has(n.id);
+      // Halo glow around hub, dept, selected, hovered, and search-matched nodes
+      if (!dim && (n.type === 'hub' || n.type === 'dept' || n === selected || n === hover || isMatch)){
+        ctx.beginPath(); ctx.arc(n.x, n.y, r * (isMatch ? 2.4 : 1.85), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${c.join(',')},${isMatch ? 0.28 : 0.14})`;
+        ctx.fill();
+      }
+      // Spark ring when a node is newly born or pulsed
+      const sp = nodeSparks.get(n.id);
+      if (sp && now - sp < 1100){
+        const su = (now - sp) / 1100;
+        ctx.beginPath(); ctx.arc(n.x, n.y, r + su * 22, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${c.join(',')},${(1 - su) * 0.9})`;
+        ctx.lineWidth = 2 / view.k; ctx.stroke();
+      } else if (sp){
+        nodeSparks.delete(n.id);
+      }
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${c.join(',')},${dim ? .18 : .96})`;
+      ctx.shadowColor = `rgba(${c.join(',')},.85)`; ctx.shadowBlur = dim ? 0 : (isMatch ? 20 : n.type === 'notebook' ? 5 : LIGHT ? 8 : 16);
+      ctx.fill(); ctx.shadowBlur = 0;
+      if (n === selected || isMatch){
+        ctx.lineWidth = (isMatch ? 2.4 : 2) / view.k;
+        ctx.strokeStyle = isMatch ? '#4fe6f5' : `rgb(${INK})`;
+        ctx.stroke();
+      } else if (n === hover){
+        ctx.lineWidth = 1.6 / view.k;                 // hover ring, distinct from the selection ring
+        ctx.strokeStyle = `rgba(${c.join(',')},.9)`;
+        ctx.stroke();
+      }
     }
     ctx.font = `${11 / Math.max(.7, Math.min(1.4, view.k))}px ${FONT}`;
     ctx.textAlign = 'center';
     for (const n of nodes){
       if (!visible(n)) continue;
-      const show = n.type === 'hub' || n.type === 'dept' || n === focus || (near && near.has(n.id) && n.type !== 'notebook')
-                   || (n.type === 'sub' && view.k > .85);
+      const isMatch = matchSet && matchSet.has(n.id);
+      const show = n.type === 'hub' || n.type === 'dept' || n === focus || n === hover || isMatch
+                   || (near && near.has(n.id) && n.type !== 'notebook')
+                   || (hoverNear && hoverNear.has(n.id) && n.type !== 'notebook')
+                   || (n.type === 'sub' && view.k > .85)
+                   || (n.type === 'inbox' && view.k > .45);
       if (!show) continue;
-      const dim = focus && n !== focus && !(near && near.has(n.id));
-      ctx.fillStyle = dim ? `rgba(${INK},.3)` : `rgba(${INK},.92)`;
+      const dim = (focus || matchSet) && !isMatch && !lit.has(n.id);
+      ctx.fillStyle = dim ? `rgba(${INK},.3)` : `rgba(${INK},.94)`;
       ctx.fillText(n.id.replace(/-/g, ' '), n.x, n.y + (RADIUS[n.type] || 4) + 13 / Math.max(.7, view.k));
     }
     ctx.restore();
   }
 
-  function loop(){ raf = requestAnimationFrame(loop); if (W) { step(); draw(); } }
+  function loop(){
+    if (ov.hidden || document.hidden){ raf = 0; return; }
+    if (W){
+      step();
+      // Recompute hover from the last pointer position every frame, so the highlight
+      // never goes stale while the graph settles, flies, or after a refresh.
+      if (pointerIn && !drag && !pan && lastPX != null){
+        const h = pick(lastPX, lastPY);
+        if (h !== hover) hover = h;
+      }
+      draw();
+    }
+    const activeAnim = alpha > 0.021 || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan;
+    raf = activeAnim ? requestAnimationFrame(loop) : 0;
+  }
 
   async function openNote(n){
     selected = n; alpha = Math.max(alpha, .15); syncToDept(n);
-    $b('brTitle').textContent = n.id; $b('brPath').textContent = ''; $b('brText').textContent = 'loading…';
+    pulseNode(n.id, 'read');
+    const note = $b('brText');
+    note._raw = ''; note._noteId = n.id; note.scrollTop = 0;
+    $b('brTitle').textContent = n.id; $b('brPath').textContent = '';
+    note.innerHTML = '<p class="md-p md-loading">loading…</p>';
     const box = $b('brLinks'); box.textContent = '';
     for (const id of [...(adj.get(n.id) || [])].sort()){
       const b = document.createElement('button'); b.textContent = id.replace(/-/g, ' ');
-      b.onclick = () => { const t = byId.get(id); if (t){ if (!visible(t)) { if (t.type === 'notebook') $b('brNotebooks').checked = true; else $b('brShared').checked = true; } openNote(t); } };
+      b.onclick = () => { const t = byId.get(id); if (t){ if (!visible(t)) { if (t.type === 'notebook') $b('brNotebooks').checked = true; else $b('brShared').checked = true; } flyTo(t, 1.15); openNote(t); } };
       box.appendChild(b);
     }
     try {
       const r = await fetch('/api/brain/note?id=' + encodeURIComponent(n.id), {headers: apiHeaders()}).then(r => r.json());
       if (selected !== n) return;
-      $b('brPath').textContent = r.path || ''; $b('brText').textContent = r.text || r.error || '';
-    } catch (_) { $b('brText').textContent = 'could not load note'; }
+      $b('brPath').textContent = r.path || '';
+      const text = r.text || r.error || '';
+      note._raw = text;
+      if (window.AtlasMarkdown) note.innerHTML = AtlasMarkdown.render(text);
+      else note.textContent = text;
+      note.scrollTop = 0;
+    } catch (_) { note._raw = ''; note.innerHTML = '<p class="md-p">could not load note</p>'; }
   }
 
+  // [[wikilinks]] render as links that jump straight to that node in the graph
+  $b('brText').addEventListener('click', e => {
+    const a = e.target.closest && e.target.closest('a.md-wikilink');
+    if (!a) return;
+    e.preventDefault(); e.stopPropagation();
+    const id = a.dataset.node;
+    const t = byId.get(id) || [...byId.values()].find(x => x.id.toLowerCase() === String(id).toLowerCase());
+    if (!t) return;
+    if (!visible(t)){ if (t.type === 'notebook') $b('brNotebooks').checked = true; else $b('brShared').checked = true; }
+    flyTo(t, 1.3); openNote(t);
+  });
+
   const pos = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  const endPointer = () => { drag = null; pan = null; moved = false; downId = null; cv.classList.remove('drag'); };
   cv.addEventListener('pointerdown', e => {
-    cv.setPointerCapture(e.pointerId); const [px, py] = pos(e); moved = false;
+    if (downId !== null) return;                       // ignore a second pointer while a gesture is live
+    cv.setPointerCapture(e.pointerId);
+    const [px, py] = pos(e); moved = false;
+    downX = e.clientX; downY = e.clientY; downId = e.pointerId;
     const n = pick(px, py);
-    if (n){ drag = n; } else { pan = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; cv.classList.add('drag'); }
+    if (n){ drag = n; cv.classList.add('drag'); }      // grabbing cursor while dragging a node too
+    else { pan = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; cv.classList.add('drag'); viewSaved = null; }
   });
   cv.addEventListener('pointermove', e => {
+    if (downId !== null && e.pointerId !== downId) return;
     const [px, py] = pos(e);
-    if (drag){ const w = toWorld(px, py); drag.x = w.x; drag.y = w.y; alpha = Math.max(alpha, .3); moved = true; }
-    else if (pan){ view.x = pan.vx + e.clientX - pan.x; view.y = pan.vy + e.clientY - pan.y; moved = true; }
-    else hover = pick(px, py);
+    lastPX = px; lastPY = py; pointerIn = true;
+    if (drag || pan){
+      // A click is only a drag once the pointer has moved past the threshold, so a
+      // jittery click still selects instead of silently becoming a drag.
+      if (!moved && GM.moved({x: downX, y: downY}, {x: e.clientX, y: e.clientY})) moved = true;
+      if (moved){
+        if (drag){ const w = toWorld(px, py); drag.x = w.x; drag.y = w.y; alpha = Math.max(alpha, .3); if (!raf) loop(); }
+        else { view.x = pan.vx + e.clientX - pan.x; view.y = pan.vy + e.clientY - pan.y; draw(); }
+      }
+    } else {
+      const h = pick(px, py); if (h !== hover){ hover = h; draw(); }
+    }
   });
   cv.addEventListener('pointerup', e => {
+    if (downId !== null && e.pointerId !== downId) return;
     const [px, py] = pos(e);
-    if (!moved){ const n = pick(px, py); if (n) openNote(n); else { selected = null; syncToDept(null); } }
-    drag = null; pan = null; cv.classList.remove('drag');
+    lastPX = px; lastPY = py;
+    const wasMoved = moved;
+    endPointer();
+    if (!wasMoved){ const n = pick(px, py); if (n) openNote(n); else { selected = null; syncToDept(null); } }
+    hover = pick(px, py);                              // clear a stale hover left by a drag/pan
+    if (!raf) loop(); else draw();
   });
-  cv.addEventListener('pointerleave', () => { hover = null; });
+  cv.addEventListener('pointercancel', () => { endPointer(); if (pointerIn) hover = pick(lastPX, lastPY); if (!raf) loop(); });
+  cv.addEventListener('lostpointercapture', () => { if (downId !== null) endPointer(); });
+  cv.addEventListener('pointerleave', () => { pointerIn = false; if (hover){ hover = null; draw(); } });
+  cv.addEventListener('pointerenter', e => { const [px, py] = pos(e); pointerIn = true; lastPX = px; lastPY = py; });
   cv.addEventListener('wheel', e => {
     e.preventDefault();
+    viewSaved = null;                                  // a manual zoom is the new "restore" home
     const [px, py] = pos(e), before = toWorld(px, py);
     view.k = Math.max(.35, Math.min(3, view.k * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
     view.x = px - W / 2 - before.x * view.k; view.y = py - H / 2 - before.y * view.k;
+    draw();
   }, {passive: false});
+
+  // Search box with fly-to + accessible outline toggle + live tool edge pulses
+  const searchInput = $b('brSearch'), searchCount = $b('brSearchCount');
+  const outlineBtn = $b('brOutlineToggle'), outlineBox = $b('brOutline');
+  const saveView = () => { if (!viewSaved) viewSaved = {x: view.x, y: view.y, k: view.k}; };
+  const restoreView = () => {                          // put the camera back where it was before the search
+    if (!viewSaved) return;
+    const v = viewSaved; viewSaved = null;
+    flyAnim = {t0: performance.now(), dur: 320, x0: view.x, y0: view.y, k0: view.k, x1: v.x, y1: v.y, k1: v.k};
+    if (!raf) loop();
+  };
+  function updateSearch(fly = false){
+    searchQuery = (searchInput?.value || '').toLowerCase().trim();
+    if (!searchQuery){
+      searchMatches = []; searchIdx = 0;
+      if (searchCount) searchCount.hidden = true;
+      restoreView();
+      renderOutline(); draw();
+      return;
+    }
+    searchMatches = nodes.filter(n => n.id.toLowerCase().includes(searchQuery) || (n.group || '').toLowerCase().includes(searchQuery));
+    if (searchCount){
+      searchCount.hidden = false;
+      searchCount.textContent = searchMatches.length ? `${(searchIdx % searchMatches.length) + 1}/${searchMatches.length}` : '0';
+    }
+    if (searchMatches.length && fly){                   // only Enter / a click on a result flies + opens
+      const target = searchMatches[searchIdx % searchMatches.length];
+      saveView();
+      flyTo(target, 1.35);
+      openNote(target);
+    } else {
+      draw();
+    }
+    renderOutline();
+  }
+  if (searchInput){
+    searchInput.addEventListener('input', () => { searchIdx = 0; updateSearch(false); });
+    searchInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && searchMatches.length){
+        e.preventDefault();
+        searchIdx = (searchIdx + (e.shiftKey ? searchMatches.length - 1 : 1)) % searchMatches.length;
+        updateSearch(true);
+      } else if (e.key === 'Escape' && searchInput.value){
+        e.stopPropagation();
+        searchInput.value = ''; updateSearch(false);
+      }
+    });
+  }
+  if (outlineBtn && outlineBox){
+    outlineBtn.addEventListener('click', () => {
+      const on = outlineBox.hidden;
+      outlineBox.hidden = !on;
+      outlineBtn.setAttribute('aria-pressed', String(on));
+      if (on) renderOutline();
+    });
+    outlineBox.addEventListener('click', e => {
+      const b = e.target.closest('[data-node]'); if (!b) return;
+      const n = byId.get(b.dataset.node);
+      if (n){ outlineBox.hidden = true; outlineBtn.setAttribute('aria-pressed', 'false'); flyTo(n, 1.3); openNote(n); }
+    });
+  }
+
+  // Trigger live edge pulses when tools read/write notes in ~/Atlas
+  const origBrainHandle = handle;
+  handle = ev => {
+    try {
+      if (ev.t === 'tool' && ev.phase === 'use' && nodes.length){
+        const inp = String(ev.input || '');
+        for (const n of nodes){
+          if (n.id.length > 3 && inp.includes(n.id)){
+            pulseNode(n.id, 'tool');
+          }
+        }
+      }
+    } catch (_) {}
+    return origBrainHandle(ev);
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !ov.hidden && !raf) loop();
+  });
 
   const navBtn = $b('navBrain'), isOpen = () => !ov.hidden;
   const open = async arg => {
     const want = arg && typeof arg === 'string' ? arg : arg && arg.id;
+    // reset every piece of transient interaction state so nothing survives a close/reopen
+    hover = null; selected = null; drag = null; pan = null; flyAnim = null; moved = false;
+    downId = null; pointerIn = false; lastPX = lastPY = null; viewSaved = null;
     ov.hidden = false; navBtn.setAttribute('aria-expanded', 'true'); fit(); view = {x: 0, y: 0, k: 1};
     await load(); fitView(); cancelAnimationFrame(raf); loop();
     const n = want && byId.get(want);
     if (n){                                           // jump to a specific note (e.g. from Departments)
-      if (!visible(n)) { if (n.type === 'notebook') $b('brNotebooks').checked = true; else $b('brShared').checked = true; }
-      view.k = Math.max(view.k, 1); view.x = -n.x * view.k; view.y = -n.y * view.k; openNote(n);
+      flyTo(n, 1.25); openNote(n);
     }
   };
-  const close = () => { ov.hidden = true; navBtn.setAttribute('aria-expanded', 'false'); cancelAnimationFrame(raf); };
+  const close = () => {
+    ov.hidden = true; navBtn.setAttribute('aria-expanded', 'false'); cancelAnimationFrame(raf); raf = 0;
+    hover = null; drag = null; pan = null; flyAnim = null; moved = false; downId = null; pointerIn = false;
+  };
+  window.AtlasBrain = {open, close, load, flyTo: id => { const n = byId.get(id); if (n){ flyTo(n, 1.3); openNote(n); } }, pulseNode};
   const NAV = () => window.AtlasNav;
   const goDept = () => {                              // the selected note's department / team, if it belongs to one
     const n = selected; if (!n || !NAV()) return;
@@ -2082,6 +2468,14 @@ setInterval(async () => {
   }).observe(menu, {subtree: true, attributes: true, attributeFilter: ['aria-expanded']});
   addEventListener('resize', () => { if (active) placeInd(active); });
 
+  // ── nav overflow cue: fade the edge only while the nav can actually scroll ──
+  function syncNavScroll(){
+    menu.classList.toggle('nav-overflow', menu.scrollWidth - menu.clientWidth > 2);
+  }
+  syncNavScroll();
+  menu.addEventListener('scroll', syncNavScroll, {passive: true});
+  addEventListener('resize', syncNavScroll);
+
   renderLatency();
   probe();
 })();
@@ -2103,8 +2497,10 @@ setInterval(async () => {
     ['/commands', 'All commands', 'List dashboard commands', () => transmit('/commands', {speak:false}), '/commands'],
   ];
   const NAV = [
+    ['Inbox', 'Drop files, CSVs & quick notes', () => AtlasNav ? AtlasNav.go('inbox') : $('#navInbox')?.click(), '⌘', 'I'],
     ['Departments', 'Browse departments & teams', () => AtlasNav ? AtlasNav.go('departments') : $('#navDepts')?.click(), '⌘', 'D'],
     ['Brain', 'Second-brain graph', () => AtlasNav ? AtlasNav.go('brain') : $('#navBrain')?.click(), '⌘', 'B'],
+    ['Jobs & Activity', 'Running & completed handoff missions + POD/inbox', () => AtlasNav ? AtlasNav.go('jobs') : $('#navJobs')?.click(), '⌘', 'J'],
     ['Agents', 'Live sub-agents', () => AtlasNav ? AtlasNav.go('agents') : $('#navAgents')?.click(), '⌘', 'A'],
     ['Action Logs', 'Telemetry stream', () => $('#navLogs')?.click(), '⌘', ''],
     ['Command Matrix', 'Browse all commands', () => $('#navCmds')?.click(), '⌘', ''],
@@ -2315,8 +2711,8 @@ setInterval(async () => {
         d: () => AtlasNav ? AtlasNav.go('departments') : $('#navDepts')?.click(),
         b: () => AtlasNav ? AtlasNav.go('brain') : $('#navBrain')?.click(),
         a: () => AtlasNav ? AtlasNav.go('agents') : $('#navAgents')?.click(),
-        j: () => $('#navLogs')?.click(),
-        i: () => window.AtlasBrief && AtlasBrief.focus(),
+        j: () => AtlasNav ? AtlasNav.go('jobs') : $('#navJobs')?.click(),
+        i: () => AtlasNav ? AtlasNav.go('inbox') : $('#navInbox')?.click(),
         s: () => $('#settingsBtn')?.click(),
         w: () => window.AtlasAmbient && AtlasAmbient.toggle(),
       }[k];
@@ -2591,4 +2987,524 @@ setInterval(async () => {
   }
 
   if (/mode=ambient|ambient=1/.test(location.hash)) setTimeout(on, 200);
+})();
+
+// ══════════ IIFE · Inbox view + full-window drop + Brain linking ══════════
+(() => {
+  'use strict';
+  const ov = document.getElementById('inboxOverlay'); if (!ov) return;
+  const navBtn = document.getElementById('navInbox');
+  const dropzone = document.getElementById('inbDropzone');
+  const fileInput = document.getElementById('inbFileInput');
+  const titleInput = document.getElementById('inbTitle');
+  const deptSelect = document.getElementById('inbDept');
+  const contentInput = document.getElementById('inbContent');
+  const saveBtn = document.getElementById('inbSaveBtn');
+  const statusMsg = document.getElementById('inbStatusMsg');
+  const listEl = document.getElementById('inbList');
+  const countEl = document.getElementById('inbCount');
+  const pathEl = document.getElementById('inbPath');
+  const autoTriageChk = document.getElementById('inbAutoTriage');
+  const winDrop = document.getElementById('windowDropOverlay');
+  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+
+  let items = [];
+
+  const fmtSize = b => {
+    if (!b && b !== 0) return '';
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+    return `${(b / (1024 * 1024)).toFixed(2)} MB`;
+  };
+  const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}) : '';
+
+  function setStatus(msg, isErr = false){
+    if (!statusMsg) return;
+    statusMsg.textContent = msg || '';
+    statusMsg.style.color = isErr ? 'var(--red)' : 'var(--cyan)';
+  }
+
+  function updateBadge(){
+    if (!navBtn) return;
+    const newCount = items.filter(x => x.status === 'new').length;
+    navBtn.dataset.count = newCount ? String(newCount) : '';
+  }
+
+  function render(){
+    updateBadge();
+    if (countEl) countEl.textContent = `${items.length} item${items.length === 1 ? '' : 's'}`;
+    if (!items.length){
+      listEl.innerHTML = '<div class="inb-empty">Drop anything here. I will read it and tell you what it is.</div>';
+      return;
+    }
+    const showTriage = !autoTriageChk || autoTriageChk.checked;
+    listEl.innerHTML = items.map(it => {
+      const tr = it.triage || {};
+      return `<article class="inb-card" data-id="${esc(it.id)}" data-status="${esc(it.status || 'new')}">
+        <header>
+          <span class="inb-kind">${esc(it.kind || 'file')}</span>
+          <b class="inb-name" title="${esc(it.name)}">${esc(it.name)}</b>
+          <span class="inb-st">${esc(it.status || 'new')} · ${esc(fmtSize(it.size))}</span>
+        </header>
+        ${it.preview ? `<div class="inb-preview"><div class="md-read md-compact">${window.AtlasMarkdown ? AtlasMarkdown.render(it.preview) : esc(it.preview)}</div></div>` : ''}
+        ${showTriage && tr.action ? `<div class="inb-triage"><span>Proposed: <b>${esc(tr.team || tr.department || 'strategy')}</b> · ${esc(tr.action)}</span></div>` : ''}
+        <div class="inb-actions">
+          <button type="button" class="ctl run" data-inb-act="brain" data-note="${esc(it.note_id || it.id)}">Open in Brain ▸</button>
+          <button type="button" class="ctl aux" data-inb-act="file" data-id="${esc(it.id)}" data-dept="${esc(tr.department || 'research-strategy')}">Approve file to ${esc(tr.department || 'Brain')}</button>
+          <button type="button" class="ctl aux" data-inb-act="summarise" data-id="${esc(it.id)}">Summarise</button>
+          <button type="button" class="ctl aux" data-inb-act="tasks" data-id="${esc(it.id)}">Extract tasks</button>
+          <button type="button" class="ctl aux" data-inb-act="discard" data-id="${esc(it.id)}">Discard</button>
+        </div>
+        <div class="ag-meta"><span>Saved <b>${esc(fmtTime(it.created))}</b></span><span>Path <b>${esc(it.path || '')}</b></span></div>
+      </article>`;
+    }).join('');
+  }
+
+  async function refresh(){
+    try {
+      const r = await fetch('/api/inbox', {headers: apiHeaders(), cache: 'no-store'}).then(r => r.json());
+      if (Array.isArray(r.items)) items = r.items;
+      if (r.root && pathEl) pathEl.textContent = r.root;
+      render();
+    } catch (_) {}
+  }
+
+  async function uploadPayload(payload){
+    setStatus('Saving to ~/Atlas/inbox…');
+    try {
+      const r = await fetch('/api/inbox', {
+        method: 'POST',
+        headers: apiHeaders({'content-type': 'application/json'}),
+        body: JSON.stringify(payload),
+      }).then(r => r.json());
+      if (!r.ok){
+        setStatus(r.error || 'Could not save item', true);
+        return null;
+      }
+      setStatus(`Saved ${r.item.name} → linked into Brain as [[${r.item.note_id}]]`);
+      await refresh();
+      if (window.AtlasBrain && r.item.note_id){
+        // reload the graph so the new inbox note really appears — pulseNode alone
+        // silently no-ops when the node is not yet in the graph
+        Promise.resolve(window.AtlasBrain.load?.()).then(() => window.AtlasBrain.pulseNode?.(r.item.note_id, 'inbox'));
+      }
+      if (window.AtlasBrief) window.AtlasBrief.refresh?.();
+      return r.item;
+    } catch (e) {
+      setStatus('Upload failed', true);
+      return null;
+    }
+  }
+
+  async function handleFiles(fileList){
+    if (!fileList || !fileList.length) return;
+    if (ov.hidden) open();
+    for (const file of fileList){
+      const b64 = await new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = () => res(String(reader.result || ''));
+        reader.onerror = () => rej(new Error('read error'));
+        reader.readAsDataURL(file);
+      }).catch(() => '');
+      if (!b64) continue;
+      await uploadPayload({
+        name: file.name,
+        data_base64: b64,
+        department: deptSelect?.value || '',
+      });
+    }
+  }
+
+  saveBtn?.addEventListener('click', async () => {
+    const name = titleInput.value.trim();
+    const content = contentInput.value;
+    if (!name && !content.trim()){
+      setStatus('Enter a note, CSV rows, or title first', true);
+      return;
+    }
+    const kind = /\.csv$/i.test(name) ? 'csv' : 'note';
+    const saved = await uploadPayload({
+      name: name || undefined,
+      content,
+      kind,
+      department: deptSelect.value || '',
+    });
+    if (saved){
+      titleInput.value = '';
+      contentInput.value = '';
+    }
+  });
+
+  dropzone?.addEventListener('click', () => fileInput?.click());
+  dropzone?.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); fileInput?.click(); } });
+  fileInput?.addEventListener('change', () => { if (fileInput.files?.length) handleFiles(fileInput.files); fileInput.value = ''; });
+  dropzone?.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+  dropzone?.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+  dropzone?.addEventListener('drop', e => {
+    e.preventDefault(); dropzone.classList.remove('dragover');
+    if (e.dataTransfer?.files?.length) handleFiles(e.dataTransfer.files);
+  });
+
+  // Full-window drag-and-drop
+  let dragDepth = 0;
+  window.addEventListener('dragenter', e => {
+    if (!e.dataTransfer?.types || !Array.from(e.dataTransfer.types).includes('Files')) return;
+    dragDepth++;
+    if (winDrop) winDrop.hidden = false;
+  });
+  window.addEventListener('dragover', e => {
+    if (winDrop && !winDrop.hidden) e.preventDefault();
+  });
+  window.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0 && winDrop) winDrop.hidden = true;
+  });
+  window.addEventListener('drop', e => {
+    dragDepth = 0;
+    if (winDrop && !winDrop.hidden){
+      e.preventDefault();
+      winDrop.hidden = true;
+      if (e.dataTransfer?.files?.length) handleFiles(e.dataTransfer.files);
+    }
+  });
+
+  listEl?.addEventListener('click', async e => {
+    const b = e.target.closest('[data-inb-act]'); if (!b) return;
+    const act = b.dataset.inbAct;
+    const id = b.dataset.id;
+    const it = items.find(x => x.id === id);
+    if (act === 'brain'){
+      const noteId = b.dataset.note;
+      close();
+      if (window.AtlasNav) AtlasNav.go('brain', noteId);
+      return;
+    }
+    if (act === 'file' && id){
+      await fetch('/api/inbox', {
+        method: 'POST', headers: apiHeaders({'content-type': 'application/json'}),
+        body: JSON.stringify({action: 'file', id, department: b.dataset.dept}),
+      });
+      await refresh();
+      return;
+    }
+    if (act === 'discard' && id){
+      await fetch('/api/inbox', {
+        method: 'POST', headers: apiHeaders({'content-type': 'application/json'}),
+        body: JSON.stringify({action: 'discard', id}),
+      });
+      await refresh();
+      return;
+    }
+    if ((act === 'summarise' || act === 'tasks') && it){
+      close();
+      const inp = document.getElementById('input');
+      if (inp){
+        inp.value = act === 'summarise'
+          ? `Summarise the inbox item "${it.name}" (saved at ~/Atlas/${it.path}) and propose the next decision.`
+          : `Extract concrete action items from the inbox item "${it.name}" (saved at ~/Atlas/${it.path}).`;
+        inp.focus();
+      }
+    }
+  });
+
+  autoTriageChk?.addEventListener('change', render);
+
+  function open(){
+    ov.hidden = false;
+    navBtn?.setAttribute('aria-expanded', 'true');
+    document.getElementById('scrim')?.click();
+    refresh();
+  }
+  function close(){
+    ov.hidden = true;
+    navBtn?.setAttribute('aria-expanded', 'false');
+  }
+
+  navBtn?.addEventListener('click', () => ov.hidden ? (window.AtlasNav ? AtlasNav.go('inbox') : open()) : close());
+  document.getElementById('inbClose')?.addEventListener('click', close);
+  ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !ov.hidden){ e.stopPropagation(); close(); } }, true);
+
+  if (window.AtlasNav) AtlasNav.views.inbox = {open, close, isOpen: () => !ov.hidden};
+  window.AtlasInbox = {open, close, refresh, uploadPayload};
+  refresh();
+})();
+
+// ══════════ IIFE · Jobs & Activity tab (handoff missions, /background jobs, POD & Inbox) ══════════
+(() => {
+  'use strict';
+  const ov = document.getElementById('jobsOverlay'); if (!ov) return;
+  const navBtn = document.getElementById('navJobs');
+  const body = document.getElementById('jaBody');
+  const sum = document.getElementById('jaSum');
+  const tabs = document.getElementById('jaTabs');
+  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+
+  let tab = 'all', state = {running: 0, agents: [], missions: [], inbox: [], pod: []}, timer = null;
+
+  const dur = s => {
+    if (s == null) return '—';
+    s = Math.max(0, Math.floor(s));
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+    return h ? `${h}h ${String(m).padStart(2, '0')}m` : m ? `${m}m ${String(x).padStart(2, '0')}s` : `${x}s`;
+  };
+  const clock = t => t ? new Date(t * 1000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}) : '—';
+
+  function updateBadge(){
+    if (!navBtn) return;
+    const n = state.running || 0;
+    navBtn.dataset.count = n ? String(n) : '';
+  }
+
+  function renderJobCard(a){
+    const running = a.status === 'running' || a.status === 'stalled';
+    return `<article class="ag-card st-${esc(a.status || 'done')}" data-id="${esc(a.id || '')}">
+      <header><span class="ag-dot"></span><b class="ag-name">${esc(a.name || a.mission || 'Mission')}</b>
+        <span class="ag-tag">${esc(a.kind || 'handoff')}</span>
+        <span class="ag-status">${esc(a.status || 'done')}</span></header>
+      <div class="ag-brief">${esc((a.brief || a.mission || '').slice(0, 240))}</div>
+      ${running && a.step ? `<div class="ag-step"><span class="ag-k">Live step</span><span class="ag-v">${esc(a.step)}</span></div>` : ''}
+      ${!running && a.result ? `<div class="ag-result"><span class="ag-k">Outcome</span><div class="ag-rtext">${esc(a.result)}</div></div>` : ''}
+      <div class="ag-meta"><span>Started <b>${esc(clock(a.started || a.at))}</b></span>
+        ${a.elapsed != null ? `<span>Duration <b>${esc(dur(a.elapsed))}</b></span>` : ''}
+        <span class="ag-id">${esc(a.id || '')}</span></div>
+    </article>`;
+  }
+
+  function renderInboxCard(it){
+    const tr = it.triage || {};
+    return `<article class="ag-card st-done" data-id="${esc(it.id)}">
+      <header><span class="ag-dot"></span><b class="ag-name">${esc(it.name)}</b>
+        <span class="ag-tag">inbox · ${esc(it.kind || 'file')}</span>
+        <span class="ag-status">${esc(it.status || 'new')}</span></header>
+      ${it.preview ? `<div class="ag-brief md-read md-compact">${window.AtlasMarkdown ? AtlasMarkdown.render(it.preview.slice(0, 200)) : esc(it.preview.slice(0, 200))}</div>` : ''}
+      <div class="ag-meta"><span>Saved <b>${esc(clock(it.created))}</b></span>
+        <span>Dept <b>${esc(tr.department || '—')}</b></span>
+        <button type="button" class="ag-more" data-open-brain="${esc(it.note_id || it.id)}">Open in Brain ▸</button></div>
+    </article>`;
+  }
+
+  function renderPodCard(p){
+    return `<article class="ag-card st-done">
+      <header><span class="ag-dot"></span><b class="ag-name">${esc(p.name || p.id || 'POD item')}</b>
+        <span class="ag-tag">POD</span>
+        <span class="ag-status">${esc(p.verdict || p.path || 'note')}</span></header>
+      <div class="ag-brief md-read md-compact">${window.AtlasMarkdown ? AtlasMarkdown.render((p.preview || p.summary || '').slice(0, 240)) : esc((p.preview || p.summary || '').slice(0, 240))}</div>
+      <div class="ag-meta">
+        ${p.score != null ? `<span>Score <b>${esc(p.score)}/100</b></span>` : ''}
+        <button type="button" class="ag-more" data-open-brain="${esc(p.id || 'pod-idea-queue')}">Open in Brain ▸</button>
+      </div>
+    </article>`;
+  }
+
+  function render(){
+    updateBadge();
+    const agents = state.agents || [];
+    const inb = state.inbox || [];
+    const pod = state.pod || [];
+    if (sum) sum.textContent = `${state.running || 0} running · ${agents.length} missions · ${inb.length} inbox · ${pod.length} POD`;
+
+    let html = '';
+    if (tab === 'all' || tab === 'jobs'){
+      const running = agents.filter(a => a.status === 'running' || a.status === 'stalled');
+      const done = agents.filter(a => !(a.status === 'running' || a.status === 'stalled'));
+      html += `<div class="ag-sec">Running Handoff &amp; Background Missions (${running.length})</div>`;
+      html += running.length ? `<div class="ag-grid">${running.map(renderJobCard).join('')}</div>` : '<div class="pal-empty">No missions running right now.</div>';
+      html += `<div class="ag-sec">Completed &amp; Recent Missions (${done.length})</div>`;
+      html += done.length ? `<div class="ag-grid">${done.map(renderJobCard).join('')}</div>` : '<div class="pal-empty">No completed missions recorded yet.</div>';
+    }
+    if (tab === 'all' || tab === 'pod'){
+      html += `<div class="ag-sec">Recent Inbox Drops (${inb.length})</div>`;
+      html += inb.length ? `<div class="ag-grid">${inb.map(renderInboxCard).join('')}</div>` : '<div class="pal-empty">No items in ~/Atlas/inbox yet.</div>';
+      html += `<div class="ag-sec">POD Scorecard &amp; Reviews (${pod.length})</div>`;
+      html += pod.length ? `<div class="ag-grid">${pod.map(renderPodCard).join('')}</div>` : '<div class="pal-empty">No POD notes found yet.</div>';
+    }
+    body.innerHTML = html;
+  }
+
+  async function refresh(){
+    try {
+      const r = await fetch('/api/activity', {headers: apiHeaders(), cache: 'no-store'}).then(r => r.json());
+      if (r && Array.isArray(r.agents)){
+        state = r;
+        render();
+      }
+    } catch (_) {}
+  }
+
+  tabs?.addEventListener('click', e => {
+    const b = e.target.closest('[data-jatab]'); if (!b) return;
+    tab = b.dataset.jatab;
+    tabs.querySelectorAll('[data-jatab]').forEach(x => x.setAttribute('aria-selected', String(x === b)));
+    render();
+  });
+
+  body?.addEventListener('click', e => {
+    const b = e.target.closest('[data-open-brain]'); if (!b) return;
+    const noteId = b.dataset.openBrain;
+    close();
+    if (window.AtlasNav) AtlasNav.go('brain', noteId);
+  });
+
+  function open(){
+    ov.hidden = false;
+    navBtn?.setAttribute('aria-expanded', 'true');
+    document.getElementById('scrim')?.click();
+    refresh();
+    clearInterval(timer);
+    timer = setInterval(() => { if (!ov.hidden && !document.hidden) refresh(); }, 3500);
+  }
+  function close(){
+    ov.hidden = true;
+    navBtn?.setAttribute('aria-expanded', 'false');
+    clearInterval(timer); timer = null;
+  }
+
+  navBtn?.addEventListener('click', () => ov.hidden ? (window.AtlasNav ? AtlasNav.go('jobs') : open()) : close());
+  document.getElementById('jaClose')?.addEventListener('click', close);
+  document.getElementById('jaRefresh')?.addEventListener('click', refresh);
+  ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !ov.hidden){ e.stopPropagation(); close(); } }, true);
+
+  if (window.AtlasNav) AtlasNav.views.jobs = {open, close, isOpen: () => !ov.hidden};
+  window.AtlasJobs = {open, close, refresh};
+  refresh();
+})();
+
+// ══════════ IIFE · Sentence-level streaming TTS & acknowledgement event wiring ══════════
+(() => {
+  'use strict';
+  let ttsChain = Promise.resolve();
+  let streamedThisRun = false;
+
+  function enqueueSpeech(sentence){
+    const clean = cleanForSpeech(sentence);
+    if (!clean || muted || !speakThisRun) return;
+    streamedThisRun = true;
+    ttsChain = ttsChain.then(() => speak(clean)).catch(() => {});
+    speakDone = ttsChain;
+  }
+
+  const prevHandle = handle;
+  handle = ev => {
+    if (ev.t === 'ack' || ev.t === 'acknowledgement'){
+      const msg = (ev.text || ev.message || '').trim();
+      if (msg){
+        log('voice', 'ACK', msg);
+        if (window.AtlasOrb) AtlasOrb.setCaption(msg, false, 'ACK');
+        enqueueSpeech(msg);
+      }
+      return;
+    }
+    if (ev.t === 'sentence' || ev.t === 'tts_chunk'){
+      const s = (ev.text || '').trim();
+      if (s) enqueueSpeech(s);
+      return;
+    }
+    if (ev.t === 'complete' && streamedThisRun){
+      // Avoid speaking the full answer a second time if sentences were already streamed
+      const savedSpeak = speakThisRun;
+      speakThisRun = false;
+      try {
+        return prevHandle(ev);
+      } finally {
+        speakThisRun = savedSpeak;
+        speakDone = ttsChain;
+        streamedThisRun = false;
+      }
+    }
+    if (ev.t === 'error'){
+      streamedThisRun = false;
+    }
+    return prevHandle(ev);
+  };
+})();
+
+// ══════════ reading toolbar for the Brain note panel ══════════
+// Font size (persisted), focus / reading mode, fullscreen, copy and download.
+// Appended as its own IIFE so the transmit / voice logic is untouched.
+(() => {
+  const panel = document.getElementById('brainOverlay');
+  const noteEl = document.getElementById('brText');
+  if (!panel || !noteEl) return;
+
+  // ── A- / A+ text size, remembered across sessions ──
+  const KEY = 'jarvis.mdScale';
+  const MIN = 0.8, MAX = 1.9, STEP = 0.1;
+  const clamp = v => Math.max(MIN, Math.min(MAX, Math.round(v * 100) / 100));
+  let scale = 1;
+  try { const s = parseFloat(localStorage.getItem(KEY)); if (Number.isFinite(s)) scale = clamp(s); } catch (_) {}
+  const applyScale = () => {
+    noteEl.style.setProperty('--md-scale', String(scale));
+    try { localStorage.setItem(KEY, String(scale)); } catch (_) {}
+  };
+  applyScale();
+  const dec = document.getElementById('brFontDec');
+  const inc = document.getElementById('brFontInc');
+  if (dec) dec.addEventListener('click', () => { scale = clamp(scale - STEP); applyScale(); });
+  if (inc) inc.addEventListener('click', () => { scale = clamp(scale + STEP); applyScale(); });
+
+  // ── focus / reading mode ──
+  const focusBtn = document.getElementById('brFocus');
+  const setFocus = on => {
+    document.body.classList.toggle('reading-focus', on);
+    if (focusBtn) focusBtn.setAttribute('aria-pressed', String(on));
+  };
+  if (focusBtn) focusBtn.addEventListener('click', () => setFocus(!document.body.classList.contains('reading-focus')));
+
+  // ── fullscreen ──
+  const fullBtn = document.getElementById('brFull');
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+  const exitFs = () => { const f = document.exitFullscreen || document.webkitExitFullscreen; if (f) f.call(document); };
+  if (fullBtn) fullBtn.addEventListener('click', () => {
+    const target = document.querySelector('.brain-note') || noteEl;
+    if (fsEl()) { exitFs(); return; }
+    const req = target.requestFullscreen || target.webkitRequestFullscreen;
+    if (req) { const p = req.call(target); if (p && p.catch) p.catch(() => {}); }
+  });
+  const onFs = () => { if (fullBtn) fullBtn.setAttribute('aria-pressed', String(!!fsEl())); };
+  document.addEventListener('fullscreenchange', onFs);
+  document.addEventListener('webkitfullscreenchange', onFs);
+
+  const flash = (el, text) => {
+    if (!el) return;
+    const old = el.textContent; el.textContent = text;
+    setTimeout(() => { el.textContent = old; }, 1200);
+  };
+
+  // ── copy the raw markdown ──
+  const copyBtn = document.getElementById('brCopy');
+  if (copyBtn) copyBtn.addEventListener('click', async () => {
+    const raw = noteEl._raw || '';
+    if (!raw) { flash(copyBtn, 'Empty'); return; }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(raw);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = raw; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); ta.remove();
+      }
+      flash(copyBtn, 'Copied');
+    } catch (_) { flash(copyBtn, 'Copy failed'); }
+  });
+
+  // ── download the note as a .md file ──
+  const dlBtn = document.getElementById('brDownload');
+  if (dlBtn) dlBtn.addEventListener('click', () => {
+    const raw = noteEl._raw || '';
+    if (!raw) return;
+    const id = String(noteEl._noteId || 'note').replace(/[^A-Za-z0-9._-]+/g, '-') || 'note';
+    const url = URL.createObjectURL(new Blob([raw], {type: 'text/markdown;charset=utf-8'}));
+    const a = document.createElement('a');
+    a.href = url; a.download = id + '.md';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
+  // leaving the brain clears reading mode so the graph is never left dimmed
+  new MutationObserver(() => {
+    if (panel.hidden) { setFocus(false); if (fsEl()) exitFs(); }
+  }).observe(panel, {attributes: true, attributeFilter: ['hidden']});
 })();

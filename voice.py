@@ -33,6 +33,54 @@ _proc = None
 _state = {"ready": False, "error": ""}
 _start_lock = threading.Lock()
 
+# Pre-generated / cached short-phrase audio (acknowledgements, greetings, status)
+# so acknowledgement-first voice replies play with zero synthesis delay.
+_AUDIO_CACHE = {}
+_AUDIO_CACHE_LOCK = threading.Lock()
+_AUDIO_CACHE_MAX = 64
+SHORT_CACHE_MAX_CHARS = 180
+
+ACK_PHRASES = {
+    "default": "On it.",
+    "status": "Checking status.",
+    "sales": "On it, checking the store.",
+    "team": "On it, checking with the team.",
+    "search": "Looking into that now.",
+    "workspace": "On it, checking the workspace.",
+    "brief": "Pulling up your brief.",
+}
+
+
+def classify_ack_intent(message=""):
+    q = (message or "").strip().lower()
+    if not q:
+        return "default"
+    if any(w in q for w in ("sale", "order", "refund", "shopify", "store", "roas", "ad spend", "pod", "margin", "revenue")):
+        return "sales"
+    if any(w in q for w in ("brief", "morning", "today", "schedule", "calendar", "plan", "summary")):
+        return "brief"
+    if any(w in q for w in ("team", "department", "notebook", "commons", "marketing", "finance", "operations")):
+        return "team"
+    if any(w in q for w in ("status", "health", "online", "latency", "job", "agent", "mission")):
+        return "status"
+    if any(w in q for w in ("search", "research", "find", "look up", "web", "browser", "check")):
+        return "search"
+    if any(w in q for w in ("code", "file", "test", "build", "fix", "repo", "git", "deploy")):
+        return "workspace"
+    return "default"
+
+
+def ack_phrase(message=""):
+    """Return a short acknowledgement phrase chosen by intent."""
+    if message in ACK_PHRASES:
+        return ACK_PHRASES[message]
+    return ACK_PHRASES.get(classify_ack_intent(message), ACK_PHRASES["default"])
+
+
+def clear_audio_cache():
+    with _AUDIO_CACHE_LOCK:
+        _AUDIO_CACHE.clear()
+
 
 def _disabled():
     return os.environ.get("JARVIS_LOCAL_VOICE", "1") == "0"
@@ -136,21 +184,66 @@ def speak(text):
     text = (text or "").strip()
     if not text:
         raise ValueError("empty text")
+    clipped = text[:2500]
+    cache_key = None
+    if len(clipped) <= SHORT_CACHE_MAX_CHARS:
+        cache_key = (tts_engine(), voice_label(), KOKORO_SPEED, clipped)
+        with _AUDIO_CACHE_LOCK:
+            cached = _AUDIO_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    result = None
     if worker_installed():
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         try:
-            _call({"op": "tts", "text": text[:2500], "out": path,
+            _call({"op": "tts", "text": clipped, "out": path,
                    "voice": KOKORO_VOICE, "speed": KOKORO_SPEED})
-            return pathlib.Path(path).read_bytes(), "audio/wav"
+            result = (pathlib.Path(path).read_bytes(), "audio/wav")
         except Exception:                                    # noqa: BLE001
             if not local_available():
                 raise
         finally:
             pathlib.Path(path).unlink(missing_ok=True)
-    if local_available():
-        return _speak_say(text[:2500]), "audio/wav"
-    raise RuntimeError("no TTS engine available")
+    if result is None and local_available():
+        result = (_speak_say(clipped), "audio/wav")
+    if result is None:
+        raise RuntimeError("no TTS engine available")
+
+    if cache_key is not None:
+        with _AUDIO_CACHE_LOCK:
+            if len(_AUDIO_CACHE) >= _AUDIO_CACHE_MAX:
+                _AUDIO_CACHE.pop(next(iter(_AUDIO_CACHE)), None)
+            _AUDIO_CACHE[cache_key] = result
+    return result
+
+
+def prewarm_acks():
+    """Pre-generate audio for the fixed acknowledgement pool so ack replies have no synthesis delay."""
+    count = 0
+    for phrase in dict.fromkeys(ACK_PHRASES.values()):
+        try:
+            speak(phrase)
+            count += 1
+        except Exception:                                    # noqa: BLE001
+            break
+    return count
+
+
+def speak_stream(items):
+    """Stream TTS audio sentence-by-sentence from runtime events (`ack`/`sentence`) or plain strings."""
+    for item in items:
+        if isinstance(item, str):
+            kind, text = "sentence", item.strip()
+        elif isinstance(item, dict) and item.get("t") in ("ack", "sentence"):
+            kind, text = item.get("t"), (item.get("text") or "").strip()
+        else:
+            continue
+        if not text:
+            continue
+        audio, mime = speak(text)
+        yield {"type": kind, "text": text, "audio": audio, "mime": mime}
 
 
 def transcribe(audio, mime="audio/webm"):

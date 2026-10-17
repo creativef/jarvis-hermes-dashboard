@@ -9,7 +9,7 @@
 :root{
   color-scheme:dark;
   --accent-rgb:79,230,245; --bg-rgb:5,11,18; --surf-rgb:8,20,30; --field-rgb:3,10,16;
-  --scrim-rgb:2,6,10; --ink-rgb:234,246,250; --shadow-rgb:0,0,0; --hub-rgb:240,250,255;
+  --scrim-rgb:2,6,10; --ink-rgb:234,246,250; --shadow-rgb:0,0,0; --hub-rgb:240,250,255; --inbox-rgb:79,230,245;
   --ink-strong:#f2fdff; --orb-ink:#f4fdff; --on-accent:#fff; --bulb-off:#2b3d47;
   --bg-grad:linear-gradient(180deg,#050b12,#071420 70%,#050b12);
   --orb-idle:79,170,245; --orb-listen:79,235,230; --orb-speak:168,132,255; --orb-think:255,182,72;
@@ -19,6 +19,7 @@
   color-scheme:light;
   --shadow-rgb:40,50,60; --scrim-rgb:30,34,40; --orb-ink:#fff; --bulb-off:#b6bec5;
   --amber:#b86a00; --red:#c4333f; --green:#1b8a5a; --violet:#6a4bc4;
+  --inbox-rgb:22,140,160;
 }
 
 /* ── shared shape language: every theme just sets the radii ── */
@@ -170,9 +171,11 @@ body.waiting .stword{color:var(--amber)!important}
   .ambient{display:none}
   body{font-size:16px;letter-spacing:0}
   /* masthead: menu left, nameplate centred, status right, closed by a double rule */
-  .menubar{display:grid;grid-template-columns:1fr auto 1fr;gap:16px;padding:0 30px;background:rgba(var(--bg-rgb),.9);border-bottom:5px double var(--edge-2)}
+  /* minmax(0,1fr) side columns: without it the wide centred nameplate pushes the
+     right-hand controls past the edge of the bar */
+  .menubar{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:14px;padding:0 22px;background:rgba(var(--bg-rgb),.9);border-bottom:5px double var(--edge-2)}
   .menu{grid-column:1;grid-row:1;justify-self:start}
-  .brand{grid-column:2;grid-row:1;font-size:40px;letter-spacing:.26em;text-indent:.26em;font-weight:700;font-variant:small-caps;gap:0}
+  .brand{grid-column:2;grid-row:1;font-size:clamp(22px,2.1vw,40px);letter-spacing:.2em;text-indent:.2em;font-weight:700;font-variant:small-caps;gap:0;min-width:0}
   .brand .dot{display:none}
   .brand b::before,.brand b::after{content:"✦";font-size:.32em;vertical-align:.9em;margin:0 1.1em;color:var(--cyan);letter-spacing:0}
   .menu-right{grid-column:3;grid-row:1;justify-self:end}

@@ -151,6 +151,10 @@
 :root[data-theme="brutal"] .brain-overlay .btog{color:var(--on-accent)}
 :root[data-theme="brutal"] .brain-overlay .btog input{accent-color:#111}
 .ob-scroll{min-width:0;min-height:0;overflow:hidden}
+
+/* rendered markdown note for the selected department / team */
+.dd-note{max-height:320px;overflow:auto;padding:12px 14px;border:1px solid var(--edge);border-radius:12px;background:rgba(var(--field-rgb),.35)}
+.dp-orbit .dd-note{max-height:220px}
 @media (max-width:900px){
   .ob-scroll{overflow:auto;border-bottom:1px solid var(--edge)}
   .dp-orbit .ob-scroll svg{width:880px;max-width:none;height:600px}

@@ -5,6 +5,7 @@ Local commands keep the HUD fast for mission control/status while prompts and
 unknown slash commands are handed to Hermes Agent. Hermes-native tool access comes
 from the runtime subprocess (`hermes chat -q ...`) using the configured profile.
 """
+import datetime
 import json
 import os
 import pathlib
@@ -15,6 +16,8 @@ import subprocess
 import threading
 import time
 import uuid
+
+import brain
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
@@ -321,6 +324,185 @@ def agents_snapshot(limit=40):
 
 _CMD = re.compile(r"^\s*/(new|profile|goal|personality|kanban|mission|missions|background|tools|toolsets|connectors|connect|status|commands|help|browser|clear)\b\s*(.*)$", re.I | re.S)
 
+_DEPT_CACHE = {"root": None, "at": 0.0, "data": None}
+_DEPT_TTL = 30.0
+
+_TIME_QUERIES = {
+    "time", "current time", "what time is it", "what is the time", "whats the time",
+    "what's the time", "tell me the time", "date", "current date", "what day is it",
+    "what is the date", "whats the date", "what's the date", "what is today",
+    "whats today", "what's today", "what is todays date", "what's today's date",
+}
+_STATUS_QUERIES = {
+    "status", "system status", "atlas status", "dashboard status", "gateway status",
+    "runtime status", "are you online", "are you there", "health", "ping",
+}
+_JOBS_QUERIES = {
+    "jobs", "running jobs", "active jobs", "background jobs", "job status",
+    "what jobs are running", "what is running", "whats running", "what's running",
+    "agents", "running agents", "active agents", "missions", "running missions",
+}
+_DEPTS_QUERIES = {
+    "departments", "department", "list departments", "show departments",
+    "all departments", "our departments", "what departments do we have",
+    "which departments do we have",
+}
+_TEAMS_QUERIES = {
+    "teams", "team", "sub-teams", "subteams", "list teams", "show teams",
+    "all teams", "our teams", "what teams do we have", "which teams do we have",
+}
+_CLEAR_QUERIES = {
+    "clear", "clear screen", "clear display", "clear chat", "clear panel", "reset display",
+}
+_HELP_QUERIES = {
+    "help", "commands", "list commands", "show commands", "available commands",
+    "what commands are available",
+}
+_WHO_QUERIES = {
+    "who are you", "what are you", "what is your name", "whats your name",
+    "what's your name", "introduce yourself", "are you atlas",
+}
+_TODAY_QUERIES = {
+    "tasks", "queue", "mission queue", "what is on today", "whats on today",
+    "what's on today", "todo", "to do",
+}
+
+
+def _cached_departments():
+    now = time.monotonic()
+    root_str = str(brain.ROOT)
+    if _DEPT_CACHE["data"] is not None and _DEPT_CACHE["root"] == root_str and (now - _DEPT_CACHE["at"]) < _DEPT_TTL:
+        return _DEPT_CACHE["data"]
+    data = brain.departments()
+    _DEPT_CACHE.update(root=root_str, at=now, data=data)
+    return data
+
+
+def _normalize_fast_query(message):
+    q = " ".join((message or "").strip().split()).lower()
+    if q.startswith("/"):
+        q = q[1:].strip()
+    q = re.sub(r"^(?:hey\s+atlas|ok\s+atlas|atlas|jarvis)[,:\s]+", "", q).strip()
+    q = re.sub(r"^(?:please\s+)", "", q).strip()
+    q = q.strip("?!.,;:'\" ")
+    return " ".join(q.split())
+
+
+def _fast_jobs_summary():
+    with _JOB_LOCK:
+        mem = [dict(j) for j in JOBS.values()]
+    handoff = _handoff_jobs()
+    running = [j for j in mem if j.get("status") == "running"]
+    done_count = sum(1 for j in mem if j.get("status") in ("done", "failed"))
+    for j in handoff:
+        st = j.get("status")
+        if st == "running":
+            pid = j.get("pid")
+            if pid is None or _pid_alive(pid):
+                running.append(j)
+        elif st in ("done", "failed"):
+            done_count += 1
+    d = load()
+    open_tasks = [t["text"] for t in d.get("tasks", []) if not t.get("done")]
+    parts = []
+    if running:
+        names = [_agent_name(j.get("mission", "")) for j in running[:4]]
+        parts.append(f"{len(running)} running job{'s' if len(running) != 1 else ''}: {', '.join(names)}.")
+    else:
+        parts.append("No background jobs are currently running.")
+    if done_count:
+        parts.append(f"{done_count} completed job{'s' if done_count != 1 else ''} on record.")
+    if open_tasks:
+        parts.append(f"Mission queue ({len(open_tasks)}): " + "; ".join(open_tasks[:5]) + ".")
+    else:
+        parts.append("Mission queue is empty.")
+    return " ".join(parts)
+
+
+def _fast_departments_summary():
+    depts = _cached_departments().get("departments", [])
+    if not depts:
+        return "No departments found in the Atlas brain folder."
+    items = [f"{d['name']} ({len(d.get('teams', []))} teams)" for d in depts]
+    return f"{len(depts)} departments: " + ", ".join(items) + "."
+
+
+def _fast_teams_summary():
+    depts = _cached_departments().get("departments", [])
+    if not depts:
+        return "No teams found in the Atlas brain folder."
+    teams = []
+    for d in depts:
+        for t in d.get("teams", []):
+            teams.append(f"{t['name']} ({d['name']})")
+    if not teams:
+        return "No sub-teams found under departments."
+    return f"{len(teams)} teams across {len(depts)} departments: " + ", ".join(teams) + "."
+
+
+def fast_path(message):
+    """Local intent router for simple queries (<50ms, zero model/subprocess calls).
+
+    Returns a command response dict with `message=None` when matched, or `None`
+    when the query should be sent to Hermes.
+    """
+    q = _normalize_fast_query(message)
+    if not q:
+        return None
+
+    if q in _TIME_QUERIES:
+        now = datetime.datetime.now()
+        reply = f"It is {now.strftime('%H:%M')} on {now.strftime('%A, %d %B %Y')}."
+        return dict(message=None, reply=reply, note="fast-path: time", intent="time", fast_path=True)
+
+    if q in _STATUS_QUERIES:
+        profile = os.environ.get("HERMES_PROFILE", os.environ.get("JARVIS_PROFILE", "default"))
+        runtime_cmd = os.environ.get("HERMES_CMD", "hermes")
+        with _JOB_LOCK:
+            running_mem = sum(1 for j in JOBS.values() if j.get("status") == "running")
+        reply = (f"Hermes dashboard online. profile={profile}; runtime={runtime_cmd}; "
+                 f"workdir={os.getcwd()}; running_jobs={running_mem}; "
+                 "voice=browser Web Speech + optional ElevenLabs.")
+        return dict(message=None, reply=reply, note="status read", intent="status", fast_path=True)
+
+    if q in _JOBS_QUERIES:
+        return dict(message=None, reply=_fast_jobs_summary(), note="fast-path: jobs", intent="jobs", fast_path=True)
+
+    if q in _DEPTS_QUERIES:
+        return dict(message=None, reply=_fast_departments_summary(), note="fast-path: departments",
+                    intent="departments", fast_path=True)
+
+    if q in _TEAMS_QUERIES:
+        return dict(message=None, reply=_fast_teams_summary(), note="fast-path: teams",
+                    intent="teams", fast_path=True)
+
+    if q in _CLEAR_QUERIES:
+        return dict(message=None, reply="Display cleared. Hermes session is unchanged.",
+                    note="display clear", intent="clear", fast_path=True)
+
+    if q in _HELP_QUERIES:
+        return dict(message=None, reply=_commands_reply(), note="commands shown",
+                    intent="help", fast_path=True)
+
+    if q in _WHO_QUERIES:
+        reply = ("I am Atlas, Mr Thompson's chief-of-staff dashboard powered by Hermes Agent. "
+                 "I track operations, coordinate departments, and prepare actions for your approval.")
+        return dict(message=None, reply=reply, note="fast-path: identity",
+                    intent="who_are_you", fast_path=True)
+
+    if q in _TODAY_QUERIES:
+        d = load()
+        open_t = [t["text"] for t in d.get("tasks", []) if not t.get("done")]
+        goal = d.get("goal") or "No standing objective set."
+        q_part = ("Mission queue: " + "; ".join(open_t) + ".") if open_t else "Mission queue is empty."
+        return dict(message=None, reply=f"Standing objective: {goal} {q_part}",
+                    note="fast-path: today", intent="today", fast_path=True)
+
+    return None
+
+
+route_intent = fast_path
+
 
 def _hermes_command(*args):
     configured = os.environ.get("HERMES_CMD", "").strip()
@@ -365,7 +547,7 @@ You can also type normal Hermes prompts. Unknown slash commands are forwarded to
 def handle(message, runner=None):
     m = _CMD.match(message or "")
     if not m:
-        return None
+        return fast_path(message)
     cmd, arg = m.group(1).lower(), m.group(2).strip()
     d = load()
 

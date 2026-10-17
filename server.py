@@ -64,6 +64,7 @@ API_TOKEN = secrets.token_urlsafe(32)
 BOOT_ID = secrets.token_hex(4)   # changes every server launch; drives "greet once per launch"
 RUN_LOCK = threading.Lock()
 MAX_JSON_BODY = 1024 * 1024
+MAX_INBOX_BODY = 14 * 1024 * 1024
 MAX_AUDIO_BODY = 12 * 1024 * 1024
 
 # Durable rotating error log. The UI action log is in-memory (capped) and
@@ -266,6 +267,42 @@ class Handler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
             return self._json(commands.agents_snapshot())
+        if p == "/api/inbox":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json(brain.inbox_list())
+        if p == "/api/activity":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            snap = commands.agents_snapshot()
+            inb = brain.inbox_list()
+            pod_items = []
+            try:
+                import importlib
+                pod_mod = importlib.import_module("pod_engine")
+                if hasattr(pod_mod, "recent_items"):
+                    pod_items = pod_mod.recent_items()
+            except Exception:
+                pass
+            if not pod_items:
+                for n in ("pod-idea-queue", "concept-engine-review", "weekly-review-template"):
+                    found = brain.note(n)
+                    if found:
+                        pod_items.append({"id": found["id"], "path": found["path"],
+                                          "preview": (found["text"] or "")[:360]})
+            return self._json(dict(
+                now=snap["now"],
+                running=snap["running"],
+                agents=snap["agents"],
+                missions=commands.load().get("missions", [])[-30:],
+                inbox=inb.get("items", [])[:30],
+                inbox_root=inb.get("root", ""),
+                pod=pod_items,
+            ))
         if p == "/api/jobs":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -295,14 +332,32 @@ class Handler(BaseHTTPRequestHandler):
         if not self._token_ok():
             return self._json({"error": "unauthorized"}, 401)
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
-        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval"} and ctype != "application/json":
+        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval", "/api/inbox"} and ctype != "application/json":
             return self._json({"error": "application/json required"}, 415)
         if p == "/api/listen" and not ctype.startswith("audio/"):
             return self._json({"error": "audio content type required"}, 415)
         try:
-            raw = self._read(MAX_AUDIO_BODY if p == "/api/listen" else MAX_JSON_BODY)
+            limit = MAX_AUDIO_BODY if p == "/api/listen" else (MAX_INBOX_BODY if p == "/api/inbox" else MAX_JSON_BODY)
+            raw = self._read(limit)
         except (TypeError, ValueError):
             return self._json({"error": "request body too large"}, 413)
+
+        if p == "/api/inbox":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            try:
+                body = json.loads(raw or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "bad json"}, 400)
+            if body.get("action") in ("file", "status", "discard"):
+                res, err = brain.inbox_action(body)
+                if err:
+                    return self._json({"ok": False, "error": err}, 400)
+                return self._json({"ok": True, "item": res})
+            item, err = brain.inbox_save(body)
+            if err:
+                return self._json({"ok": False, "error": err}, 400)
+            return self._json({"ok": True, "item": item})
 
         if p == "/api/speak":
             try:

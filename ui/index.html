@@ -19,10 +19,12 @@
   <div class="brand"><span class="dot"></span><b>ATLAS</b></div>
   <nav class="menu">
     <button class="navbtn" id="navCmds" aria-expanded="false" title="Command Matrix (⌘K)">Command Matrix</button>
-    <button class="navbtn" id="navLogs" aria-expanded="false">Action Logs</button>
+    <button class="navbtn" id="navInbox" aria-expanded="false" title="Drop files, CSVs &amp; quick notes (G then I)">Inbox</button>
     <button class="navbtn" id="navDepts" aria-expanded="false">Departments</button>
     <button class="navbtn" id="navBrain" aria-expanded="false">Brain</button>
+    <button class="navbtn" id="navJobs" aria-expanded="false" title="Jobs, sub-agents &amp; POD/inbox activity (G then J)">Jobs &amp; Activity</button>
     <button class="navbtn" id="navAgents" aria-expanded="false" title="Live sub-agent activity">Agents</button>
+    <button class="navbtn" id="navLogs" aria-expanded="false">Action Logs</button>
     <button class="navbtn" id="settingsBtn">Settings</button>
   </nav>
   <div class="menu-right">
@@ -107,9 +109,15 @@
     <div class="chathead"><span>Conversation</span><span class="rtag" id="rtag">IDLE</span></div>
     <div class="rbody" id="response" aria-live="polite"><span class="rplaceholder">Standing by. Transmit an instruction.</span></div>
     <div class="approval" id="approval" hidden role="alertdialog" aria-labelledby="apTitle">
-      <div class="aphead"><span class="apbadge" id="apBadge">NEEDS YOUR OK</span><span class="aptimer" id="apTimer"></span></div>
+      <div class="aphead">
+        <span class="apbadge" id="apBadge">NEEDS YOUR OK</span>
+        <span class="aptier" id="apTier" data-tier="medium">MEDIUM RISK</span>
+        <span class="apstack" id="apStack" hidden>1 of 1</span>
+        <span class="aptimer-wrap"><svg class="apring" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" class="apring-bg"/><circle cx="12" cy="12" r="9" class="apring-fg" id="apRing"/></svg><span class="aptimer" id="apTimer"></span></span>
+      </div>
       <div class="aptitle" id="apTitle"></div>
-      <pre class="apcmd" id="apCmd"></pre>
+      <div class="apreason" id="apReason"></div>
+      <details class="apcmd-wrap" id="apCmdWrap" open><summary>Raw command</summary><pre class="apcmd" id="apCmd"></pre></details>
       <div class="aphint" id="apHint"></div>
       <div class="apbtns">
         <button id="apDeny" class="ctl aux">Deny <kbd>Esc</kbd></button>
@@ -227,32 +235,127 @@
   </div>
 </div>
 
-<div id="brainOverlay" class="brain-overlay" hidden>
+<div id="brainOverlay" class="brain-overlay" hidden role="dialog" aria-modal="true" aria-label="Second Brain">
   <div class="brain-panel glass">
     <div class="rhead">
       <span>Atlas workspace</span>
       <div class="brain-tools">
+        <div class="br-search-wrap">
+          <input type="search" id="brSearch" class="br-search" placeholder="Fly to node… (Enter)" autocomplete="off" spellcheck="false" aria-label="Search brain nodes">
+          <span id="brSearchCount" class="br-search-count" hidden></span>
+        </div>
         <label class="btog"><input type="checkbox" id="brNotebooks"> Notebooks</label>
         <label class="btog"><input type="checkbox" id="brShared"> Shared &amp; log</label>
+        <button id="brOutlineToggle" class="ctl aux" type="button" aria-pressed="false" title="Toggle accessible text outline">Outline</button>
         <button id="brRefresh" class="ctl aux">Refresh</button>
         <button id="brainClose" class="ctl aux" aria-label="Close brain">✕</button>
       </div>
     </div>
     <div class="brain-body">
-      <div class="brain-stage"><canvas id="brainCanvas"></canvas></div>
+      <div class="brain-stage">
+        <canvas id="brainCanvas"></canvas>
+        <div id="brOutline" class="brain-outline" hidden role="region" aria-label="Brain notes outline"></div>
+      </div>
       <aside class="brain-note">
         <div id="brTitle" class="brtitle">Click a node</div>
         <div id="brPath" class="brpath"></div>
         <button id="brToDept" class="ctl aux brto" type="button" hidden>Open in Departments ▸</button>
         <div id="brLinks" class="brlinks"></div>
-        <pre id="brText"></pre>
+        <div class="br-readbar" role="toolbar" aria-label="Reading controls">
+          <button type="button" id="brFontDec" class="ctl aux br-rb" title="Smaller text" aria-label="Decrease text size">A−</button>
+          <button type="button" id="brFontInc" class="ctl aux br-rb" title="Larger text" aria-label="Increase text size">A+</button>
+          <button type="button" id="brFocus" class="ctl aux br-rb" title="Focus / reading mode" aria-pressed="false">Focus</button>
+          <button type="button" id="brFull" class="ctl aux br-rb" title="Fullscreen" aria-pressed="false" aria-label="Toggle fullscreen">⛶</button>
+          <span class="br-rb-sep" aria-hidden="true"></span>
+          <button type="button" id="brCopy" class="ctl aux br-rb" title="Copy the raw markdown">Copy</button>
+          <button type="button" id="brDownload" class="ctl aux br-rb" title="Download this note as .md">Download</button>
+        </div>
+        <article id="brText" class="md-read" tabindex="0" aria-label="Note text"></article>
       </aside>
     </div>
     <div class="brain-legend" id="brLegend"></div>
   </div>
 </div>
 
+<!-- Inbox overlay -->
+<div id="inboxOverlay" class="inbox-overlay" hidden role="dialog" aria-modal="true" aria-label="Inbox">
+  <div class="inbox-panel glass">
+    <div class="rhead">
+      <span>Inbox · Local Drop &amp; Triage</span>
+      <span class="inb-path" id="inbPath">~/Atlas/inbox</span>
+      <div class="inb-head-tools">
+        <label class="btog" title="Propose department &amp; action for each item (never auto-sends)"><input type="checkbox" id="inbAutoTriage" checked> Auto-triage proposals</label>
+        <button id="inbClose" class="ctl aux" aria-label="Close inbox">✕</button>
+      </div>
+    </div>
+    <div class="inbox-body">
+      <div class="inb-composer">
+        <div class="inb-dropzone" id="inbDropzone" tabindex="0" role="button" aria-label="Drop files, CSVs, or click to browse">
+          <div class="inb-dz-ico">⬇</div>
+          <div class="inb-dz-txt"><b>Drop files or CSVs here</b><span>or click to choose local files · max 10 MB · stays in ~/Atlas/inbox and links into Brain</span></div>
+          <input type="file" id="inbFileInput" multiple hidden>
+        </div>
+        <div class="inb-quick">
+          <div class="inb-qrow">
+            <input type="text" id="inbTitle" class="inb-input" placeholder="Title or filename (e.g. q4-pod-batch.csv or quick note)…" maxlength="80">
+            <select id="inbDept" class="inb-select" aria-label="Target department">
+              <option value="">Auto-propose department</option>
+              <option value="research-strategy">Research &amp; Strategy</option>
+              <option value="design-content">Design &amp; Content</option>
+              <option value="marketing">Marketing</option>
+              <option value="business-operations">Business &amp; Operations</option>
+              <option value="finance">Finance</option>
+            </select>
+          </div>
+          <textarea id="inbContent" class="inb-textarea" rows="3" placeholder="Paste a quick note, URL, or CSV rows here…"></textarea>
+          <div class="inb-qactions">
+            <span class="inb-status-msg" id="inbStatusMsg"></span>
+            <button type="button" id="inbSaveBtn" class="ctl run">Save to Inbox &amp; Brain ▸</button>
+          </div>
+        </div>
+      </div>
+      <div class="inb-list-head">
+        <span>Dropped items</span>
+        <span class="inb-count" id="inbCount">0 items</span>
+      </div>
+      <div class="inb-list" id="inbList">
+        <div class="inb-empty">Drop anything here. I will read it and tell you what it is.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Full-window drag-and-drop overlay -->
+<div id="windowDropOverlay" class="window-drop-overlay" hidden aria-hidden="true">
+  <div class="wdo-box">
+    <div class="wdo-ico">⬇</div>
+    <div class="wdo-title">Drop into Atlas Inbox</div>
+    <div class="wdo-sub">Saves locally to ~/Atlas/inbox/ and links into the Second Brain</div>
+  </div>
+</div>
+
+<!-- Jobs & Activity overlay -->
+<div id="jobsOverlay" class="jobs-overlay" hidden role="dialog" aria-modal="true" aria-label="Jobs and Activity">
+  <div class="jobs-panel glass">
+    <div class="rhead">
+      <span>Jobs &amp; Activity</span>
+      <div class="view-tabs" id="jaTabs" role="tablist" aria-label="Activity sections">
+        <button type="button" role="tab" data-jatab="all" aria-selected="true">All Activity</button>
+        <button type="button" role="tab" data-jatab="jobs" aria-selected="false">Handoff &amp; Jobs</button>
+        <button type="button" role="tab" data-jatab="pod" aria-selected="false">POD &amp; Inbox</button>
+      </div>
+      <span class="ag-sum" id="jaSum">—</span>
+      <button id="jaRefresh" class="ctl aux">Refresh</button>
+      <button id="jaClose" class="ctl aux" aria-label="Close jobs and activity">✕</button>
+    </div>
+    <div class="jobs-body" id="jaBody">
+      <div class="ag-empty">Loading activity…</div>
+    </div>
+  </div>
+</div>
+
 <script src="atlas-data.js"></script>
+<script src="markdown.js"></script>
 <script src="app.js"></script>
 <script src="departments.js"></script>
 <script src="agents.js"></script>

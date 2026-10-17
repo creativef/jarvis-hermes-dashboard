@@ -73,7 +73,9 @@
     return `<aside class="dp-detail" ${cv(d)}>${head}
       <div class="dd-label">Sub-teams</div>
       <ul class="dd-list">${d[4].map(x => `<li><button type="button" class="${x[0] === sel.team ? 'on' : ''}" data-team="${x[0]}">
-        <b>${esc(x[1])}</b><span>${esc(x[2])}</span></button></li>`).join('')}</ul></aside>`;
+        <b>${esc(x[1])}</b><span>${esc(x[2])}</span></button></li>`).join('')}</ul>
+      <div class="dd-label">Note</div>
+      <div class="dd-note md-read md-compact" data-note="${t ? t[0] : d[0]}"></div></aside>`;
   }
 
   // ── layout 2: sidebar + detail ──
@@ -126,6 +128,28 @@
     body.scrollTop = keep;
     const ob = body.querySelector(".ob-scroll"); if (ob && !keep) ob.scrollLeft = (ob.scrollWidth - ob.clientWidth) / 2;
     body.querySelector(".ds-nav .on")?.scrollIntoView({block: "nearest", inline: "center"});
+    const noteHost = body.querySelector('.dd-note');
+    if (noteHost) loadNote(noteHost, noteHost.dataset.note);
+  }
+
+  // ── rendered markdown note for the selected department / team (Brain note) ──
+  const noteCache = new Map();
+  let noteReq = 0;
+  async function loadNote(host, slug){
+    if (!host || !slug) return;
+    const token = ++noteReq;
+    if (noteCache.has(slug)){ host.innerHTML = noteCache.get(slug); return; }
+    host.innerHTML = '<p class="md-p md-loading">loading…</p>';
+    try {
+      const r = await fetch('/api/brain/note?id=' + encodeURIComponent(slug), {headers: apiHeaders()}).then(r => r.json());
+      if (token !== noteReq || !host.isConnected) return;
+      const text = r.text || r.error || '';
+      const html = window.AtlasMarkdown ? AtlasMarkdown.render(text) : esc(text);
+      noteCache.set(slug, html);
+      host.innerHTML = html;
+    } catch (_) {
+      if (token === noteReq) host.innerHTML = '<p class="md-p">could not load note</p>';
+    }
   }
   function setView(v){ view = v; try { localStorage.setItem(KEY, v); } catch (_) {} render(); }
 
@@ -138,6 +162,13 @@
     if (t.dataset.brain) return NAV ? NAV.go('brain', t.dataset.brain) : undefined;      // team and department slugs are note names
     if (t.dataset.pick){ sel = {dept: t.dataset.pick, team: null}; return render(); }
     if (t.dataset.team){ sel = {dept: t.dataset.dept || sel.dept, team: t.dataset.team}; return render(); }
+  });
+  // [[wikilinks]] inside a rendered department note jump to that node in the Brain
+  body.addEventListener('click', e => {
+    const a = e.target.closest && e.target.closest('a.md-wikilink');
+    if (!a) return;
+    e.preventDefault();
+    if (NAV) NAV.go('brain', a.dataset.node);
   });
   ov.addEventListener('keydown', e => {
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role=button]')){ e.preventDefault(); e.target.dispatchEvent(new MouseEvent('click', {bubbles: true})); }

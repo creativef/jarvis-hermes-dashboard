@@ -87,6 +87,11 @@ def model_info():
     Read-only and dependency-free: scans only the top-level `model:` block.
     JARVIS_MODEL (the --model override) wins over the configured default.
     """
+    key = ("model_info", str(_profile_home()), MODEL)
+    return _ttl_cached(key, _PROBE_TTL, _model_info_raw)
+
+
+def _model_info_raw():
     provider = name = ""
     try:
         text = (_profile_home() / "config.yaml").read_text(encoding="utf-8")
@@ -111,6 +116,11 @@ def model_info():
 
 def user_name():
     """Best-effort the user's name from Hermes memory, falling back to the OS user."""
+    key = ("user_name", str(_profile_home()))
+    return _ttl_cached(key, _PROBE_TTL, _user_name_raw)
+
+
+def _user_name_raw():
     for rel in ("memories/USER.md", "SOUL.md"):
         try:
             text = (_profile_home() / rel).read_text(encoding="utf-8")
@@ -136,8 +146,144 @@ _ACTIVE_LOCK = threading.Lock()
 # that can each take tens of seconds; cache them briefly so every request does
 # not re-pay that cost.
 _TTL_CACHE = {}
+_RESPONSE_CACHE = {}
 _TTL_LOCK = threading.Lock()
-_PROBE_TTL = 60.0
+_PROBE_TTL = float(os.environ.get("JARVIS_PROBE_TTL", "60"))
+RESPONSE_TTL = float(os.environ.get("JARVIS_CACHE_TTL", "120"))
+
+_CACHEABLE_RE = re.compile(
+    r"\b(status|brief|morning\s+brief|daily\s+brief|evening\s+wrap|overview|summary|"
+    r"departments|teams|store\s+numbers|today'?s\s+numbers|calendar|weather|health|"
+    r"what'?s\s+on\s+today|what\s+is\s+on\s+today|standup|standing\s+objective)\b",
+    re.I,
+)
+
+_ABBREVS = {
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
+    "e.g", "i.e", "fig", "no", "vol", "inc", "ltd", "co", "corp",
+}
+_FILE_STEMS = {
+    "runtime", "commands", "voice", "server", "brain", "team", "handoff",
+    "app", "index", "styles", "themes", "config", "state", "www", "http", "https",
+}
+
+ACK_PHRASES = {
+    "default": "On it.",
+    "status": "Checking status.",
+    "sales": "On it, checking the store.",
+    "team": "On it, checking with the team.",
+    "search": "Looking into that now.",
+    "workspace": "On it, checking the workspace.",
+    "brief": "Pulling up your brief.",
+}
+
+
+def classify_ack_intent(message=""):
+    q = (message or "").strip().lower()
+    if not q:
+        return "default"
+    if any(w in q for w in ("sale", "order", "refund", "shopify", "store", "roas", "ad spend", "pod", "margin", "revenue")):
+        return "sales"
+    if any(w in q for w in ("brief", "morning", "today", "schedule", "calendar", "plan", "summary")):
+        return "brief"
+    if any(w in q for w in ("team", "department", "notebook", "commons", "marketing", "finance", "operations")):
+        return "team"
+    if any(w in q for w in ("status", "health", "online", "latency", "job", "agent", "mission")):
+        return "status"
+    if any(w in q for w in ("search", "research", "find", "look up", "web", "browser", "check")):
+        return "search"
+    if any(w in q for w in ("code", "file", "test", "build", "fix", "repo", "git", "deploy")):
+        return "workspace"
+    return "default"
+
+
+def ack_phrase(message=""):
+    if message in ACK_PHRASES:
+        return ACK_PHRASES[message]
+    return ACK_PHRASES.get(classify_ack_intent(message), ACK_PHRASES["default"])
+
+
+class SentenceBuffer:
+    """Incremental sentence splitter for token-streamed model output."""
+
+    def __init__(self):
+        self.buf = ""
+        self.index = 0
+
+    @staticmethod
+    def _is_false_period(prefix, punct):
+        if not punct.startswith("."):
+            return False
+        m = re.search(r"([A-Za-z0-9.]+)$", prefix)
+        if not m:
+            return False
+        word = m.group(1).lower().rstrip(".")
+        if word in _ABBREVS or word in _FILE_STEMS:
+            return True
+        if word.isdigit() or (len(word) == 1 and word.isalpha()):
+            return True
+        return False
+
+    def feed(self, chunk):
+        """Append `chunk` and return a list of newly completed sentences."""
+        if not chunk:
+            return []
+        self.buf += chunk
+        out = []
+        while True:
+            split_at = None
+            next_start = None
+            for m in re.finditer(r'([.!?]+["\')\]]?)(\s+)|\n+', self.buf):
+                if m.group(0).startswith("\n"):
+                    if self.buf[:m.start()].strip():
+                        split_at = m.start()
+                        next_start = m.end()
+                        break
+                    continue
+                punct = m.group(1)
+                if self._is_false_period(self.buf[:m.start(1)], punct):
+                    continue
+                split_at = m.end(1)
+                next_start = m.end(2)
+                break
+            if split_at is None:
+                break
+            sent = self.buf[:split_at].strip()
+            self.buf = self.buf[next_start:]
+            if sent:
+                out.append((self.index, sent))
+                self.index += 1
+
+        # Also check if buffer ends cleanly at a sentence-closing punctuation
+        # (e.g., when a single delta event contains a full sentence without trailing space).
+        stripped = self.buf.strip()
+        m_end = re.search(r'([A-Za-z]{2,})([.!?]+["\')\]]?)$', stripped)
+        if m_end and len(stripped) >= 4:
+            punct = m_end.group(2)
+            prefix = stripped[:m_end.start(2)]
+            if not self._is_false_period(prefix, punct):
+                self.buf = ""
+                out.append((self.index, stripped))
+                self.index += 1
+        return out
+
+    def flush(self):
+        """Flush any remaining trailing text at stream completion."""
+        rem = self.buf.strip()
+        self.buf = ""
+        if not rem:
+            return []
+        idx = self.index
+        self.index += 1
+        return [(idx, rem)]
+
+
+def split_sentences(text):
+    """Split a full text string into sentence chunks using SentenceBuffer."""
+    sb = SentenceBuffer()
+    sents = [s for _, s in sb.feed(text or "")]
+    sents.extend(s for _, s in sb.flush())
+    return sents
 
 
 def _ttl_cached(key, ttl, fn, *args):
@@ -150,6 +296,114 @@ def _ttl_cached(key, ttl, fn, *args):
     with _TTL_LOCK:
         _TTL_CACHE[key] = (now, value)
     return value
+
+
+def _norm_cache_key(query, profile=None):
+    q = " ".join((query or "").strip().split()).lower().strip("?!.,;:'\" ")
+    return (q, (profile or PROFILE))
+
+
+def is_cacheable_query(message):
+    """True for repeat status/brief/summary queries that benefit from TTL caching."""
+    q = " ".join((message or "").strip().split())
+    if not q or len(q) > 240:
+        return False
+    return bool(_CACHEABLE_RE.search(q))
+
+
+def cache_get(query, profile=None):
+    key = _norm_cache_key(query, profile)
+    now = time.monotonic()
+    with _TTL_LOCK:
+        entry = _RESPONSE_CACHE.get(key)
+        if entry is None:
+            return None
+        if now - entry["at"] >= entry["ttl"]:
+            _RESPONSE_CACHE.pop(key, None)
+            return None
+        return dict(entry)
+
+
+def cache_set(query, text, session_id=None, ttl=None, profile=None):
+    if not (text or "").strip():
+        return
+    key = _norm_cache_key(query, profile)
+    entry = {
+        "text": text,
+        "session_id": session_id,
+        "at": time.monotonic(),
+        "ttl": RESPONSE_TTL if ttl is None else float(ttl),
+    }
+    with _TTL_LOCK:
+        _RESPONSE_CACHE[key] = entry
+
+
+def cache_invalidate(query=None, profile=None):
+    with _TTL_LOCK:
+        if query is None:
+            _RESPONSE_CACHE.clear()
+        else:
+            _RESPONSE_CACHE.pop(_norm_cache_key(query, profile), None)
+
+
+def clear_cache():
+    """Clear both the probe TTL cache and the response TTL cache."""
+    with _TTL_LOCK:
+        _TTL_CACHE.clear()
+        _RESPONSE_CACHE.clear()
+
+
+def seed_probe_cache(*, version_ok=True, version_detail="Hermes Agent (cached)",
+                     tools=None, model=None, user=None, ttl=None):
+    """Pre-populate the runtime probe cache without spawning subprocesses."""
+    now = time.monotonic()
+    if ttl is not None:
+        # shift timestamp so custom ttl works against _PROBE_TTL
+        now = now - _PROBE_TTL + float(ttl)
+    with _TTL_LOCK:
+        _TTL_CACHE["hermes_version"] = (now, (bool(version_ok), str(version_detail)))
+        if tools is not None:
+            _TTL_CACHE["tools_snapshot"] = (now, list(tools))
+        if model is not None:
+            _TTL_CACHE[("model_info", str(_profile_home()), MODEL)] = (now, dict(model))
+        if user is not None:
+            _TTL_CACHE[("user_name", str(_profile_home()))] = (now, str(user))
+
+
+def probe_cache_status():
+    """Return warm status and remaining TTL (seconds) for runtime probes."""
+    now = time.monotonic()
+    keys = {
+        "hermes_version": "hermes_version",
+        "tools_snapshot": "tools_snapshot",
+        "model_info": ("model_info", str(_profile_home()), MODEL),
+        "user_name": ("user_name", str(_profile_home())),
+    }
+    out = {}
+    with _TTL_LOCK:
+        for label, k in keys.items():
+            hit = _TTL_CACHE.get(k)
+            if hit and (now - hit[0]) < _PROBE_TTL:
+                out[label] = {"warm": True, "ttl_remaining": round(_PROBE_TTL - (now - hit[0]), 2)}
+            else:
+                out[label] = {"warm": False, "ttl_remaining": 0.0}
+    return out
+
+
+def prewarm_probes(background=False):
+    """Pre-warm `hermes --version`, `hermes tools list`, model_info, and user_name caches."""
+    def _warm():
+        runtime_kind()
+        hermes_tools_snapshot()
+        model_info()
+        user_name()
+        return probe_cache_status()
+
+    if background:
+        t = threading.Thread(target=_warm, daemon=True)
+        t.start()
+        return probe_cache_status()
+    return _warm()
 
 
 def api_backend_ready():
@@ -389,6 +643,7 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
     completed = False
     result_session = None
     in_tool = False
+    sbuf = SentenceBuffer()
     try:
         while not done.is_set() or q:
             line = None
@@ -426,7 +681,10 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
                     first = False
                     yield dict(t="latency", ms=_mono_ms() - started)
                 text_seen = True
-                yield dict(t="delta", text=ev.get("text") or "")
+                chunk = ev.get("text") or ""
+                yield dict(t="delta", text=chunk)
+                for s_idx, sent in sbuf.feed(chunk):
+                    yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
                 continue
             if etype == "tool_use":
                 in_tool = True
@@ -458,6 +716,10 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
                     return
                 if not text_seen and final_text:
                     yield dict(t="delta", text=final_text)
+                    for s_idx, sent in sbuf.feed(final_text):
+                        yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
+                for s_idx, sent in sbuf.flush():
+                    yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
                 yield dict(t="complete", session_id=result_session or session_id,
                            text=final_text, ms=_mono_ms() - started)
 
@@ -467,7 +729,9 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
                 err = " | ".join(list(errbuf)[-6:])
                 yield dict(t="error", message=(err or f"Hermes exited with code {rc}")[:500])
             else:
-                yield dict(t="delta", text="Hermes completed without textual output.")
+                fallback = "Hermes completed without textual output."
+                yield dict(t="delta", text=fallback)
+                yield dict(t="sentence", text=fallback, index=0, ms=_mono_ms() - started)
                 yield dict(t="complete", session_id=result_session or session_id,
                            ms=_mono_ms() - started)
     finally:
@@ -497,6 +761,27 @@ def run_mock(message, session_id=None, system=None):
 
 
 def run(message, session_id=None, system=None):
+    # Immediate acknowledgement event before any model startup or response.
+    intent = classify_ack_intent(message)
+    yield dict(t="ack", text=ack_phrase(intent), intent=intent, ms=0)
+
+    cacheable = is_cacheable_query(message)
+    if cacheable:
+        hit = cache_get(message)
+        if hit is not None:
+            text = hit["text"]
+            sid = hit.get("session_id") or session_id
+            yield dict(t="status", model=MODEL or "Hermes default",
+                       tools=len(hermes_tools_snapshot()), mcp=[],
+                       permission=PERMISSION, profile=PROFILE, runtime="hermes",
+                       session_id=sid, cached=True)
+            yield dict(t="latency", ms=0, cached=True)
+            yield dict(t="delta", text=text, cached=True)
+            for idx, sent in enumerate(split_sentences(text)):
+                yield dict(t="sentence", text=sent, index=idx, ms=0, cached=True)
+            yield dict(t="complete", session_id=sid, text=text, ms=0, cached=True)
+            return
+
     if runtime_kind() != "hermes":
         yield from run_mock(message, session_id, system)
         return
@@ -504,16 +789,43 @@ def run(message, session_id=None, system=None):
         if BACKEND == "api":
             if api_backend_ready():
                 import api_backend
+                sbuf = SentenceBuffer()
+                started = _mono_ms()
+                collected = []
                 with EXECUTION_LOCK:
-                    yield from api_backend.run(
+                    for ev in api_backend.run(
                         message, session_id, build_prompt(message, system),
                         base=API_URL, key=API_KEY, idle_timeout=IDLE_TIMEOUT,
                         valid_session=valid_session, mono_ms=_mono_ms,
                         profile=PROFILE, permission=PERMISSION,
-                        auto_approve=(PERMISSION == "bypass"))
+                        auto_approve=(PERMISSION == "bypass"),
+                    ):
+                        if ev.get("t") == "delta":
+                            chunk = ev.get("text") or ""
+                            collected.append(chunk)
+                            yield ev
+                            for s_idx, sent in sbuf.feed(chunk):
+                                yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
+                        elif ev.get("t") == "complete":
+                            for s_idx, sent in sbuf.flush():
+                                yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
+                            final_text = ev.get("text") or "".join(collected)
+                            if cacheable and final_text:
+                                cache_set(message, final_text, ev.get("session_id") or session_id)
+                            yield ev
+                        else:
+                            yield ev
                 return
             yield dict(t="note", message="Hermes API server isn't reachable, so this turn used the standard "
                                          "backend (no spoken approvals). Start it with ./start-gateway.sh")
-        yield from run_hermes(message, session_id, system)
+        collected = []
+        for ev in run_hermes(message, session_id, system):
+            if ev.get("t") == "delta":
+                collected.append(ev.get("text") or "")
+            elif ev.get("t") == "complete" and cacheable:
+                final_text = ev.get("text") or "".join(collected)
+                if final_text:
+                    cache_set(message, final_text, ev.get("session_id") or session_id)
+            yield ev
     except Exception as e:  # noqa: BLE001
         yield dict(t="error", message=f"could not start Hermes core: {e}")
