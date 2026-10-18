@@ -385,7 +385,7 @@ function startBrowserRecognition(){
   recognition.onend = async () => {
     const text = finalText.trim();
     if (!convo) return;
-    if (!text){ if (!suppress) setTimeout(startBrowserRecognition, 250); return; }
+    if (!text || FILLER.test(text)){ if (!suppress) setTimeout(startBrowserRecognition, 250); return; }
     log('voice','VOICE',`browser transcribed: "${text}"`);
     const armed = $('#input').dataset.cmd || '';
     const full = (armed ? armed + ' ' : '') + text;
@@ -488,6 +488,12 @@ async function ship(rec, parts){
       if (convo) beginTurn(); else setState('','STANDBY','nothing heard');
       return;
     }
+    if (FILLER.test(text)){
+      log('voice','VOICE',`ignored "${text}" (noise, not a request)`);
+      suppress = false;
+      if (convo) beginTurn();
+      return;
+    }
     log('voice','VOICE',`transcribed by Parakeet in ${ms}ms: "${text}"`);
     const armed = $('#input').dataset.cmd || '';
     const full = (armed ? armed + ' ' : '') + text;
@@ -503,6 +509,10 @@ async function ship(rec, parts){
     if (convo) beginTurn(); else setState('error','FAULT','transcription failed');
   }
 }
+
+// Noise often transcribes as a lone "Hmm." or "Uh." — don't spend a Hermes turn on it.
+// Real one-word answers ("yes", "no", "okay") are kept.
+const FILLER = /^(?:u+h+|u+m+|h+m+|m+h*m+|a+h+|o+h+|e+r+m*|huh|mhm|uh-huh)?[\s.,!?…-]*$/i;
 
 // ══════════ command matrix ══════════
 function disarm(){
@@ -4020,8 +4030,8 @@ setInterval(async () => {
 
   const prevHandle = handle;
   handle = ev => {
-    if (ev.t === 'ack' || ev.t === 'acknowledgement'){
-      const msg = (ev.text || ev.message || '').trim();
+    if (ev.t === 'ack'){
+      const msg = (ev.text || '').trim();
       cancelAck();
       const ep = speechEpoch;
       if (msg) ackTimer = setTimeout(() => {
@@ -4033,8 +4043,8 @@ setInterval(async () => {
       }, ACK_DELAY_MS);
       return;
     }
-    if (ev.t === 'sentence' || ev.t === 'tts_chunk' || ev.t === 'complete' || ev.t === 'error') cancelAck();
-    if (ev.t === 'sentence' || ev.t === 'tts_chunk'){
+    if (ev.t === 'sentence' || ev.t === 'complete' || ev.t === 'error') cancelAck();
+    if (ev.t === 'sentence'){
       const s = (ev.text || '').trim();
       if (s) enqueueSpeech(s);
       return;

@@ -135,7 +135,6 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
             env = {"HERMES_CMD": f"{sys.executable} {fake_cli}"}
             with mock.patch.dict(os.environ, env, clear=False), \
                  mock.patch.object(runtime, "RUNTIME", "hermes"):
-                runtime.seed_probe_cache(tools=["terminal"])
                 events = list(runtime.run("check store sales", None, None))
 
         self.assertGreaterEqual(len(events), 5)
@@ -157,34 +156,29 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
         complete_pos = next(i for i, e in enumerate(events) if e.get("t") == "complete")
         self.assertLess(first_sent_pos, complete_pos)
 
-    def test_voice_audio_cache_and_speak_stream(self):
+    def test_short_phrases_are_synthesised_once(self):
         calls = []
-
-        def fake_say(text):
-            calls.append(text)
-            return f"WAV:{text}".encode("utf-8")
-
         with mock.patch.object(voice, "worker_installed", return_value=False), \
              mock.patch.object(voice, "local_available", return_value=True), \
-             mock.patch.object(voice, "_speak_say", side_effect=fake_say):
-            warmed = voice.prewarm_acks()
-            self.assertEqual(warmed, len(set(voice.ACK_PHRASES.values())))
-            calls_after_warm = len(calls)
-            # Repeat ack synthesis hits cache with zero extra _speak_say calls
-            audio, mime = voice.speak("On it.")
-            self.assertEqual(mime, "audio/wav")
-            self.assertEqual(audio, b"WAV:On it.")
-            self.assertEqual(len(calls), calls_after_warm)
+             mock.patch.object(voice, "_speak_say", side_effect=lambda t: calls.append(t) or b"WAV"):
+            voice.speak("On it.")
+            voice.speak("On it.")
+        self.assertEqual(calls, ["On it."])
 
-            stream_evs = [
-                {"t": "ack", "text": "On it."},
-                {"t": "sentence", "text": "First spoken sentence.", "index": 0},
-            ]
-            out = list(voice.speak_stream(stream_evs))
-            self.assertEqual(len(out), 2)
-            self.assertEqual(out[0]["type"], "ack")
-            self.assertEqual(out[1]["type"], "sentence")
-            self.assertEqual(out[1]["audio"], b"WAV:First spoken sentence.")
+    def test_long_comma_sentence_starts_before_the_full_stop(self):
+        sb = runtime.SentenceBuffer()
+        part = ("Your three best sellers this week were the faith hoodie, the scripture mug, "
+                "the morning verse print, and the cap, ")
+        got = sb.feed(part + "and the tote is close behind")
+        self.assertEqual(len(got), 1)
+        self.assertTrue(got[0][1].endswith(","))
+        self.assertEqual(sb.flush()[0][1], "and the tote is close behind")
+
+    def test_status_is_a_spoken_line(self):
+        reply = commands.handle("status")["reply"]
+        self.assertTrue(reply.startswith("Online"), reply)
+        self.assertNotIn("ElevenLabs", reply)
+        self.assertNotIn("/", reply)        # no paths read aloud
 
 
 class NoResponseCacheTests(unittest.TestCase):

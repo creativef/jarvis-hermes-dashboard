@@ -47,5 +47,9 @@ let api = run(FakeAudio, plays, () => begun, () => begun++, () => { fetches++;
   await tick(); api.stopSpeech(); gate.release(); await tick();
   check(plays.length === p0, 'stopped line never starts playing');
   check(fetches === f0 + 1, 'lines queued before a stop are never synthesised');
+  // 7. a cough or "hmm" is noise; real one-word answers are kept
+  const FILLER = eval('(' + src.match(/^const FILLER = (.*);$/m)[1] + ')');
+  check(['Hmm.', 'Uh.', 'Mm.', 'Um...', '.', ''].every(t => FILLER.test(t)), 'filler transcripts are ignored');
+  check(!['Yes.', 'No.', 'Okay.', 'Yeah', 'Hmm, what time is it?', 'Ah, open the brain'].some(t => FILLER.test(t)), 'real words are kept');
   process.exit(ok ? 0 : 1);
 })();

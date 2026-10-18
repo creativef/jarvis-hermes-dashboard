@@ -6,7 +6,8 @@ JARVIS Live — a HUD that drives Hermes Agent.
 The brain is your own Hermes Agent CLI/profile. Hermes keeps access to the same
 configured tools, browser/Chrome automation, MCP servers, skills, memory, and
 third-party integrations that your normal Hermes sessions have. Voice can use the
-browser Web Speech API, with optional server-side ElevenLabs STT/TTS if present.
+local Parakeet (speech in) and Kokoro (speech out), with macOS `say` and browser
+speech as fallbacks.
 """
 import json
 import logging
@@ -238,7 +239,6 @@ class Handler(BaseHTTPRequestHandler):
                 tools=runtime.hermes_tools_snapshot(),
                 browser_stt=True,
                 browser_tts=True,
-                voice_mode=os.environ.get("JARVIS_VOICE_MODE", voice.tts_engine()),
                 voice_id=voice.voice_label(),
                 stt=voice.stt_engine(),
                 tts=voice.tts_engine(),

@@ -131,10 +131,10 @@ Normal text and voice requests go directly to Hermes Agent.
 
 ```text
 Browser HUD
-  ├─ microphone → browser MediaRecorder → ElevenLabs STT (optional)
+  ├─ microphone → browser MediaRecorder → POST /api/listen → Parakeet (local)
   ├─ POST /api/run → Python NDJSON server
   ├─ Hermes CLI quiet mode → active Hermes profile and tools
-  └─ response → ElevenLabs TTS or browser speech synthesis
+  └─ sentences → POST /api/speak → Kokoro (local), macOS say or browser speech
 ```
 
 Key files:
@@ -143,7 +143,8 @@ Key files:
 server.py       local HTTP API and NDJSON streaming
 runtime.py      Hermes CLI subprocess and session continuity
 commands.py     dashboard slash commands and mission queue
-voice.py        optional ElevenLabs STT/TTS proxy
+voice.py        local Kokoro/Parakeet worker client, with say/browser fallback
+voice_worker.py the model process (runs in .venv-voice)
 persona.md      concise spoken JARVIS persona
 ui/             dependency-free HTML/CSS/JavaScript HUD
 install.sh      first-run setup and launch
@@ -157,7 +158,7 @@ start.sh        local launcher
 - Agent runs are serialized so multiple tabs cannot race the shared Hermes session.
 - Raw prompt logging is disabled unless `JARVIS_RAW_LOG` is explicitly configured; opt-in logs are created with mode `0600` and symlink protection.
 - `.env`, state files, Python caches, and local credentials are ignored by Git.
-- The dashboard never bundles Google, Zapier, Gmail, ElevenLabs, or Hermes credentials.
+- The dashboard never bundles Google, Zapier, Gmail, or Hermes credentials.
 - Connected apps remain owned and authenticated by the user's Hermes profile.
 - Review third-party skills and MCP servers before installing them.
 
@@ -201,7 +202,7 @@ Then set `HERMES_CMD` in `.env` if needed.
 
 ### Microphone does not activate
 
-Allow microphone access for `127.0.0.1` in the browser's site settings. ElevenLabs is optional; without it, use a browser that supports Web Speech APIs.
+Allow microphone access for `127.0.0.1` in the browser's site settings. Without the local voice (./install-voice.sh), use a browser that supports Web Speech APIs.
 
 ### A newly connected tool is missing
 

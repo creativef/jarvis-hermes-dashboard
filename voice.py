@@ -33,49 +33,11 @@ _proc = None
 _state = {"ready": False, "error": ""}
 _start_lock = threading.Lock()
 
-# Pre-generated / cached short-phrase audio (acknowledgements, greetings, status)
-# so acknowledgement-first voice replies play with zero synthesis delay.
+# Short phrases (acknowledgements, greetings, status) are cached once synthesised.
 _AUDIO_CACHE = {}
 _AUDIO_CACHE_LOCK = threading.Lock()
 _AUDIO_CACHE_MAX = 64
 SHORT_CACHE_MAX_CHARS = 180
-
-ACK_PHRASES = {
-    "default": "On it.",
-    "status": "Checking status.",
-    "sales": "On it, checking the store.",
-    "team": "On it, checking with the team.",
-    "search": "Looking into that now.",
-    "workspace": "On it, checking the workspace.",
-    "brief": "Pulling up your brief.",
-}
-
-
-def classify_ack_intent(message=""):
-    q = (message or "").strip().lower()
-    if not q:
-        return "default"
-    if any(w in q for w in ("sale", "order", "refund", "shopify", "store", "roas", "ad spend", "pod", "margin", "revenue")):
-        return "sales"
-    if any(w in q for w in ("brief", "morning", "today", "schedule", "calendar", "plan", "summary")):
-        return "brief"
-    if any(w in q for w in ("team", "department", "notebook", "commons", "marketing", "finance", "operations")):
-        return "team"
-    if any(w in q for w in ("status", "health", "online", "latency", "job", "agent", "mission")):
-        return "status"
-    if any(w in q for w in ("search", "research", "find", "look up", "web", "browser", "check")):
-        return "search"
-    if any(w in q for w in ("code", "file", "test", "build", "fix", "repo", "git", "deploy")):
-        return "workspace"
-    return "default"
-
-
-def ack_phrase(message=""):
-    """Return a short acknowledgement phrase chosen by intent."""
-    if message in ACK_PHRASES:
-        return ACK_PHRASES[message]
-    return ACK_PHRASES.get(classify_ack_intent(message), ACK_PHRASES["default"])
-
 
 def clear_audio_cache():
     with _AUDIO_CACHE_LOCK:
@@ -244,33 +206,6 @@ def speak(text):
                 _AUDIO_CACHE.pop(next(iter(_AUDIO_CACHE)), None)
             _AUDIO_CACHE[cache_key] = result
     return result
-
-
-def prewarm_acks():
-    """Pre-generate audio for the fixed acknowledgement pool so ack replies have no synthesis delay."""
-    count = 0
-    for phrase in dict.fromkeys(ACK_PHRASES.values()):
-        try:
-            speak(phrase)
-            count += 1
-        except Exception:                                    # noqa: BLE001
-            break
-    return count
-
-
-def speak_stream(items):
-    """Stream TTS audio sentence-by-sentence from runtime events (`ack`/`sentence`) or plain strings."""
-    for item in items:
-        if isinstance(item, str):
-            kind, text = "sentence", item.strip()
-        elif isinstance(item, dict) and item.get("t") in ("ack", "sentence"):
-            kind, text = item.get("t"), (item.get("text") or "").strip()
-        else:
-            continue
-        if not text:
-            continue
-        audio, mime = speak(text)
-        yield {"type": kind, "text": text, "audio": audio, "mime": mime}
 
 
 def transcribe(audio, mime="audio/webm"):

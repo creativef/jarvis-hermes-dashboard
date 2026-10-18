@@ -250,6 +250,16 @@ class SentenceBuffer:
             if kept:
                 out.append(kept)
 
+        # A long sentence with no full stop yet: speak up to the last comma so the
+        # first audio doesn't wait for the whole sentence.
+        if len(self.buf) > 140 and not self.in_fence and not self.buf.lstrip().startswith("```"):
+            cut = self.buf.rfind(", ", 60)
+            if cut != -1:
+                kept = self._keep(self.buf[:cut + 1].strip())
+                self.buf = self.buf[cut + 2:]
+                if kept:
+                    out.append(kept)
+
         # Also check if buffer ends cleanly at a sentence-closing punctuation
         # (e.g., when a single delta event contains a full sentence without trailing space).
         stripped = self.buf.strip()
@@ -288,23 +298,6 @@ def clear_cache():
     """Clear the runtime probe cache."""
     with _TTL_LOCK:
         _TTL_CACHE.clear()
-
-
-def seed_probe_cache(*, version_ok=True, version_detail="Hermes Agent (cached)",
-                     tools=None, model=None, user=None, ttl=None):
-    """Pre-populate the runtime probe cache without spawning subprocesses."""
-    now = time.monotonic()
-    if ttl is not None:
-        # shift timestamp so custom ttl works against _PROBE_TTL
-        now = now - _PROBE_TTL + float(ttl)
-    with _TTL_LOCK:
-        _TTL_CACHE["hermes_version"] = (now, (bool(version_ok), str(version_detail)))
-        if tools is not None:
-            _TTL_CACHE["tools_snapshot"] = (now, list(tools))
-        if model is not None:
-            _TTL_CACHE[("model_info", str(_profile_home()), MODEL)] = (now, dict(model))
-        if user is not None:
-            _TTL_CACHE[("user_name", str(_profile_home()))] = (now, str(user))
 
 
 def probe_cache_status():

@@ -388,6 +388,20 @@ def _normalize_fast_query(message):
     return " ".join(q.split())
 
 
+def _status_reply():
+    """One spoken line: what's running and how Atlas hears and speaks. Read aloud, so no paths."""
+    import voice
+    profile = os.environ.get("HERMES_PROFILE", os.environ.get("JARVIS_PROFILE", "default"))
+    with _JOB_LOCK:
+        mem = sum(1 for j in JOBS.values() if j.get("status") == "running")
+    running = mem + sum(1 for j in _handoff_jobs() if j.get("status") == "running")
+    speaks = {"kokoro": "Kokoro", "local": "the Mac voice"}.get(voice.tts_engine(), "the browser voice")
+    hears = "Parakeet" if voice.stt_engine() == "parakeet" else "browser speech recognition"
+    jobs = (f"{running} background job{'s' if running != 1 else ''} running" if running
+            else "nothing running in the background")
+    return f"Online on the {profile} profile. Speaking with {speaks}, listening with {hears}. {jobs[0].upper() + jobs[1:]}."
+
+
 def _fast_jobs_summary():
     with _JOB_LOCK:
         mem = [dict(j) for j in JOBS.values()]
@@ -504,14 +518,7 @@ def fast_path(message):
         return dict(message=None, reply=reply, note="fast-path: time", intent="time", fast_path=True)
 
     if q in _STATUS_QUERIES:
-        profile = os.environ.get("HERMES_PROFILE", os.environ.get("JARVIS_PROFILE", "default"))
-        runtime_cmd = os.environ.get("HERMES_CMD", "hermes")
-        with _JOB_LOCK:
-            running_mem = sum(1 for j in JOBS.values() if j.get("status") == "running")
-        reply = (f"Hermes dashboard online. profile={profile}; runtime={runtime_cmd}; "
-                 f"workdir={os.getcwd()}; running_jobs={running_mem}; "
-                 "voice=browser Web Speech + optional ElevenLabs.")
-        return dict(message=None, reply=reply, note="status read", intent="status", fast_path=True)
+        return dict(message=None, reply=_status_reply(), note="status read", intent="status", fast_path=True)
 
     if q in _JOBS_QUERIES:
         return dict(message=None, reply=_fast_jobs_summary(), note="fast-path: jobs", intent="jobs", fast_path=True)
@@ -613,9 +620,7 @@ def handle(message, runner=None):
         return dict(fresh=True, message=arg or "Start a fresh Hermes dashboard session. Greet me in one concise ATLAS-style line.", note="Hermes thread reset")
 
     if cmd == "status":
-        profile = os.environ.get("HERMES_PROFILE", os.environ.get("JARVIS_PROFILE", "default"))
-        runtime = os.environ.get("HERMES_CMD", "hermes")
-        return dict(message=None, reply=f"Hermes dashboard online. profile={profile}; runtime={runtime}; workdir={os.getcwd()}; voice=browser Web Speech + optional ElevenLabs.", note="status read")
+        return dict(message=None, reply=_status_reply(), note="status read")
 
     if cmd in ("tools", "toolsets"):
         if cmd == "tools":
