@@ -40,5 +40,31 @@ class DotenvTests(unittest.TestCase):
                 self.assertEqual(os.environ["BLANK"], "")
 
 
+class CancelKeepsSessionTests(unittest.TestCase):
+    def test_cancel_does_not_forget_the_conversation(self):
+        import io
+        from unittest import mock
+        sid = "20261018_120000_keepme"
+        saved = server.SESSION["id"]
+        server.SESSION["id"] = sid
+        try:
+            h = server.Handler.__new__(server.Handler)
+            h.path = "/api/cancel"
+            h.headers = {"Host": f"127.0.0.1:{server.PORT}", "Origin": f"http://127.0.0.1:{server.PORT}",
+                         "X-Jarvis-Token": server.API_TOKEN, "Content-Type": "application/json",
+                         "Content-Length": "2"}
+            h.rfile, h.wfile = io.BytesIO(b"{}"), io.BytesIO()
+            h.client_address = ("127.0.0.1", 0)
+            with mock.patch.object(server.runtime, "cancel_active", return_value=True), \
+                 mock.patch.object(server.commands, "set_session") as set_session, \
+                 mock.patch.object(h, "_json") as reply:
+                h.do_POST()
+            reply.assert_called_once()
+            self.assertEqual(server.SESSION["id"], sid)
+            set_session.assert_not_called()
+        finally:
+            server.SESSION["id"] = saved
+
+
 if __name__ == "__main__":
     unittest.main()

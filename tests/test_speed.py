@@ -176,50 +176,28 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
             self.assertEqual(out[1]["audio"], b"WAV:First spoken sentence.")
 
 
-class TTLCacheAndProbePrewarmTests(unittest.TestCase):
+class NoResponseCacheTests(unittest.TestCase):
+    def test_repeat_status_question_asks_hermes_again(self):
+        # A repeated question must never be answered from a stale cache: the second
+        # "status" may be about a job that has moved on since the first.
+        with tempfile.TemporaryDirectory() as td:
+            log = pathlib.Path(td) / "fake.log"
+            env = {"HERMES_CMD": f"{sys.executable} {FAKE}", "FAKE_HERMES_LOG": str(log),
+                   "FAKE_HERMES_SESSION": "20261016_090000_status1"}
+            with mock.patch.dict(os.environ, env, clear=False), \
+                 mock.patch.object(runtime, "RUNTIME", "hermes"):
+                for _ in range(2):
+                    evs = list(runtime.run("what's the status of the background job?", None, None))
+                    self.assertEqual(evs[-1]["t"], "complete")
+                self.assertEqual(len(log.read_text().strip().splitlines()), 2)
+
+
+class ProbePrewarmTests(unittest.TestCase):
     def setUp(self):
         runtime.clear_cache()
 
     def tearDown(self):
         runtime.clear_cache()
-
-    def test_repeat_brief_query_hits_ttl_response_cache(self):
-        with tempfile.TemporaryDirectory() as td:
-            log = pathlib.Path(td) / "fake.log"
-            env = {
-                "HERMES_CMD": f"{sys.executable} {FAKE}",
-                "FAKE_HERMES_LOG": str(log),
-                "FAKE_HERMES_SESSION": "20261016_090000_brief1",
-            }
-            with mock.patch.dict(os.environ, env, clear=False), \
-                 mock.patch.object(runtime, "RUNTIME", "hermes"):
-                ev1 = list(runtime.run("Give me the morning brief", None, None))
-                self.assertEqual(ev1[0]["t"], "ack")
-                self.assertFalse(ev1[-1].get("cached", False))
-                invocations_first = len(log.read_text().strip().splitlines())
-                self.assertEqual(invocations_first, 1)
-
-                # Second identical brief query within TTL must NOT spawn fake_hermes again
-                t0 = time.perf_counter()
-                ev2 = list(runtime.run("give me the morning brief?", None, None))
-                elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                invocations_second = len(log.read_text().strip().splitlines())
-                self.assertEqual(invocations_second, 1)
-                self.assertLess(elapsed_ms, 20.0)
-                self.assertTrue(ev2[-1].get("cached"))
-                self.assertEqual(ev2[-1]["text"], "hello")
-                self.assertIn("sentence", [e["t"] for e in ev2])
-
-    def test_ttl_expiry_and_invalidation(self):
-        runtime.cache_set("daily brief", "Cached brief text.", session_id="20261016_090000_brief1", ttl=0.05)
-        self.assertIsNotNone(runtime.cache_get("daily brief"))
-        time.sleep(0.07)
-        self.assertIsNone(runtime.cache_get("daily brief"))
-
-        runtime.cache_set("daily brief", "Fresh brief.", ttl=60)
-        self.assertIsNotNone(runtime.cache_get("daily brief"))
-        runtime.cache_invalidate("daily brief")
-        self.assertIsNone(runtime.cache_get("daily brief"))
 
     def test_prewarm_probe_cache_avoids_subprocess_spawns(self):
         env = {"HERMES_CMD": f"{sys.executable} {FAKE}"}

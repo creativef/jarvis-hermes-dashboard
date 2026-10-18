@@ -71,6 +71,7 @@ async function transmit(message, options = {}){
   }
   running = true; answer = ''; firstDelta = false; speakThisRun = options.speak !== false;
   currentUser = message;
+  const pausedMic = pauseListening();      // typed while the mic is open: don't let him hear himself
 
   const fresh = /^\/new\b/.test(message.trim());
   const id = rid();
@@ -125,6 +126,7 @@ async function transmit(message, options = {}){
   running = false;
   clearInterval(tick);
   await speakDone;                 // don't return until Jarvis has finished talking
+  if (pausedMic) resumeListening();
 }
 
 function handle(ev){
@@ -161,7 +163,7 @@ function handle(ev){
       if (spoken.trim()) history.push({user: currentUser, assistant: spoken});
       answer = ''; currentUser = '';
       renderConversation(true);
-      speakDone = speakThisRun ? speak(spoken) : Promise.resolve();
+      speakDone = speakThisRun ? say(spoken) : Promise.resolve();
       break;
     case 'error':
       setState('error', 'FAULT', ev.message?.slice(0,40) || 'error');
@@ -216,18 +218,60 @@ function cleanForSpeech(text){
    itself forever. That's why re-arming happens only after he finishes. */
 let convo = false, suppress = false;
 let recognition = null;
-let micStream=null, recorder=null, chunks=[], actx=null, analyser=null, vdata=null;
+let micStream=null, recorder=null, actx=null, analyser=null, vdata=null;
 let vad=null, spoke=false, loudAt=0, turnStart=0;
 let floorSum=0, floorN=0, threshold=0.02, peak=0, calibrating=true;
 const SILENCE=5000, MIN_TURN_MS=350, MAX_TURN_MS=60000, NO_SPEECH_MS=10000;
 
 // ── voice out ──
-let muted = false, player = null;
+// Everything Atlas says goes through say(), one line after another, so stopSpeech()
+// can always silence him and empty the queue. speak() always finishes — on end,
+// error, pause or stop — so the queue can never get stuck behind a paused line.
+let muted = false, player = null, endSpeech = null;
+let ttsChain = Promise.resolve(), speechEpoch = 0;
+
+function say(text){
+  const ep = speechEpoch;
+  ttsChain = ttsChain.then(() => ep === speechEpoch ? speak(text) : null).catch(() => {});
+  return ttsChain;
+}
+
+function stopSpeech(){
+  speechEpoch++;                                // anything still queued is dropped
+  if (player){ try{ player.pause(); }catch(_){} }
+  try{ speechSynth?.cancel(); }catch(_){}
+  if (endSpeech) endSpeech();
+}
+
+// Pause an open listening turn so Atlas doesn't hear himself; resumeListening() re-opens it.
+function pauseListening(){
+  if (!convo || suppress) return false;
+  suppress = true;
+  if (recorder && recorder.state === 'recording'){ recorder._cancel = true; try{ recorder.stop(); }catch(_){} }
+  if (recognition){ recognition.onend = null; try{ recognition.abort(); }catch(_){} recognition = null; }
+  return true;
+}
+function resumeListening(){
+  suppress = false;
+  if (!convo) return;
+  if (micStream) beginTurn(); else startBrowserRecognition();
+}
+
 function speak(text){
   return new Promise(resolve => {
     text = cleanForSpeech(text);
     if (muted || !text) return resolve();
-    suppress = true;
+    const pausedMic = pauseListening();
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (endSpeech === finish) endSpeech = null;
+      document.body.classList.remove('speaking');
+      if (pausedMic) resumeListening();
+      resolve();
+    };
+    endSpeech = finish;
     const spoken = text.length > 700 ? text.slice(0, 680).replace(/\s+\S*$/,'') + '…' : text;
     if (!RT.tts && RT.browserTts && speechSynth){
       try{
@@ -235,26 +279,26 @@ function speak(text){
         const u = new SpeechSynthesisUtterance(spoken);
         u.rate = 0.95; u.pitch = 0.82; u.volume = 1;
         document.body.classList.add('speaking');
-        u.onend = u.onerror = () => { document.body.classList.remove('speaking'); resolve(); };
+        u.onend = u.onerror = finish;
         speechSynth.speak(u);
-        return;
-      }catch(_){ return resolve(); }
+      }catch(_){ finish(); }
+      return;
     }
-    if (!RT.tts) return resolve();
+    if (!RT.tts) return finish();
     fetch('/api/speak', {method:'POST', headers:apiHeaders({'content-type':'application/json'}),
                          body: JSON.stringify({text:spoken})})
       .then(r => r.ok ? r.blob() : Promise.reject())
       .then(blob => {
+        if (finished) return;                   // stopped while the audio was being made
         const url = URL.createObjectURL(blob);
         if (player) player.pause();
         player = new Audio(url);
         document.body.classList.add('speaking');
-        const done = () => { document.body.classList.remove('speaking');
-          URL.revokeObjectURL(url); resolve(); };
-        player.onended = done; player.onerror = done;
+        const done = () => { URL.revokeObjectURL(url); finish(); };
+        player.onended = player.onerror = player.onpause = done;
         return player.play();
       })
-      .catch(() => resolve());
+      .catch(finish);
   });
 }
 
@@ -297,7 +341,7 @@ function stopConvo(){
   if (vad){ clearInterval(vad); vad=null; }
   if (recorder && recorder.state==='recording'){ recorder._cancel=true; try{recorder.stop();}catch(_){} }
   recorder = null;
-  if (player){ try{player.pause();}catch(_){} }
+  stopSpeech();
   if (micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
   if (actx){ actx.close().catch(()=>{}); actx=null; analyser=null; }
   document.body.classList.remove('speaking');
@@ -334,6 +378,7 @@ function startBrowserRecognition(){
     const full = (armed ? armed + ' ' : '') + text;
     $('#input').value = ''; disarm();
     log('send','SEND',`auto-sent voice: ${full}`);
+    suppress = true;                            // deaf while he thinks and speaks
     await transmit(full);
     suppress = false;
     if (convo) setTimeout(startBrowserRecognition, 350);
@@ -345,12 +390,14 @@ function startBrowserRecognition(){
 // ── one server-side local-STT listening turn ──
 function beginTurn(){
   if (!convo || suppress || !micStream) return;
-  chunks = []; spoke = false; peak = 0;
+  if (recorder && recorder.state === 'recording'){ recorder._cancel = true; try{ recorder.stop(); }catch(_){} }
+  spoke = false; peak = 0;
   floorSum = 0; floorN = 0; calibrating = true; threshold = 0.02;
-  recorder = new MediaRecorder(micStream, pickMime());
-  recorder.ondataavailable = e => { if (e.data?.size) chunks.push(e.data); };
-  recorder.onstop = ship;
-  recorder.start(250);                          // timeslice → data flows reliably
+  // chunks belong to their recorder, so a late chunk can't leak into the next turn
+  const rec = recorder = new MediaRecorder(micStream, pickMime()), parts = [];
+  rec.ondataavailable = e => { if (e.data?.size) parts.push(e.data); };
+  rec.onstop = () => ship(rec, parts);
+  rec.start(250);                               // timeslice → data flows reliably
   turnStart = loudAt = performance.now();
   setState('listening','LISTENING','listening…');
   if (!vad) vad = setInterval(vtick, 40);
@@ -405,15 +452,15 @@ function vtick(){
   if (!spoke && t - turnStart > NO_SPEECH_MS) return endTurn('no-speech');
 }
 
-async function ship(){
-  const cancel = recorder?._cancel;
-  const blob = new Blob(chunks, {type: recorder?.mimeType || 'audio/webm'}); chunks=[];
-  if (cancel){ return; }
+async function ship(rec, parts){
+  if (rec._cancel) return;
+  const blob = new Blob(parts, {type: rec.mimeType || 'audio/webm'});
   // no speech heard, too short, or too small — just listen again, don't ship ambient noise
   if (!spoke || blob.size < 1400 || performance.now()-turnStart < MIN_TURN_MS){
     if (convo && !suppress) beginTurn();
     return;
   }
+  suppress = true;                              // deaf while transcribing, thinking and speaking
   setState('running','TRANSCRIBING','…');
   log('voice','VOICE',`uploading ${Math.round(blob.size/1024)}KB to server STT`);
   const t0 = performance.now();
@@ -424,6 +471,7 @@ async function ship(){
     const ms = Math.round(performance.now() - t0);
     if (!text){
       log('voice','VOICE','nothing transcribed');
+      suppress = false;
       if (convo) beginTurn(); else setState('','STANDBY','nothing heard');
       return;
     }
@@ -536,15 +584,17 @@ document.addEventListener('keydown', e => {
   if (running && activeController){
     fetch('/api/cancel', {method:'POST', headers:apiHeaders({'content-type':'application/json'}), body:'{}'}).catch(()=>{});
     activeController.abort();
+    stopSpeech();
     return;
   }
+  if (document.body.classList.contains('speaking')){ stopSpeech(); return; }   // first Esc hushes him
   if (convo) stopConvo();
 });
 $('#mute').onclick = () => {
   muted = !muted; const b=$('#mute');
   b.textContent = muted?'🔇':'🔊'; b.classList.toggle('on',!muted); b.classList.toggle('off',muted);
   b.setAttribute('aria-label', muted ? 'Unmute Atlas' : 'Mute Atlas');
-  if (muted && player) player.pause();
+  if (muted) stopSpeech();
 };
 $('#input').addEventListener('keydown', e => {
   if (e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); sendFromInput(); }
@@ -564,7 +614,7 @@ setInterval(async () => {
     const j = await fetch('/api/jobs', {headers:apiHeaders()}).then(r => r.json());
     for (const d of (j.done || [])){
       log('complete','MISSION', `${d.mission} → ${(d.result||'').slice(0,200)}`);
-      if (!running) speak(`Mission complete. ${(d.result||'').slice(0,300)}`);
+      say(`Mission complete. ${(d.result||'').slice(0,300)}`);
     }
   } catch(_){}
 }, 4000);
@@ -820,8 +870,7 @@ setInterval(async () => {
       premuted = muted;
       if (convo) stopConvo();
       if (!muted) $('#mute').click();
-      try { speechSynth?.cancel(); } catch(_){}
-      if (player) try { player.pause(); } catch(_){}
+      stopSpeech();
       log('note', 'CALL', 'call mode on — mic locked, replies are text only');
     } else {
       if (muted && !premuted) $('#mute').click();
@@ -887,7 +936,7 @@ setInterval(async () => {
       armed = null; window.__greetNow = null;
       localStorage.setItem(GKEY, mark);
       log('voice', 'GREETING', text);
-      return speak(text);                       // honours mute / call mode (speak() no-ops when muted)
+      return say(text);                         // honours mute / call mode (speak() no-ops when muted)
     };
     armed = speakIt;
     // Browsers block audio until the page has been touched, so wait for the first gesture.
@@ -1054,10 +1103,10 @@ setInterval(async () => {
       if (heard) log('voice', 'VOICE', `approval answer heard: "${heard}"`);
       if (choice === 'deny') return answer('deny', 'voice');
       if (choice === 'once'){
-        if (ev.risk === 'high'){ await speak('That one needs the keyboard. Press Enter to approve.'); return; }
+        if (ev.risk === 'high'){ await say('That one needs the keyboard. Press Enter to approve.'); return; }
         return answer('once', 'voice');
       }
-      if (attempt === 0) await speak("Sorry, yes or no?");
+      if (attempt === 0) await say("Sorry, yes or no?");
     }
   }
 
@@ -1076,7 +1125,7 @@ setInterval(async () => {
       if (left <= 0){ toast('No answer — denied'); answer('deny', 'timeout'); }
     }, 1000);
     if (voiceOK()){
-      await speak(`I need your approval for a ${ev.description}. The command is on screen. `
+      await say(`I need your approval for a ${ev.description}. The command is on screen. `
         + (ev.risk === 'high' ? 'Press Enter to approve, or Escape to deny.' : 'Say yes or no.'));
       if (cur === ev && !callOn()) voiceLoop(ev);
     }
@@ -3393,7 +3442,7 @@ setInterval(async () => {
   }
 
   function playBrief(){
-    if (typeof speak !== 'function' || muted) return;
+    if (muted) return;
     const lines = [
       data.greeting || 'Good day.',
       sentence(),
@@ -3404,7 +3453,7 @@ setInterval(async () => {
       data.brainCount ? `Your second brain holds ${data.brainCount} notes.` : 'Your second brain is empty.',
       'Business and calendar are not connected yet. Connect them to hear the full brief.'
     ];
-    speak(lines.join(' '));
+    say(lines.join(' '));
   }
 
   const resp = document.getElementById('response');
@@ -3939,15 +3988,13 @@ setInterval(async () => {
 // ══════════ IIFE · Sentence-level streaming TTS & acknowledgement event wiring ══════════
 (() => {
   'use strict';
-  let ttsChain = Promise.resolve();
   let streamedThisRun = false;
 
   function enqueueSpeech(sentence){
     const clean = cleanForSpeech(sentence);
     if (!clean || muted || !speakThisRun) return;
     streamedThisRun = true;
-    ttsChain = ttsChain.then(() => speak(clean)).catch(() => {});
-    speakDone = ttsChain;
+    speakDone = say(clean);
   }
 
   const prevHandle = handle;

@@ -415,9 +415,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
 
         if p == "/api/cancel":
+            # Stop the turn but keep the conversation: SESSION only ever holds the last
+            # *completed* session, so it is still valid after an interrupted run.
             stopped = runtime.cancel_active()
-            SESSION["id"] = None
-            commands.set_session(None)
             return self._json({"ok": True, "stopped": stopped})
 
         if p == "/api/settings":

@@ -146,17 +146,8 @@ _ACTIVE_LOCK = threading.Lock()
 # that can each take tens of seconds; cache them briefly so every request does
 # not re-pay that cost.
 _TTL_CACHE = {}
-_RESPONSE_CACHE = {}
 _TTL_LOCK = threading.Lock()
 _PROBE_TTL = float(os.environ.get("JARVIS_PROBE_TTL", "60"))
-RESPONSE_TTL = float(os.environ.get("JARVIS_CACHE_TTL", "120"))
-
-_CACHEABLE_RE = re.compile(
-    r"\b(status|brief|morning\s+brief|daily\s+brief|evening\s+wrap|overview|summary|"
-    r"departments|teams|store\s+numbers|today'?s\s+numbers|calendar|weather|health|"
-    r"what'?s\s+on\s+today|what\s+is\s+on\s+today|standup|standing\s+objective)\b",
-    re.I,
-)
 
 _ABBREVS = {
     "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
@@ -278,14 +269,6 @@ class SentenceBuffer:
         return [(idx, rem)]
 
 
-def split_sentences(text):
-    """Split a full text string into sentence chunks using SentenceBuffer."""
-    sb = SentenceBuffer()
-    sents = [s for _, s in sb.feed(text or "")]
-    sents.extend(s for _, s in sb.flush())
-    return sents
-
-
 def _ttl_cached(key, ttl, fn, *args):
     now = time.monotonic()
     with _TTL_LOCK:
@@ -298,59 +281,10 @@ def _ttl_cached(key, ttl, fn, *args):
     return value
 
 
-def _norm_cache_key(query, profile=None):
-    q = " ".join((query or "").strip().split()).lower().strip("?!.,;:'\" ")
-    return (q, (profile or PROFILE))
-
-
-def is_cacheable_query(message):
-    """True for repeat status/brief/summary queries that benefit from TTL caching."""
-    q = " ".join((message or "").strip().split())
-    if not q or len(q) > 240:
-        return False
-    return bool(_CACHEABLE_RE.search(q))
-
-
-def cache_get(query, profile=None):
-    key = _norm_cache_key(query, profile)
-    now = time.monotonic()
-    with _TTL_LOCK:
-        entry = _RESPONSE_CACHE.get(key)
-        if entry is None:
-            return None
-        if now - entry["at"] >= entry["ttl"]:
-            _RESPONSE_CACHE.pop(key, None)
-            return None
-        return dict(entry)
-
-
-def cache_set(query, text, session_id=None, ttl=None, profile=None):
-    if not (text or "").strip():
-        return
-    key = _norm_cache_key(query, profile)
-    entry = {
-        "text": text,
-        "session_id": session_id,
-        "at": time.monotonic(),
-        "ttl": RESPONSE_TTL if ttl is None else float(ttl),
-    }
-    with _TTL_LOCK:
-        _RESPONSE_CACHE[key] = entry
-
-
-def cache_invalidate(query=None, profile=None):
-    with _TTL_LOCK:
-        if query is None:
-            _RESPONSE_CACHE.clear()
-        else:
-            _RESPONSE_CACHE.pop(_norm_cache_key(query, profile), None)
-
-
 def clear_cache():
-    """Clear both the probe TTL cache and the response TTL cache."""
+    """Clear the runtime probe cache."""
     with _TTL_LOCK:
         _TTL_CACHE.clear()
-        _RESPONSE_CACHE.clear()
 
 
 def seed_probe_cache(*, version_ok=True, version_detail="Hermes Agent (cached)",
@@ -765,23 +699,6 @@ def run(message, session_id=None, system=None):
     intent = classify_ack_intent(message)
     yield dict(t="ack", text=ack_phrase(intent), intent=intent, ms=0)
 
-    cacheable = is_cacheable_query(message)
-    if cacheable:
-        hit = cache_get(message)
-        if hit is not None:
-            text = hit["text"]
-            sid = hit.get("session_id") or session_id
-            yield dict(t="status", model=MODEL or "Hermes default",
-                       tools=len(hermes_tools_snapshot()), mcp=[],
-                       permission=PERMISSION, profile=PROFILE, runtime="hermes",
-                       session_id=sid, cached=True)
-            yield dict(t="latency", ms=0, cached=True)
-            yield dict(t="delta", text=text, cached=True)
-            for idx, sent in enumerate(split_sentences(text)):
-                yield dict(t="sentence", text=sent, index=idx, ms=0, cached=True)
-            yield dict(t="complete", session_id=sid, text=text, ms=0, cached=True)
-            return
-
     if runtime_kind() != "hermes":
         yield from run_mock(message, session_id, system)
         return
@@ -791,7 +708,6 @@ def run(message, session_id=None, system=None):
                 import api_backend
                 sbuf = SentenceBuffer()
                 started = _mono_ms()
-                collected = []
                 with EXECUTION_LOCK:
                     for ev in api_backend.run(
                         message, session_id, build_prompt(message, system),
@@ -802,30 +718,18 @@ def run(message, session_id=None, system=None):
                     ):
                         if ev.get("t") == "delta":
                             chunk = ev.get("text") or ""
-                            collected.append(chunk)
                             yield ev
                             for s_idx, sent in sbuf.feed(chunk):
                                 yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
                         elif ev.get("t") == "complete":
                             for s_idx, sent in sbuf.flush():
                                 yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
-                            final_text = ev.get("text") or "".join(collected)
-                            if cacheable and final_text:
-                                cache_set(message, final_text, ev.get("session_id") or session_id)
                             yield ev
                         else:
                             yield ev
                 return
             yield dict(t="note", message="Hermes API server isn't reachable, so this turn used the standard "
                                          "backend (no spoken approvals). Start it with ./start-gateway.sh")
-        collected = []
-        for ev in run_hermes(message, session_id, system):
-            if ev.get("t") == "delta":
-                collected.append(ev.get("text") or "")
-            elif ev.get("t") == "complete" and cacheable:
-                final_text = ev.get("text") or "".join(collected)
-                if final_text:
-                    cache_set(message, final_text, ev.get("session_id") or session_id)
-            yield ev
+        yield from run_hermes(message, session_id, system)
     except Exception as e:  # noqa: BLE001
         yield dict(t="error", message=f"could not start Hermes core: {e}")
