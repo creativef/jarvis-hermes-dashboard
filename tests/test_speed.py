@@ -85,12 +85,11 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
         runtime.clear_cache()
         voice.clear_audio_cache()
 
-    def test_ack_phrases_by_intent(self):
-        self.assertEqual(runtime.classify_ack_intent("check shopify sales and orders"), "sales")
-        self.assertEqual(runtime.classify_ack_intent("prepare my morning brief"), "brief")
-        self.assertEqual(runtime.classify_ack_intent("ask the marketing team"), "team")
-        self.assertIn("store", runtime.ack_phrase("check shopify sales"))
-        self.assertEqual(voice.ack_phrase("unknown random prompt"), "On it.")
+    def test_ack_is_neutral(self):
+        # "explain" used to match "plan" and announce a brief; acks no longer guess intent
+        ev = next(runtime.run("explain photosynthesis", None, None))
+        self.assertEqual(ev["t"], "ack")
+        self.assertIn(ev["text"], runtime.ACKS)
 
     def test_sentence_buffer_streams_sentences_and_preserves_abbreviations(self):
         sb = runtime.SentenceBuffer()
@@ -105,6 +104,19 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
         sents2 = sb.feed("now. Tail fragment")
         self.assertEqual(sents2, [(2, "Checking runtime.py now.")])
         self.assertEqual(sb.flush(), [(3, "Tail fragment")])
+
+    def test_code_links_and_paths_are_not_read_aloud(self):
+        sb = runtime.SentenceBuffer()
+        reply = ("Here's the fix.\n```bash\ncurl -fsSL https://x.dev/install.sh | bash\nexit 0\n```\n"
+                 "Saved to ~/Atlas/work/report.md for you.\n"
+                 "- See [the docs](https://docs.example.com/a/b) or https://example.com/page.\n"
+                 "| col | col |\n"
+                 "Done.")
+        got = [t for _, t in sb.feed(reply)] + [t for _, t in sb.flush()]
+        self.assertEqual(got, ["Here's the fix.", "Saved to report.md for you.",
+                               "See the docs or the link.", "Done."])
+        self.assertEqual(runtime.speakable("Due 10/18/2026, see /new."), "Due 10/18/2026, see new.")
+        self.assertFalse(any("curl" in g or "http" in g for g in got))
 
     def test_runtime_run_emits_ack_first_and_sentence_chunks(self):
         script = (
@@ -128,7 +140,6 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(events), 5)
         self.assertEqual(events[0]["t"], "ack")
-        self.assertEqual(events[0]["intent"], "sales")
         self.assertTrue(events[0]["text"])
 
         sentences = [e for e in events if e.get("t") == "sentence"]

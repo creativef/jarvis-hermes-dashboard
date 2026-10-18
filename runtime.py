@@ -30,6 +30,7 @@ import getpass
 import json
 import os
 import pathlib
+import random
 import re
 import shlex
 import shutil
@@ -158,48 +159,52 @@ _FILE_STEMS = {
     "app", "index", "styles", "themes", "config", "state", "www", "http", "https",
 }
 
-ACK_PHRASES = {
-    "default": "On it.",
-    "status": "Checking status.",
-    "sales": "On it, checking the store.",
-    "team": "On it, checking with the team.",
-    "search": "Looking into that now.",
-    "workspace": "On it, checking the workspace.",
-    "brief": "Pulling up your brief.",
-}
+# Said only if the answer is slow to start (the UI waits ~1.2s before speaking it).
+ACKS = ("On it.", "One moment.", "Give me a second.")
 
 
-def classify_ack_intent(message=""):
-    q = (message or "").strip().lower()
-    if not q:
-        return "default"
-    if any(w in q for w in ("sale", "order", "refund", "shopify", "store", "roas", "ad spend", "pod", "margin", "revenue")):
-        return "sales"
-    if any(w in q for w in ("brief", "morning", "today", "schedule", "calendar", "plan", "summary")):
-        return "brief"
-    if any(w in q for w in ("team", "department", "notebook", "commons", "marketing", "finance", "operations")):
-        return "team"
-    if any(w in q for w in ("status", "health", "online", "latency", "job", "agent", "mission")):
-        return "status"
-    if any(w in q for w in ("search", "research", "find", "look up", "web", "browser", "check")):
-        return "search"
-    if any(w in q for w in ("code", "file", "test", "build", "fix", "repo", "git", "deploy")):
-        return "workspace"
-    return "default"
+_MD_LINK = re.compile(r"\[([^\]]+)\]\((?:[^)\s]+)\)")
+_URL = re.compile(r"\b(?:https?://|www\.)[^\s)]*[^\s).,;:!?]")   # keeps trailing punctuation
+_PATH = re.compile(r"(?<![\w/])(?:~/|\.{1,2}/|/)?(?:[\w.-]+/){2,}([\w-]*[A-Za-z][\w.-]*)|(?<![\w/])(?:~/|\./|/)(?:[\w.-]+/)*([\w.-]+)")
+_LIST_MARK = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 
 
-def ack_phrase(message=""):
-    if message in ACK_PHRASES:
-        return ACK_PHRASES[message]
-    return ACK_PHRASES.get(classify_ack_intent(message), ACK_PHRASES["default"])
+def speakable(text):
+    """What a sentence sounds like out loud: link text instead of URLs, a file name
+    instead of a path, no list markers or table rows. The screen keeps the original."""
+    if _TABLE_ROW.match(text):
+        return ""
+    text = _MD_LINK.sub(r"\1", text)
+    text = _URL.sub("the link", text)
+    text = _PATH.sub(lambda m: m.group(1) or m.group(2), text)
+    text = _LIST_MARK.sub("", text)
+    return text.strip()
 
 
 class SentenceBuffer:
-    """Incremental sentence splitter for token-streamed model output."""
+    """Incremental sentence splitter for token-streamed model output.
+
+    Emits only speakable sentences: lines inside ``` code fences are dropped and
+    links, URLs and paths are turned into words (see speakable)."""
 
     def __init__(self):
         self.buf = ""
         self.index = 0
+        self.in_fence = False
+
+    def _keep(self, raw):
+        """Return (index, spoken) for a raw sentence, or None if nothing should be said."""
+        if raw.lstrip().startswith("```"):
+            self.in_fence = not self.in_fence
+            return None
+        if self.in_fence:
+            return None
+        spoken = speakable(raw)
+        if not spoken:
+            return None
+        self.index += 1
+        return (self.index - 1, spoken)
 
     @staticmethod
     def _is_false_period(prefix, punct):
@@ -241,9 +246,9 @@ class SentenceBuffer:
                 break
             sent = self.buf[:split_at].strip()
             self.buf = self.buf[next_start:]
-            if sent:
-                out.append((self.index, sent))
-                self.index += 1
+            kept = self._keep(sent) if sent else None
+            if kept:
+                out.append(kept)
 
         # Also check if buffer ends cleanly at a sentence-closing punctuation
         # (e.g., when a single delta event contains a full sentence without trailing space).
@@ -252,21 +257,19 @@ class SentenceBuffer:
         if m_end and len(stripped) >= 4:
             punct = m_end.group(2)
             prefix = stripped[:m_end.start(2)]
-            if not self._is_false_period(prefix, punct):
+            if not self._is_false_period(prefix, punct) and not self.in_fence:
                 self.buf = ""
-                out.append((self.index, stripped))
-                self.index += 1
+                kept = self._keep(stripped)
+                if kept:
+                    out.append(kept)
         return out
 
     def flush(self):
         """Flush any remaining trailing text at stream completion."""
         rem = self.buf.strip()
         self.buf = ""
-        if not rem:
-            return []
-        idx = self.index
-        self.index += 1
-        return [(idx, rem)]
+        kept = self._keep(rem) if rem else None
+        return [kept] if kept else []
 
 
 def _ttl_cached(key, ttl, fn, *args):
@@ -698,9 +701,8 @@ def run_mock(message, session_id=None, system=None):
 
 
 def run(message, session_id=None, system=None):
-    # Immediate acknowledgement event before any model startup or response.
-    intent = classify_ack_intent(message)
-    yield dict(t="ack", text=ack_phrase(intent), intent=intent, ms=0)
+    # Acknowledgement first; the UI only speaks it if no sentence arrives quickly.
+    yield dict(t="ack", text=random.choice(ACKS), ms=0)
 
     if runtime_kind() != "hermes":
         yield from run_mock(message, session_id, system)

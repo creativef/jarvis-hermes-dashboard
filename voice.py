@@ -91,22 +91,37 @@ def worker_installed():
 
 
 def _spawn():
+    """Start the worker and wait (at most WARM_TIMEOUT) for its ready line."""
     global _proc
-    _proc = subprocess.Popen(
-        [str(VENV_PY), str(WORKER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=open(HERE / "logs" / "voice_worker.log", "ab"), text=True, bufsize=1,
-        cwd=str(HERE))
-    first = _proc.stdout.readline()
-    msg = json.loads(first) if first else {"ready": False, "error": "worker exited"}
+    log = HERE / "logs" / "voice_worker.log"
+    log.parent.mkdir(exist_ok=True)
+    if log.exists() and log.stat().st_size > 1_000_000:      # keep one old copy, not forever
+        log.replace(log.with_name("voice_worker.log.1"))
+    with open(log, "ab") as err:                            # the child keeps its own copy
+        _proc = subprocess.Popen(
+            [str(VENV_PY), str(WORKER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=err, text=True, bufsize=1, cwd=str(HERE))
+    first = []
+    reader = threading.Thread(target=lambda: first.append(_proc.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(WARM_TIMEOUT)
+    if reader.is_alive():                                   # a stalled download must not hang us
+        _proc.kill()
+        reader.join(2)
+        for pipe in (_proc.stdin, _proc.stdout):
+            pipe.close()
+        _proc.wait(timeout=2)
+        _state.update(ready=False, error=f"voice worker not ready after {WARM_TIMEOUT:g}s")
+        return
+    msg = json.loads(first[0]) if first and first[0] else {"ready": False, "error": "worker exited"}
     _state["ready"] = bool(msg.get("ready"))
     _state["error"] = msg.get("error", "")
 
 
 def start_async():
-    """Kick off the worker in the background (called at server boot)."""
+    """Start (or restart) the worker in the background. Never blocks the caller."""
     if not worker_installed():
         return
-    (HERE / "logs").mkdir(exist_ok=True)
 
     def run():
         with _start_lock:
@@ -119,24 +134,35 @@ def start_async():
 
 
 def _call(req, timeout=REQ_TIMEOUT):
-    """Send one request to the worker and wait for its reply."""
+    """Send one request to the worker and wait for its reply.
+
+    Fails at once while the worker is warming up or restarting, so callers fall back
+    (macOS `say`, browser speech) instead of waiting tens of seconds for model loads."""
     if not worker_installed():
         raise RuntimeError("local voice not installed (.venv-voice missing)")
-    with _start_lock:                       # waits while the worker is still warming
-        if _proc is None or _proc.poll() is not None:
-            _spawn()
+    if not _start_lock.acquire(blocking=False):
+        raise RuntimeError("voice worker is warming up")
+    try:
+        alive = _proc is not None and _proc.poll() is None
+    finally:
+        _start_lock.release()
+    if not alive:
+        start_async()
+        raise RuntimeError("voice worker is restarting: " + (_state["error"] or "starting"))
     if not _state["ready"]:
         raise RuntimeError("voice worker failed to start: " + (_state["error"] or "unknown"))
+    proc = _proc
     with _lock:
-        _proc.stdin.write(json.dumps(req) + "\n")
-        _proc.stdin.flush()
-        timer = threading.Timer(timeout, _proc.kill)   # a hung model must not wedge the server
+        proc.stdin.write(json.dumps(req) + "\n")
+        proc.stdin.flush()
+        timer = threading.Timer(timeout, proc.kill)    # a hung model must not wedge the server
         timer.start()
         try:
-            line = _proc.stdout.readline()
+            line = proc.stdout.readline()
         finally:
             timer.cancel()
     if not line:
+        start_async()                                  # bring it back for the next request
         raise RuntimeError("voice worker died mid-request")
     res = json.loads(line)
     if not res.get("ok"):
@@ -204,6 +230,7 @@ def speak(text):
         except Exception:                                    # noqa: BLE001
             if not local_available():
                 raise
+            cache_key = None                 # fallback audio must not be cached as Kokoro's
         finally:
             pathlib.Path(path).unlink(missing_ok=True)
     if result is None and local_available():

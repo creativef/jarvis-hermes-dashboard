@@ -236,7 +236,8 @@ const forSpeech = text => {
 };
 // Never rejects: a failed synthesis just resolves to null and that line is skipped.
 const fetchAudio = text => fetch('/api/speak', {method:'POST',
-    headers:apiHeaders({'content-type':'application/json'}), body: JSON.stringify({text})})
+    headers:apiHeaders({'content-type':'application/json'}), body: JSON.stringify({text}),
+    signal: AbortSignal.timeout(20000)})        // a stuck voice worker skips the line, never the queue
   .then(r => r.ok ? r.blob() : null).catch(() => null);
 
 function say(text){
@@ -477,12 +478,12 @@ async function ship(rec, parts){
   log('voice','VOICE',`uploading ${Math.round(blob.size/1024)}KB to server STT`);
   const t0 = performance.now();
   try {
-    const r = await fetch('/api/listen', {method:'POST',
+    const r = await fetch('/api/listen', {method:'POST', signal: AbortSignal.timeout(30000),
       headers:apiHeaders({'content-type':blob.type||'audio/webm'}), body:blob}).then(r=>r.json());
     const text = (r.text||'').trim();
     const ms = Math.round(performance.now() - t0);
     if (!text){
-      log('voice','VOICE','nothing transcribed');
+      log(r.error ? 'error' : 'voice', 'VOICE', r.error ? `speech engine: ${r.error}` : 'nothing transcribed');
       suppress = false;
       if (convo) beginTurn(); else setState('','STANDBY','nothing heard');
       return;
@@ -1090,7 +1091,7 @@ setInterval(async () => {
           });
           const blob = await new Promise(res => { rec.onstop = () => res(new Blob(chunks, {type: rec.mimeType || 'audio/webm'})); try{ rec.stop(); }catch(_){ res(null); } });
           if (ctl.stop || !blob || blob.size < 1400) return '';
-          const r = await fetch('/api/listen', {method:'POST', headers: apiHeaders({'content-type': blob.type || 'audio/webm'}), body: blob}).then(r => r.json());
+          const r = await fetch('/api/listen', {method:'POST', signal: AbortSignal.timeout(30000), headers: apiHeaders({'content-type': blob.type || 'audio/webm'}), body: blob}).then(r => r.json());
           return (r.text || '').trim();
         } catch(_){ return ''; }
         finally { stream?.getTracks().forEach(t => t.stop()); ac?.close().catch(()=>{}); }
@@ -4011,17 +4012,28 @@ setInterval(async () => {
     speakDone = say(clean);
   }
 
+  // The acknowledgement is only spoken if the answer is slow: a quick reply shouldn't
+  // start with "On it."
+  const ACK_DELAY_MS = 1200;
+  let ackTimer = null;
+  const cancelAck = () => { clearTimeout(ackTimer); ackTimer = null; };
+
   const prevHandle = handle;
   handle = ev => {
     if (ev.t === 'ack' || ev.t === 'acknowledgement'){
       const msg = (ev.text || ev.message || '').trim();
-      if (msg){
+      cancelAck();
+      const ep = speechEpoch;
+      if (msg) ackTimer = setTimeout(() => {
+        ackTimer = null;
+        if (ep !== speechEpoch || !running) return;      // stopped (Esc) or already over
         log('voice', 'ACK', msg);
         if (window.AtlasOrb) AtlasOrb.setCaption(msg, false, 'ACK');
         enqueueSpeech(msg);
-      }
+      }, ACK_DELAY_MS);
       return;
     }
+    if (ev.t === 'sentence' || ev.t === 'tts_chunk' || ev.t === 'complete' || ev.t === 'error') cancelAck();
     if (ev.t === 'sentence' || ev.t === 'tts_chunk'){
       const s = (ev.text || '').trim();
       if (s) enqueueSpeech(s);
