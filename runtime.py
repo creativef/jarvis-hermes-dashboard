@@ -192,9 +192,15 @@ class SentenceBuffer:
         self.buf = ""
         self.index = 0
         self.in_fence = False
+        self.screen_only = False     # after a `---` line: shown on screen, never spoken
 
     def _keep(self, raw):
         """Return (index, spoken) for a raw sentence, or None if nothing should be said."""
+        if self.screen_only:
+            return None
+        if raw.strip() == "---":
+            self.screen_only = True
+            return None
         if raw.lstrip().startswith("```"):
             self.in_fence = not self.in_fence
             return None
@@ -423,8 +429,9 @@ def build_prompt(message, system=None):
     if not system:
         return message
     return (f"{system}\n\n## Current user request\n{message}\n\n"
-            "Answer the request now. Return only the words ATLAS should say aloud; "
-            "never include session IDs, runtime metadata, headings, or process narration.")
+            "Answer the request now. Start with the words ATLAS should say aloud; never include "
+            "session IDs, runtime metadata, or process narration. If on-screen detail helps, put it "
+            "after a line containing only --- (that part is shown, not spoken).")
 
 
 def build_command(message, session_id=None):

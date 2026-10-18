@@ -181,7 +181,7 @@ function handle(ev){
       if (spoken.trim()) history.push({user: currentUser, assistant: spoken});
       answer = ''; currentUser = '';
       renderConversation(true);
-      speakDone = speakThisRun ? say(spoken) : Promise.resolve();
+      speakDone = speakThisRun ? say(spokenPart(spoken)) : Promise.resolve();
       break;
     case 'error':
       setState('error', 'FAULT', ev.message?.slice(0,40) || 'error');
@@ -198,16 +198,28 @@ function handle(ev){
   }
 }
 
+// An answer is "spoken part" + optional "\n---\n" + on-screen detail (markdown).
+const SPLIT_DETAIL = /^[ \t]*---[ \t]*$/m;
+const spokenPart = text => String(text || '').split(SPLIT_DETAIL)[0];
+function answerHtml(text){
+  const m = SPLIT_DETAIL.exec(text || '');
+  if (!m) return esc(text);
+  const detail = text.slice(m.index + m[0].length).trim();
+  const body = window.AtlasMarkdown ? AtlasMarkdown.render(detail) : esc(detail);
+  return esc(text.slice(0, m.index).trimEnd())
+    + (detail ? `<div class="tdetail md-read md-compact">${body}</div>` : '');
+}
+
 function renderConversation(finaldone){
   const el = $('#response');
   let html = '';
   for (const t of history){
     html += `<div class="turn"><div class="tuser">You</div><div class="ttext">${esc(t.user)}</div>`
-          + `<div class="tjarvis">ATLAS</div><div class="ttext">${esc(t.assistant)}</div></div>`;
+          + `<div class="tjarvis">ATLAS</div><div class="ttext">${answerHtml(t.assistant)}</div></div>`;
   }
   if (currentUser || answer){
     html += `<div class="turn current"><div class="tuser">You</div><div class="ttext">${esc(currentUser)}</div>`
-          + `<div class="tjarvis">ATLAS</div><div class="ttext">${esc(answer)}${finaldone ? '' : '<span class="cur"></span>'}</div></div>`;
+          + `<div class="tjarvis">ATLAS</div><div class="ttext">${answerHtml(answer)}${finaldone ? '' : '<span class="cur"></span>'}</div></div>`;
   }
   el.innerHTML = html || '<span class="rplaceholder">Standing by. Transmit an instruction.</span>';
   el.scrollTop = el.scrollHeight;

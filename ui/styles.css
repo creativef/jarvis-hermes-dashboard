@@ -190,6 +190,7 @@ body.listening .stword{color:var(--cyan)}
 .turn>.tjarvis:before{content:"";width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan)}
 .turn>.tjarvis+.ttext{max-width:94%;background:rgba(var(--accent-rgb),.045);border:1px solid var(--edge);border-radius:16px 16px 16px 4px;padding:12px 16px}
 .turn.current>.tjarvis+.ttext{border-color:rgba(var(--accent-rgb),.3)}
+.ttext .tdetail{white-space:normal;margin-top:10px;padding-top:10px;border-top:1px dashed var(--edge)}
 
 /* empty-state welcome */
 .welcome{display:flex;flex-direction:column;gap:16px;white-space:normal}

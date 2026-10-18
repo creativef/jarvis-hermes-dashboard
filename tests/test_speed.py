@@ -165,6 +165,12 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
             voice.speak("On it.")
         self.assertEqual(calls, ["On it."])
 
+    def test_detail_after_dashes_is_shown_not_spoken(self):
+        sb = runtime.SentenceBuffer()
+        reply = "Three steps, they're on screen.\n---\n1. Open Shopify.\n2. Export orders.\nDone."
+        got = [t for _, t in sb.feed(reply)] + [t for _, t in sb.flush()]
+        self.assertEqual(got, ["Three steps, they're on screen."])
+
     def test_long_comma_sentence_starts_before_the_full_stop(self):
         sb = runtime.SentenceBuffer()
         part = ("Your three best sellers this week were the faith hoodie, the scripture mug, "
