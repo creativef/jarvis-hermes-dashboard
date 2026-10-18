@@ -133,7 +133,7 @@ function handle(ev){
   switch (ev.t){
     case 'status':
       log('status', 'STATUS',
-        `core online · Hermes tools=${ev.tools ?? 0} profile=${ev.profile||'default'} permission=${ev.permission||'normal'}`);
+        `core online · profile=${ev.profile||'default'} permission=${ev.permission||'normal'}`);
       break;
     case 'latency':
       log('latency', 'LATENCY', `first token after ${ev.ms}ms`);
@@ -221,18 +221,32 @@ let recognition = null;
 let micStream=null, recorder=null, actx=null, analyser=null, vdata=null;
 let vad=null, spoke=false, loudAt=0, turnStart=0;
 let floorSum=0, floorN=0, threshold=0.02, peak=0, calibrating=true;
-const SILENCE=5000, MIN_TURN_MS=350, MAX_TURN_MS=60000, NO_SPEECH_MS=10000;
+const SILENCE=1200, MIN_TURN_MS=350, MAX_TURN_MS=60000, NO_SPEECH_MS=10000;
 
 // ── voice out ──
 // Everything Atlas says goes through say(), one line after another, so stopSpeech()
 // can always silence him and empty the queue. speak() always finishes — on end,
 // error, pause or stop — so the queue can never get stuck behind a paused line.
 let muted = false, player = null, endSpeech = null;
-let ttsChain = Promise.resolve(), speechEpoch = 0;
+let ttsChain = Promise.resolve(), synthChain = Promise.resolve(), speechEpoch = 0;
+
+const forSpeech = text => {
+  text = cleanForSpeech(text);
+  return text.length > 700 ? text.slice(0, 680).replace(/\s+\S*$/,'') + '…' : text;
+};
+// Never rejects: a failed synthesis just resolves to null and that line is skipped.
+const fetchAudio = text => fetch('/api/speak', {method:'POST',
+    headers:apiHeaders({'content-type':'application/json'}), body: JSON.stringify({text})})
+  .then(r => r.ok ? r.blob() : null).catch(() => null);
 
 function say(text){
-  const ep = speechEpoch;
-  ttsChain = ttsChain.then(() => ep === speechEpoch ? speak(text) : null).catch(() => {});
+  const ep = speechEpoch, spoken = forSpeech(text);
+  // Audio is made one line at a time, starting now, so line 2 is ready the moment
+  // line 1 ends. Lines queued before a stopSpeech() are never synthesised.
+  const audio = (RT.tts && spoken && !muted)
+    ? (synthChain = synthChain.then(() => ep === speechEpoch ? fetchAudio(spoken) : null))
+    : null;
+  ttsChain = ttsChain.then(() => ep === speechEpoch ? speak(text, audio) : null).catch(() => {});
   return ttsChain;
 }
 
@@ -257,10 +271,10 @@ function resumeListening(){
   if (micStream) beginTurn(); else startBrowserRecognition();
 }
 
-function speak(text){
+function speak(text, audio){
   return new Promise(resolve => {
-    text = cleanForSpeech(text);
-    if (muted || !text) return resolve();
+    const spoken = forSpeech(text);
+    if (muted || !spoken) return resolve();
     const pausedMic = pauseListening();
     let finished = false;
     const finish = () => {
@@ -272,7 +286,6 @@ function speak(text){
       resolve();
     };
     endSpeech = finish;
-    const spoken = text.length > 700 ? text.slice(0, 680).replace(/\s+\S*$/,'') + '…' : text;
     if (!RT.tts && RT.browserTts && speechSynth){
       try{
         speechSynth.cancel();
@@ -285,11 +298,10 @@ function speak(text){
       return;
     }
     if (!RT.tts) return finish();
-    fetch('/api/speak', {method:'POST', headers:apiHeaders({'content-type':'application/json'}),
-                         body: JSON.stringify({text:spoken})})
-      .then(r => r.ok ? r.blob() : Promise.reject())
+    (audio || fetchAudio(spoken))
       .then(blob => {
         if (finished) return;                   // stopped while the audio was being made
+        if (!blob) return finish();
         const url = URL.createObjectURL(blob);
         if (player) player.pause();
         player = new Audio(url);
@@ -815,7 +827,7 @@ setInterval(async () => {
     document.body.classList.toggle('micclosed', !convo || callMode);
     const T = {
       closed:   ['MIC CLOSED', 'Press <kbd>Space</kbd> to open'],
-      listening:['LISTENING', 'Press <kbd>Space</kbd> to close'],
+      listening:['LISTENING', '<kbd>Space</kbd> sends what you said · closes the mic when quiet'],
       closing:  ['LISTENING', `Closing in ${Math.max(left,0)}s — speak to keep it open`],
       ask:      ['AWAITING YOUR ANSWER', 'Say <kbd>yes</kbd> or <kbd>no</kbd> — or <kbd>Enter</kbd> / <kbd>Esc</kbd>'],
       busy:     ['PAUSED', 'Atlas is working — mic resumes after'],
@@ -837,6 +849,8 @@ setInterval(async () => {
     if (pending) return;
     if (window.__approvalOpen) return;          // the approval prompt owns the mic right now
     if (callMode){ toast('Call mode is on — press Alt+C to exit first'); return; }
+    // mid-sentence: Space means "I'm done" — send now instead of waiting for silence
+    if (convo && spoke && !suppress && recorder && recorder.state === 'recording'){ endTurn('sent with Space'); return; }
     pending = true;
     if (window.__greetNow) { try { await window.__greetNow(); } catch(_){} }
     try {

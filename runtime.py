@@ -147,7 +147,7 @@ _ACTIVE_LOCK = threading.Lock()
 # not re-pay that cost.
 _TTL_CACHE = {}
 _TTL_LOCK = threading.Lock()
-_PROBE_TTL = float(os.environ.get("JARVIS_PROBE_TTL", "60"))
+_PROBE_TTL = float(os.environ.get("JARVIS_PROBE_TTL", "3600"))   # warmed at boot; restart after changing Hermes tools
 
 _ABBREVS = {
     "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
@@ -414,6 +414,9 @@ def runtime_kind():
     if RUNTIME == "hermes":
         return "hermes"
     ok, _ = _ttl_cached("hermes_version", _PROBE_TTL, _can_launch_hermes)
+    if not ok:                      # never cache a failure: retry as soon as Hermes is fixed
+        with _TTL_LOCK:
+            _TTL_CACHE.pop("hermes_version", None)
     return "hermes" if ok else "mock"
 
 
@@ -491,7 +494,7 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
     started = _mono_ms()
     cmd = build_command(message, session_id)
     prompt = build_prompt(message, system)
-    yield dict(t="status", model=MODEL or "Hermes default", tools=len(hermes_tools_snapshot()),
+    yield dict(t="status", model=MODEL or "Hermes default",
                mcp=[], permission=PERMISSION, profile=PROFILE, runtime="hermes",
                session_id=session_id)
 

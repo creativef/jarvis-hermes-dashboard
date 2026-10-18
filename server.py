@@ -548,6 +548,7 @@ def main():
 
     _setup_error_log()
     voice.start_async()
+    runtime.prewarm_probes(background=True)   # first turn must not pay for `hermes --version` / `tools list`
     srv = JarvisServer(("127.0.0.1", PORT), Handler)
     if os.environ.get("JARVIS_OPEN", "1") != "0":
         webbrowser.open(f"http://localhost:{PORT}")

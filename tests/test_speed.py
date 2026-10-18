@@ -192,6 +192,22 @@ class NoResponseCacheTests(unittest.TestCase):
                 self.assertEqual(len(log.read_text().strip().splitlines()), 2)
 
 
+class NoProbesInTurnTests(unittest.TestCase):
+    def test_a_turn_spawns_only_the_chat_process(self):
+        # `hermes --version` / `hermes tools list` (subprocess.run) must never sit in
+        # front of a turn; only the chat itself (Popen) may start.
+        runtime.clear_cache()
+        with tempfile.TemporaryDirectory() as td:
+            env = {"HERMES_CMD": f"{sys.executable} {FAKE}", "FAKE_HERMES_LOG": str(pathlib.Path(td) / "log"),
+                   "FAKE_HERMES_SESSION": "20261018_130000_noprobe"}
+            with mock.patch.dict(os.environ, env, clear=False), \
+                 mock.patch.object(runtime, "RUNTIME", "hermes"), \
+                 mock.patch("subprocess.run") as probe:
+                evs = list(runtime.run("hello", None, None))
+        self.assertEqual(evs[-1]["t"], "complete", evs[-1])
+        self.assertEqual(probe.call_args_list, [], "a Hermes probe ran inside the turn")
+
+
 class ProbePrewarmTests(unittest.TestCase):
     def setUp(self):
         runtime.clear_cache()
