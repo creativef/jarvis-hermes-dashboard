@@ -53,6 +53,16 @@ class InboxBrainTests(unittest.TestCase):
         linked_pairs = {(e["source"], e["target"]) for e in g["links"]} | {(e["target"], e["source"]) for e in g["links"]}
         self.assertIn((item["note_id"], "Atlas"), linked_pairs)
 
+    def test_markdown_drop_is_one_graph_node(self):
+        b64 = base64.b64encode(b"# Plan\n\nSee [[Atlas]].\n").decode()
+        item, err = brain.inbox_save({"name": "plan.md", "data_base64": b64})
+        self.assertIsNone(err)
+        assert item is not None
+        self.assertTrue((brain.ROOT / item["path"]).is_file())            # original kept on disk
+        ids = {n["id"] for n in brain.graph()["nodes"]}
+        self.assertIn(item["note_id"], ids)
+        self.assertFalse(any(i.endswith("-source") for i in ids))         # but not drawn twice
+
     def test_save_csv_base64_and_auto_triage(self):
         csv_bytes = b"idea,spend,ctr,purchases\nDad Hoodie,12.50,1.4,3\n"
         b64 = "data:text/csv;base64," + base64.b64encode(csv_bytes).decode()

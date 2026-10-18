@@ -1,16 +1,13 @@
 """Tests for the Atlas Brain graph interaction fixes in ui/app.js.
 
-The graph lives inside a browser IIFE, so two kinds of check are made:
+The graph lives inside a browser IIFE, so it is checked two ways:
 
-1. Behavioural: the pure interaction math (picking with a hit margin, and the
-   click/drag movement threshold) is exported on ``window.AtlasGraphMath`` and
+1. Behavioural: the pure interaction math (picking with a hit margin, the
+   click/drag movement threshold, and wheel/pinch zoom) is exported on ``window.AtlasGraphMath`` and
    delimited by ``/* @graph-math:start|end */`` markers. The block is DOM-free, so
    the shipped code is driven here through Node exactly as the browser uses it.
 
-2. Source guards: the interaction wiring for each ranked fix (movement threshold,
-   pointercancel, hover staleness / not shadowed by selection, pinned drag vs the
-   recentring pass, the Enter-only search, the inbox cluster) must be present in
-   the shipped file. This mirrors the renderer's "no network" guard.
+2. The real page is clicked in headless Chrome by test_brain_graph_click.py.
 
 If Node is not installed the behavioural tests skip rather than fail.
 
@@ -18,7 +15,6 @@ If Node is not installed the behavioural tests skip rather than fail.
 """
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -50,6 +46,7 @@ const out = cases.map(c => {
   if (c.op === 'const') return [G.HIT_PAD, G.DRAG_THRESHOLD];
   if (c.op === 'pickRadius') return G.pickRadius(c.r, c.k);
   if (c.op === 'moved') return G.moved(c.a, c.b, c.th == null ? undefined : c.th);
+  if (c.op === 'zoomAt') return c.deltas.reduce((v, d) => G.zoomAt(v, d, c.px, c.py, c.W, c.H), c.view);
   if (c.op === 'pick') {
     const nodes = c.nodes.map((n, i) => Object.assign({i}, n));
     const visible = n => n.visible !== false;
@@ -151,74 +148,28 @@ class GraphMathTests(unittest.TestCase):
         self.assertTrue(res[5])
 
 
-class GraphSourceGuards(unittest.TestCase):
-    """Source-level guards that the interaction wiring for each fix is present."""
+    def test_trackpad_pinch_zooms_gently(self):
+        # one short pinch: 20 tiny deltas. The old code jumped 10% per event and hit max zoom.
+        view = {"x": 0, "y": 0, "k": 0.76}
+        (v,) = _run([{"op": "zoomAt", "view": view, "deltas": [-3] * 20, "px": 400, "py": 250, "W": 900, "H": 560}])
+        self.assertGreater(v["k"], 0.76)
+        self.assertLess(v["k"], 2.0)
 
-    @classmethod
-    def setUpClass(cls):
-        cls.src = _read(APP_JS)
-        cls.styles = _read(STYLES_CSS)
-        cls.themes = _read(THEMES_CSS)
+    def test_zoom_is_clamped_and_reversible(self):
+        base = {"x": 0, "y": 0, "k": 1}
+        (big, back) = _run([
+            {"op": "zoomAt", "view": base, "deltas": [-100] * 40, "px": 0, "py": 0, "W": 900, "H": 560},
+            {"op": "zoomAt", "view": base, "deltas": [-5, -5, 5, 5], "px": 300, "py": 200, "W": 900, "H": 560},
+        ])
+        self.assertAlmostEqual(big["k"], 3)
+        self.assertAlmostEqual(back["k"], 1, places=6)
 
-    def test_movement_threshold_wired(self):
-        # pointerdown records the down point; pointermove only drags past the threshold
-        self.assertRegex(self.src, r"downX\s*=\s*e\.clientX")
-        self.assertRegex(self.src, r"GM\.moved\(\{x: downX, y: downY\}")
-
-    def test_pointercancel_and_capture_handled(self):
-        self.assertIn("pointercancel", self.src)
-        self.assertIn("lostpointercapture", self.src)
-        self.assertIn("endPointer", self.src)
-
-    def test_second_pointer_ignored(self):
-        self.assertRegex(self.src, r"if \(downId !== null\) return;")
-
-    def test_drag_node_excluded_from_recentring(self):
-        self.assertRegex(self.src, r"if \(a === drag\) continue;")
-
-    def test_hover_not_shadowed_by_selection(self):
-        self.assertIn("hoverNear", self.src)
-        self.assertRegex(self.src, r"const lit = new Set\(\)")
-
-    def test_hover_recomputed_each_frame(self):
-        self.assertRegex(self.src, r"pointerIn && !drag && !pan")
-
-    def test_hover_cleared_on_leave(self):
-        self.assertRegex(self.src, r"pointerleave.*hover = null")
-
-    def test_selection_reconciled_after_load(self):
-        self.assertRegex(self.src, r"const reRef = ")
-        self.assertRegex(self.src, r"selected = reRef\(selected\)")
-
-    def test_resize_redraws(self):
-        self.assertIn("if (!ov.hidden && W) draw();", self.src)
-
-    def test_device_pixel_ratio_change_handled(self):
-        self.assertIn("watchDpr", self.src)
-        self.assertIn("(resolution:", self.src)
-
-    def test_search_does_not_fly_on_every_keystroke(self):
-        # the input event only highlights matches now
-        self.assertRegex(self.src,
-                         r"searchInput\.addEventListener\('input', \(\) => \{ searchIdx = 0; updateSearch\(false\); \}\)")
-        self.assertIn("updateSearch(true)", self.src)          # Enter still flies + opens
-        self.assertIn("restoreView", self.src)                 # clearing the box restores the camera
-
-    def test_inbox_cluster_modelled(self):
-        self.assertRegex(self.src, r"RADIUS\s*=\s*\{[^}]*\binbox:")
-        self.assertIn("INBOX_GROUP", self.src)
-        self.assertIn("lg-inbox", self.src)
-        self.assertIn("anchor: true", self.src)                # unlinked notes are anchored, not adrift
-        self.assertRegex(self.themes, r"--inbox-rgb:\s*[\d,]")
-        self.assertRegex(self.themes, r'data-mode="light"\][^{]*\{[^}]*--inbox-rgb')
-        self.assertIn(".brain-legend .lg-inbox i", self.styles)
-
-    def test_markdown_reading_features_intact(self):
-        # the note panel still renders markdown and wikilinks jump in the graph
-        self.assertIn("AtlasMarkdown.render", self.src)
-        self.assertIn("a.md-wikilink", self.src)
-        self.assertIn('src="markdown.js"', _read(INDEX_HTML))
-        self.assertIn("src=\"app.js\"", _read(INDEX_HTML))
+    def test_zoom_keeps_the_point_under_the_cursor(self):
+        view, px, py, W, H = {"x": 30, "y": -20, "k": 0.8}, 610, 140, 900, 560
+        (v,) = _run([{"op": "zoomAt", "view": view, "deltas": [-12], "px": px, "py": py, "W": W, "H": H}])
+        world = lambda vw: ((px - W / 2 - vw["x"]) / vw["k"], (py - H / 2 - vw["y"]) / vw["k"])
+        for a, b in zip(world(view), world(v)):
+            self.assertAlmostEqual(a, b, places=6)
 
 
 if __name__ == "__main__":

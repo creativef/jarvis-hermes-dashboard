@@ -42,7 +42,10 @@ def _notes():
     if not ROOT.is_dir():
         return out
     for p in sorted(ROOT.rglob("*.md")):
-        if any(part.startswith(".") for part in p.relative_to(ROOT).parts):
+        rel = p.relative_to(ROOT).parts
+        if any(part.startswith(".") for part in rel):
+            continue
+        if rel[0] == "inbox" and p.stem.endswith("-source"):   # original of a .md drop; its companion note is the node
             continue
         out.setdefault(p.stem, p)
     return out
@@ -108,26 +111,59 @@ def departments():
     return {"departments": out, "root": str(base), "exists": True}
 
 
+def _remember_births(stamps):
+    """Keep each note's first-seen creation time in <brain>/.atlas/born.json. Editors and
+    agents that save by replacing the file reset the OS creation time; the timeline must not
+    treat every edited note as new."""
+    path = ROOT / ".atlas" / "born.json"
+    try:
+        known = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(known, dict):
+            known = {}
+    except (OSError, ValueError):
+        known = {}
+    changed = False
+    for name, (born, mtime) in stamps.items():
+        old = known.get(name)
+        if isinstance(old, (int, float)) and old < born:
+            stamps[name] = (old, mtime)
+        elif old != born:
+            known[name] = born
+            changed = True
+    if changed and ROOT.is_dir():
+        try:
+            path.parent.mkdir(exist_ok=True)
+            _atomic_write(path, json.dumps(known))
+        except OSError:
+            pass
+
+
 def graph():
     notes = _notes()
     nodes, edges, seen, kinds = [], [], set(), {}
+    stamps = {}
     for name, path in notes.items():
         kinds[name] = _classify(name, path)
         try:
             text = path.read_text(encoding="utf-8")[:_MAX_NOTE]
+            st = path.stat()
         except OSError:
             continue
+        # born: creation time where the OS keeps one (macOS), else last change
+        stamps[name] = (getattr(st, "st_birthtime", st.st_mtime), st.st_mtime)
         for tgt in set(m.strip() for m in _LINK.findall(text)):
             if tgt in notes and tgt != name:
                 key = tuple(sorted((name, tgt)))
                 if key not in seen:
                     seen.add(key)
                     edges.append({"source": name, "target": tgt})
+    _remember_births(stamps)
     linked = {e["source"] for e in edges} | {e["target"] for e in edges}
     for name, (kind, group) in kinds.items():
         if kind == "other" and name not in linked:   # unlinked strays would only float
             continue
-        nodes.append({"id": name, "type": kind, "group": group})
+        born, mtime = stamps.get(name, (0, 0))
+        nodes.append({"id": name, "type": kind, "group": group, "born": born, "mtime": mtime})
     return {"nodes": nodes, "links": edges, "root": str(ROOT), "exists": ROOT.is_dir()}
 
 
@@ -137,9 +173,173 @@ def note(name):
         return None
     try:
         text = path.read_text(encoding="utf-8")[:_MAX_NOTE]
+        st = path.stat()
     except OSError:
         return None
-    return {"id": name, "path": str(path.relative_to(ROOT)), "text": text}
+    return {"id": name, "path": str(path.relative_to(ROOT)), "text": text,
+            "mtime": st.st_mtime, "editable": st.st_size <= _MAX_NOTE}
+
+
+# ── editing: create / save / link / suggest (note NAMES only, never caller paths) ──
+_TITLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,79}$")
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+
+
+def _phrase(name):
+    """Regex matching a note name as words in prose: 'pod-idea-queue' ~ 'POD idea queue'."""
+    words = _norm(name).split()
+    return re.compile(r"(?<![A-Za-z0-9])" + r"[\s_-]+".join(map(re.escape, words)) + r"(?![A-Za-z0-9])", re.I) if words else None
+
+
+def _links_in(text):
+    return {m.strip() for m in _LINK.findall(text)}
+
+
+def _atomic_write(path, text):
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def find_note(query, min_tier=1):
+    """Best note for a spoken phrase ("my pricing notes" -> "pricing"), or None.
+    Exact name beats prefix beats phrase-inside-name beats all-words-present; shorter names win ties."""
+    q = re.sub(r"^(?:my|the|our)\s+", "", _norm(query))
+    q = re.sub(r"\s+(?:notes?|note book|page|file|doc)$", "", q).strip()
+    if not q:
+        return None
+    words, best = set(q.split()), None
+    for name in _notes():
+        n = _norm(name)
+        if n == q:
+            tier = 4
+        elif n.startswith(q + " ") or n.endswith(" " + q):
+            tier = 3
+        elif f" {q} " in f" {n} ":
+            tier = 2
+        elif words <= set(n.split()):
+            tier = 1
+        else:
+            continue
+        if tier < min_tier:
+            continue
+        key = (tier, -len(n))
+        if best is None or key > best[0]:
+            best = (key, name)
+    return best[1] if best else None
+
+
+def save_note(name, text, base_mtime=None):
+    """Overwrite an existing note. Refuses notes too big to have been loaded whole, and
+    edits made against an older copy (someone - e.g. Atlas itself - changed it meanwhile)."""
+    path = _notes().get(name)
+    if path is None:
+        return None, "note not found"
+    if not isinstance(text, str) or len(text) > _MAX_NOTE:
+        return None, "note text missing or too large"
+    st = path.stat()
+    if st.st_size > _MAX_NOTE:
+        return None, "this note is too large to edit here"
+    if base_mtime is not None:
+        try:
+            if abs(st.st_mtime - float(base_mtime)) > 0.001:
+                return None, "conflict: this note changed on disk since you opened it"
+        except (TypeError, ValueError):
+            return None, "bad base_mtime"
+    _atomic_write(path, text)
+    return note(name), None
+
+
+def create_note(title, near=None):
+    """New note named after `title`. It lands next to the `near` note's team when that note
+    lives in a department, else in <brain>/notes/, and links back so it joins the graph."""
+    title = " ".join(str(title or "").split())
+    if not _TITLE.match(title):
+        return None, "title: letters, numbers, spaces, - and _ only (max 80)"
+    name = re.sub(r"\s+", "-", title).lower()
+    notes = _notes()
+    if any(n.lower() == name for n in notes):
+        return None, "a note with that name already exists"
+    folder = ROOT / "notes"
+    anchor = notes.get(near) if near else None
+    if anchor is not None:
+        rel = anchor.relative_to(ROOT).parts
+        if rel[0] == "departments" and len(rel) >= 3:
+            folder = ROOT.joinpath(*rel[:3]) if len(rel) >= 4 else ROOT / "departments" / rel[1] / "notes"
+    path = folder / f"{name}.md"
+    if os.path.commonpath([path.resolve().parent, ROOT.resolve()]) != str(ROOT.resolve()):
+        return None, "bad location"
+    folder.mkdir(parents=True, exist_ok=True)
+    back = f"Linked from [[{near}]]." if anchor is not None else "Part of [[Atlas]]."
+    _atomic_write(path, f"# {title}\n\n{back}\n\n")
+    return note(name), None
+
+
+def add_link(source, target):
+    """Add [[target]] to source's '## Links' section (made if missing). No-op if already linked."""
+    notes = _notes()
+    if source not in notes or target not in notes or source == target:
+        return None, "both notes must exist and differ"
+    path = notes[source]
+    if path.stat().st_size > _MAX_NOTE:
+        return None, "this note is too large to edit here"
+    text = path.read_text(encoding="utf-8")
+    if target in _links_in(text):
+        return note(source), None
+    m = re.search(r"^##\s+Links\s*$", text, re.M)
+    if m:
+        text = text[:m.end()] + f"\n- [[{target}]]" + text[m.end():]
+    else:
+        text = text.rstrip() + f"\n\n## Links\n- [[{target}]]\n"
+    _atomic_write(path, text)
+    return note(source), None
+
+
+def suggestions(name, limit=12):
+    """Unlinked mentions, both ways: notes whose text names `name` without linking it
+    (mentioned_in), and notes `name` names in its own text without linking (mentions)."""
+    notes = _notes()
+    if name not in notes:
+        return None
+    texts, links = {}, {}
+    for n, p in notes.items():
+        try:
+            raw = p.read_text(encoding="utf-8")[:_MAX_NOTE]
+        except OSError:
+            raw = ""
+        links[n] = _links_in(raw)
+        # prose only: "[[business-operations]]" is a link to one note, not a mention of "operations"
+        texts[n] = re.sub(r"\[\[[^\]]*\]\]", lambda m: " " * len(m.group(0)), raw)
+
+    def snippet(text, m):
+        a, b = max(0, m.start() - 60), min(len(text), m.end() + 60)
+        return ("…" if a else "") + " ".join(text[a:b].split()) + ("…" if b < len(text) else "")
+
+    def worth(n):          # skip the hub and machine ids that never appear in prose
+        return n != "Atlas" and not n.startswith("inbox-") and len(_norm(n)) >= 5
+
+    mentioned_in, mentions = [], []
+    rx = _phrase(name) if worth(name) else None
+    own_links = links[name]
+    for other, text in texts.items():
+        if other == name:
+            continue
+        if rx and name not in links[other]:
+            m = rx.search(text)
+            if m:
+                mentioned_in.append({"id": other, "snippet": snippet(text, m)})
+        if worth(other) and other not in own_links:
+            orx = _phrase(other)
+            m = orx.search(texts[name]) if orx else None
+            if m:
+                mentions.append({"id": other, "snippet": snippet(texts[name], m)})
+    longer_first = lambda x: -len(_norm(x["id"]))
+    return {"id": name,
+            "mentioned_in": sorted(mentioned_in, key=longer_first)[:limit],
+            "mentions": sorted(mentions, key=longer_first)[:limit]}
 
 
 # ── Inbox store (<brain>/inbox/) ─────────────────────────────────────────────

@@ -1326,9 +1326,10 @@ setInterval(async () => {
     return st;
   }
 
+  const brainOv = document.getElementById('brainOverlay');
   function frame(now){
     requestAnimationFrame(frame);
-    if (document.hidden || !W) return;
+    if (document.hidden || !W || (brainOv && !brainOv.hidden)) return;   // nothing to see under the Brain
     const t = (now - t0) / 1000;
     const state = resolveState(now);
     const L = LOOK[state] || LOOK.idle;
@@ -1587,6 +1588,15 @@ setInterval(async () => {
     DRAG_THRESHOLD: 4,              // CSS px the pointer may drift before it counts as a drag
     pickRadius: (r, k) => r + G.HIT_PAD / (k || 1),
     moved: (a, b, th) => Math.hypot(b.x - a.x, b.y - a.y) > (th == null ? G.DRAG_THRESHOLD : th),
+    ZOOM_MIN: .35, ZOOM_MAX: 3,
+    // Zoom in proportion to the scroll size (a trackpad pinch sends many tiny deltas, a mouse
+    // notch one big one), keeping the world point under (px, py) fixed on screen.
+    zoomAt: (view, deltaY, px, py, W, H) => {
+      const d = Math.max(-50, Math.min(50, deltaY));
+      const k = Math.max(G.ZOOM_MIN, Math.min(G.ZOOM_MAX, view.k * Math.exp(-d * 0.01)));
+      const wx = (px - W / 2 - view.x) / view.k, wy = (py - H / 2 - view.y) / view.k;
+      return {x: px - W / 2 - wx * k, y: py - H / 2 - wy * k, k};
+    },
     // nodes: [{x,y,type,…}]; world: {x,y} of the pointer; visible(n); radiusOf(type).
     // Nearest centre wins; on a tie the last-drawn (visually front) node wins, so a
     // click on overlapping nodes lands on the one you can actually see.
@@ -1611,7 +1621,7 @@ setInterval(async () => {
   const ov = document.getElementById('brainOverlay'); if (!ov) return;
   const cv = document.getElementById('brainCanvas'), ctx = cv.getContext('2d');
   const $b = id => document.getElementById(id);
-  const GM = window.AtlasGraphMath || {HIT_PAD: 10, DRAG_THRESHOLD: 4, pickRadius: r => r, moved: () => false, pick: () => null};
+  const GM = window.AtlasGraphMath;
   const GROUP = {};                                   // dept slug -> [r,g,b], resolved from theme variables
   const RADIUS = {hub:16, dept:11, sub:6.5, inbox:6.5, notebook:3.5, commons:6, log:4, other:4};
   const INBOX_GROUP = '__inbox';                      // synthetic group key so the inbox cluster reads as a cluster
@@ -1622,7 +1632,7 @@ setInterval(async () => {
   const layerOf = n => (LAYER[n.type] == null ? 3 : LAYER[n.type]);
   const colorOf = n => n.type === 'hub' ? HUB : n.type === 'inbox' ? INBOX : (GROUP[n.group] || NEUTRAL);
   let INK = '234,246,250', HUB = [240,250,255], INBOX = [79,230,245], NEUTRAL = [130,160,180], FONT = 'system-ui, sans-serif', LIGHT = false;
-  let ACCENT = '79,230,245', BG = '5,11,18', SH = '0,0,0';
+  let ACCENT = '79,230,245', BG = '5,11,18', SH = '0,0,0', AMBER = [255,190,92], GREEN = [62,232,168];
   const probe = document.createElement('i'); probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none';
   ov.appendChild(probe);
   const rgbOf = (css, dflt) => {                      // any CSS colour/var -> [r,g,b]
@@ -1643,6 +1653,7 @@ setInterval(async () => {
     if (h.length === 3 && h.every(Number.isFinite)) HUB = h;
     NEUTRAL = rgbOf('var(--dim)', NEUTRAL);
     INBOX = rgbOf('var(--inbox-rgb)', INBOX);
+    AMBER = rgbOf('var(--amber)', AMBER); GREEN = rgbOf('var(--green)', GREEN);
     LIGHT = document.documentElement.dataset.mode === 'light';
     FONT = getComputedStyle(document.body).fontFamily || FONT;
     for (const d of deptList()) GROUP[d.slug] = rgbOf(`var(${AtlasData.colorVar(d.slug)})`, NEUTRAL);
@@ -1651,24 +1662,39 @@ setInterval(async () => {
   const legend = () => {
     const hasInbox = nodes.some(n => n.type === 'inbox');
     $b('brLegend').innerHTML = deptList().map(d =>
-      `<span><i style="background:var(${AtlasData.colorVar(d.slug)})"></i>${d.name.replace(/&/g, '&amp;')}</span>`).join('')
+      `<button type="button" class="lg-dept${collapsed.has(d.slug) ? ' off' : ''}" data-fold="${d.slug}" aria-pressed="${collapsed.has(d.slug)}" title="Fold or unfold this department"><i style="background:var(${AtlasData.colorVar(d.slug)})"></i>${d.name.replace(/&/g, '&amp;')}</button>`).join('')
       + (hasInbox ? '<span class="lg-inbox"><i></i>Inbox</span>' : '')
-      + '<span><i style="background:rgb(var(--hub-rgb))"></i>Atlas hub</span><span class="lg-hint">drag nodes · scroll to zoom · click to read</span>';
+      + (nodes.some(n => n.type === 'other') ? '<span><i style="background:var(--dim)"></i>Other notes</span>' : '')
+      + '<span><i style="background:rgb(var(--hub-rgb))"></i>Atlas hub</span><span class="lg-hint" title="Drag a node to pin it, double-click to unpin. Click a department to fold it. Scroll to pan, pinch or ⌘+scroll to zoom.">⇧-drag to link · arrows hop · <kbd>X</kbd> isolate · <kbd>L</kbd> timeline · <kbd>E</kbd> edit · <kbd>N</kbd> new · <kbd>F</kbd> fit</span>';
   };
   let nodes = [], links = [], byId = new Map(), adj = new Map();
+  const PIN_KEY = 'atlas.brain.pins';
+  let pins = {};
+  try { pins = JSON.parse(localStorage.getItem(PIN_KEY) || '{}') || {}; } catch (_) {}
+  const savePins = () => { try { localStorage.setItem(PIN_KEY, JSON.stringify(pins)); } catch (_) {} };
+  // What is on stage beyond the type toggles: folded departments · isolate (a note + neighbours) · timeline cursor.
+  const FOLD_KEY = 'atlas.brain.folded', collapsed = new Set();
+  try { for (const s of JSON.parse(localStorage.getItem(FOLD_KEY) || '[]')) collapsed.add(s); } catch (_) {}
+  let iso = null, isoSet = null;                       // {id, depth} and the ids it keeps on stage
+  const tl = {on: false, t: 0, t0: 0, t1: 0, playing: false, last: 0};   // timeline cursor (epoch seconds)
+  const WEEK = 7 * 86400;
+  const fresh = n => tl.on && n.born > tl.t - WEEK && n.born <= tl.t;  // born in the week before the cursor
+  const touched = new Map();                           // id → {at, kind}: notes Atlas read or wrote recently
+  let linkDrag = null;                                 // ⇧-drag from one node to another adds a [[link]]
+  const mini = $b('brMini'), mctx = mini ? mini.getContext('2d') : null;
+  let miniT = null;                                    // world → minimap transform, kept for clicks
   let W = 0, H = 0, dpr = 1, raf = 0, alpha = 1;
   let view = {x:0, y:0, k:1}, hover = null, selected = null, drag = null, pan = null, moved = false;
   let searchQuery = '', searchMatches = [], searchIdx = 0, flyAnim = null, viewSaved = null;
   let downX = 0, downY = 0, downId = null, lastPX = null, lastPY = null, pointerIn = false;
   const edgePulses = [], nodeSparks = new Map();
-  // Depth & life: gentle parallax, breathing, a staggered fade-in, and an idle animation loop.
-  const par = {x: 0, y: 0};                            // pointer parallax offset in CSS px (part of the draw transform)
+  // Depth & life: breathing, a staggered fade-in, and an idle animation loop.
   let lastDraw = 0, revealT0 = 0, revealTotal = 0;     // fade-in stagger bookkeeping
   const hash = s => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
   let REDUCE = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   if (window.matchMedia){
     const rmq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const onRm = () => { REDUCE = rmq.matches; par.x = par.y = 0; if (!ov.hidden && !raf) loop(); else draw(); };
+    const onRm = () => { REDUCE = rmq.matches; if (!ov.hidden && !raf) loop(); else draw(); };
     if (rmq.addEventListener) rmq.addEventListener('change', onRm);
     else if (rmq.addListener) rmq.addListener(onRm);
   }
@@ -1696,7 +1722,11 @@ setInterval(async () => {
   watchDpr();
 
   const showNb = () => $b('brNotebooks').checked, showSh = () => $b('brShared').checked;
-  const visible = n => n.type === 'notebook' ? showNb() : (n.type === 'commons' || n.type === 'log') ? showSh() : true;
+  const typeOn = n => n.type === 'notebook' ? showNb() : (n.type === 'commons' || n.type === 'log') ? showSh() : true;
+  const visible = n => typeOn(n)
+    && !(n.type !== 'dept' && n.group && collapsed.has(n.group))
+    && (!isoSet || isoSet.has(n.id))
+    && (!tl.on || !n.born || n.born <= tl.t);
 
   function pulseNode(nodeId, kind = 'read'){
     const n = byId.get(nodeId);
@@ -1715,9 +1745,12 @@ setInterval(async () => {
 
   function flyTo(n, zoom = 1.25){
     if (!n) return;
-    if (!visible(n)){
+    if (!visible(n)){                                 // bring it on stage whatever is hiding it
       if (n.type === 'notebook') $b('brNotebooks').checked = true;
       else if (n.type === 'commons' || n.type === 'log') $b('brShared').checked = true;
+      if (n.group && n.type !== 'dept' && collapsed.has(n.group)) toggleFold(n.group);
+      if (isoSet && !isoSet.has(n.id)) setIsolate(null, 1, false);
+      if (tl.on && n.born > tl.t){ tl.t = tl.t1; tlSync(); }
     }
     const tk = Math.max(view.k, zoom);
     flyAnim = {
@@ -1755,10 +1788,10 @@ setInterval(async () => {
       const old = new Map(nodes.map(n => [n.id, n]));
       const now = performance.now();
       nodes = g.nodes.map((n, i) => {
-        const o = old.get(n.id), a = (i / g.nodes.length) * Math.PI * 2;
+        const o = old.get(n.id), a = (i / g.nodes.length) * Math.PI * 2, p = pins[n.id];
         if (!o && old.size > 0) nodeSparks.set(n.id, now);
-        return Object.assign(n, {x: o ? o.x : Math.cos(a) * 220 + Math.random() * 20,
-                                 y: o ? o.y : Math.sin(a) * 220 + Math.random() * 20, vx: 0, vy: 0});
+        return Object.assign(n, {x: p ? p[0] : o ? o.x : Math.cos(a) * 220 + Math.random() * 20,
+                                 y: p ? p[1] : o ? o.y : Math.sin(a) * 220 + Math.random() * 20, vx: 0, vy: 0, pinned: !!p});
       });
       byId = new Map(nodes.map(n => [n.id, n]));
       // Re-point live references at the freshly built objects (ids survive a reload),
@@ -1817,28 +1850,31 @@ setInterval(async () => {
     }
     for (const a of vis){
       a.vx -= a.x * 0.004 * alpha; a.vy -= a.y * 0.004 * alpha;
-      if (a === drag){ a.vx = a.vy = 0; continue; }
+      if (a === drag || a.pinned){ a.vx = a.vy = 0; continue; }
       a.vx *= 0.82; a.vy *= 0.82; a.x += a.vx; a.y += a.vy;
     }
     alpha = Math.max(0.02, alpha * 0.985);
     let mx = 0, my = 0;                                   // keep the whole graph centred on the canvas
     for (const a of vis){ mx += a.x; my += a.y; }
-    if (n){ mx /= n; my /= n; for (const a of vis){ if (a === drag) continue; a.x -= mx * 0.2; a.y -= my * 0.2; } }
+    if (n){ mx /= n; my /= n; for (const a of vis){ if (a === drag || a.pinned) continue; a.x -= mx * 0.2; a.y -= my * 0.2; } }
   }
 
-  function fitView(){                                     // zoom so every visible node fits with margin
-    const vis = nodes.filter(visible); if (!vis.length || !W) return;
+  function fitTo(list, animate){                          // frame these nodes with a margin
+    if (!list.length || !W) return;
     let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
-    for (const a of vis){ x0 = Math.min(x0, a.x); x1 = Math.max(x1, a.x); y0 = Math.min(y0, a.y); y1 = Math.max(y1, a.y); }
-    const k = Math.min((W - 140) / Math.max(1, x1 - x0), (H - 110) / Math.max(1, y1 - y0));
-    view.k = Math.max(.45, Math.min(1.5, k)); view.x = -((x0 + x1) / 2) * view.k; view.y = -((y0 + y1) / 2) * view.k;
+    for (const a of list){ x0 = Math.min(x0, a.x); x1 = Math.max(x1, a.x); y0 = Math.min(y0, a.y); y1 = Math.max(y1, a.y); }
+    const k = Math.max(.45, Math.min(1.5, Math.min((W - 140) / Math.max(1, x1 - x0), (H - 110) / Math.max(1, y1 - y0))));
+    const x = -((x0 + x1) / 2) * k, y = -((y0 + y1) / 2) * k;
+    if (animate && !REDUCE){ flyAnim = {t0: performance.now(), dur: 420, x0: view.x, y0: view.y, k0: view.k, x1: x, y1: y, k1: k}; if (!raf && !ov.hidden) loop(); }
+    else { view.x = x; view.y = y; view.k = k; draw(); }
   }
+  const fitView = () => fitTo(nodes.filter(visible), false);
 
   const radiusOf = t => RADIUS[t] || 4.5;
-  // ONE transform pair for the whole canvas. draw() translates by (W/2 + view.x + par.x, …) then
+  // ONE transform pair for the whole canvas. draw() translates by (W/2 + view.x, …) then
   // scales by view.k, and the hit test inverts exactly that — including devicePixelRatio, which the
   // ctx.setTransform(dpr,…) applies to the bitmap only, so both sides work in CSS pixels.
-  const offX = () => W / 2 + view.x + par.x, offY = () => H / 2 + view.y + par.y;
+  const offX = () => W / 2 + view.x, offY = () => H / 2 + view.y;
   const toScreen = (wx, wy) => ({x: offX() + wx * view.k, y: offY() + wy * view.k});
   const toWorld = (px, py) => ({x: (px - offX()) / view.k, y: (py - offY()) / view.k});
 
@@ -1852,11 +1888,16 @@ setInterval(async () => {
     return n.type === 'hub' || n.type === 'dept' || n.type === 'inbox' || n === focus || n === hover || isMatch
         || (near && near.has(n.id) && n.type !== 'notebook')
         || (hoverNear && hoverNear.has(n.id) && n.type !== 'notebook')
-        || (n.type === 'sub' && view.k > .85);
+        || (isoSet && n.type !== 'notebook') || fresh(n)
+        || (n.type === 'sub' && view.k > .6);
   };
   const labelFontPx = () => 11 / Math.max(.7, Math.min(1.4, view.k));
+  const labelText = n => {                               // long names are cut so they cannot cover neighbours
+    const t = n.id.replace(/-/g, ' ');
+    return (t.length <= 22 || n === hover || n === selected) ? t : t.slice(0, 21).trimEnd() + '…';
+  };
   function labelBand(n){                                 // screen-space box around a node's caption
-    const txt = n.id.replace(/-/g, ' ');
+    const txt = labelText(n);
     ctx.save(); ctx.font = `${labelFontPx()}px ${FONT}`;
     const w = ctx.measureText(txt).width * view.k;       // world font × zoom → on-screen width
     ctx.restore();
@@ -1889,13 +1930,6 @@ setInterval(async () => {
       if (u >= 1) flyAnim = null;
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
-
-    // Pointer parallax: ease a few px toward the pointer. It is folded into offX()/offY(), i.e. the
-    // SAME transform the hit test inverts, so a click still lands exactly on the node it looks like.
-    const ptx = (!REDUCE && pointerIn && lastPX != null) ? (lastPX / W - .5) * 16 : 0;
-    const pty = (!REDUCE && pointerIn && lastPY != null) ? (lastPY / H - .5) * 16 : 0;
-    par.x += (ptx - par.x) * .08; par.y += (pty - par.y) * .08;
-    if (REDUCE){ par.x = 0; par.y = 0; }
 
     drawBackdrop();                                    // soft gradient + vignette, drawn from theme tokens
 
@@ -1987,7 +2021,7 @@ setInterval(async () => {
       if (isHot) r *= 1.22;                                            // hover lift
       const ny = n.y - (isHot && !REDUCE ? 3 / view.k : 0);
       const isMatch = matchSet && matchSet.has(n.id);
-      const dim = (focus || matchSet) && !isMatch && !lit.has(n.id);
+      const dim = (focus || matchSet) && !isMatch && !lit.has(n.id) && !fresh(n);
       if (lay <= 2 && !dim){                                           // soft ambient shadow
         const sg = ctx.createRadialGradient(n.x, ny + r * .7, 0, n.x, ny + r * .7, r * 3.1);
         sg.addColorStop(0, `rgba(${SH},${(LIGHT ? .10 : .34) * rv})`);
@@ -2030,6 +2064,40 @@ setInterval(async () => {
         ctx.stroke();
       }
     }
+    // Overlays: notes Atlas touched (amber = read, green = wrote), fresh notes on the timeline,
+    // folded departments, and the ⇧-drag link line.
+    for (const n of nodes){
+      if (!visible(n)) continue;
+      const r = (RADIUS[n.type] || 4.5) + 6 / view.k, t = touched.get(n.id);
+      if (t){
+        const u = (now - t.at) / 60000;
+        if (u >= 1) touched.delete(n.id);
+        else {
+          ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${(t.kind === 'write' ? GREEN : AMBER).join(',')},${.9 * (1 - u)})`;
+          ctx.lineWidth = 2.2 / view.k; ctx.stroke();
+        }
+      }
+      if (fresh(n)){
+        ctx.beginPath(); ctx.arc(n.x, n.y, r + 3 / view.k, 0, Math.PI * 2);
+        ctx.setLineDash([3 / view.k, 3 / view.k]); ctx.strokeStyle = `rgba(${GREEN.join(',')},.95)`;
+        ctx.lineWidth = 1.6 / view.k; ctx.stroke(); ctx.setLineDash([]);
+      }
+      if (n.type === 'dept' && collapsed.has(n.group)){
+        const hidden = nodes.reduce((c, m) => c + (m.group === n.group && m.type !== 'dept' && typeOn(m) ? 1 : 0), 0);
+        const bx = n.x + r, by = n.y - r, br = 9 / view.k;
+        ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${colorOf(n).join(',')},.95)`; ctx.fill();
+        ctx.fillStyle = `rgb(${BG})`; ctx.font = `700 ${9 / view.k}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('+' + hidden, bx, by + .5 / view.k); ctx.textBaseline = 'alphabetic';
+      }
+    }
+    if (linkDrag){
+      const w = toWorld(linkDrag.px, linkDrag.py), f = linkDrag.from;
+      ctx.beginPath(); ctx.moveTo(f.x, f.y); ctx.lineTo(w.x, w.y);
+      ctx.setLineDash([6 / view.k, 5 / view.k]); ctx.strokeStyle = `rgba(${GREEN.join(',')},.95)`;
+      ctx.lineWidth = 2 / view.k; ctx.stroke(); ctx.setLineDash([]);
+    }
     ctx.font = `${labelFontPx()}px ${FONT}`;
     ctx.textAlign = 'center';
     for (let i = 0; i < nodes.length; i++){
@@ -2038,16 +2106,52 @@ setInterval(async () => {
       const rv = revealAt(i) * sceneFade;
       if (rv <= 0) continue;
       const isMatch = matchSet && matchSet.has(n.id);
-      const dim = (focus || matchSet) && !isMatch && !lit.has(n.id);
+      const dim = (focus || matchSet) && !isMatch && !lit.has(n.id) && !fresh(n);
       const dep = layerOf(n) / LAYER_N;
       ctx.fillStyle = `rgba(${INK},${(dim ? .30 : (.96 - dep * .28)) * rv})`;
-      ctx.fillText(n.id.replace(/-/g, ' '), n.x, n.y + (RADIUS[n.type] || 4.5) + 13 / Math.max(.7, view.k));
+      ctx.fillText(labelText(n), n.x, n.y + (RADIUS[n.type] || 4.5) + 13 / Math.max(.7, view.k));
     }
     ctx.restore();
+    drawMini();
+  }
+
+  // Minimap: every node on stage plus the rectangle you are looking at. Click or drag it to move.
+  function drawMini(){
+    if (!mctx || !W || mini.offsetParent === null) return;
+    const vis = nodes.filter(visible); if (!vis.length) return;
+    const mw = mini.clientWidth, mh = mini.clientHeight;
+    if (mini.width !== Math.round(mw * dpr)){ mini.width = Math.round(mw * dpr); mini.height = Math.round(mh * dpr); }
+    let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (const a of vis){ x0 = Math.min(x0, a.x); x1 = Math.max(x1, a.x); y0 = Math.min(y0, a.y); y1 = Math.max(y1, a.y); }
+    x0 -= 40; y0 -= 40; x1 += 40; y1 += 40;
+    const s = Math.min(mw / (x1 - x0), mh / (y1 - y0));
+    const ox = (mw - (x1 - x0) * s) / 2 - x0 * s, oy = (mh - (y1 - y0) * s) / 2 - y0 * s;
+    miniT = {s, ox, oy};
+    mctx.setTransform(dpr, 0, 0, dpr, 0, 0); mctx.clearRect(0, 0, mw, mh);
+    for (const n of vis){
+      mctx.fillStyle = `rgb(${colorOf(n).join(',')})`;
+      mctx.beginPath(); mctx.arc(ox + n.x * s, oy + n.y * s, n.type === 'hub' ? 2.8 : n.type === 'dept' ? 2.2 : 1.3, 0, Math.PI * 2); mctx.fill();
+    }
+    const a = toWorld(0, 0), b = toWorld(W, H);
+    mctx.strokeStyle = `rgba(${ACCENT},.95)`; mctx.lineWidth = 1;
+    mctx.strokeRect(ox + a.x * s + .5, oy + a.y * s + .5, (b.x - a.x) * s, (b.y - a.y) * s);
+  }
+  if (mini){
+    const jump = e => {
+      if (!miniT) return;
+      const r = mini.getBoundingClientRect();
+      flyAnim = null; viewSaved = null;
+      view.x = -((e.clientX - r.left - miniT.ox) / miniT.s) * view.k;
+      view.y = -((e.clientY - r.top - miniT.oy) / miniT.s) * view.k;
+      draw();
+    };
+    mini.addEventListener('pointerdown', e => { mini.setPointerCapture(e.pointerId); jump(e); });
+    mini.addEventListener('pointermove', e => { if (mini.hasPointerCapture(e.pointerId)) jump(e); });
+    mini.addEventListener('dblclick', () => fitTo(nodes.filter(visible), true));
   }
 
   function drawBackdrop(){
-    const cx = W / 2 + par.x * .4, cy = H / 2 + par.y * .4;
+    const cx = W / 2, cy = H / 2;
     const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * .78);
     g.addColorStop(0, `rgba(${ACCENT},${LIGHT ? .10 : .16})`);
     g.addColorStop(.5, `rgba(${BG},0)`);
@@ -2064,25 +2168,32 @@ setInterval(async () => {
     const now = performance.now();
     if (W){
       const settled = alpha <= 0.021 && !drag;         // forces have stopped; skip the O(n²) pass
-      if (!settled) step();
+      if (!settled && !tl.on) step();                 // timeline replays growth in place, so no layout
+      if (tl.playing) tickTimeline(now);
       // Recompute hover from the last pointer position every frame, so the highlight
       // never goes stale while the graph settles, flies, or after a refresh.
       if (pointerIn && !drag && !pan && lastPX != null){
         const h = pick(lastPX, lastPY);
         if (h !== hover){ hover = h; setCursor(); }
       }
-      const busy = !settled || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan;
+      const busy = !settled || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan || tl.playing || linkDrag;
       // Idle motion (breathing / parallax / flow) redraws on a ~30fps budget; with reduced
       // motion the canvas is static and only redraws on demand.
       if (busy || (!REDUCE && now - lastDraw > 32)){ draw(); lastDraw = now; }
     }
-    const activeAnim = alpha > 0.021 || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan || !REDUCE;
+    const activeAnim = alpha > 0.021 || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan || tl.playing || !REDUCE;
     raf = activeAnim ? requestAnimationFrame(loop) : 0;
   }
   const setCursor = () => cv.classList.toggle('node-hover', !!(hover && !drag));
 
   async function openNote(n){
+    if (editing && editing.id !== n.id){
+      if (isDirty()){ editMsg('Save or cancel this edit first.'); return; }
+      stopEdit();
+    }
+    if (iso && iso.id !== n.id && !editing) setIsolate(n.id, iso.depth);   // isolate walks with you
     selected = n; alpha = Math.max(alpha, .15); syncToDept(n);
+    $b('brSuggest').hidden = true;
     pulseNode(n.id, 'read');
     const note = $b('brText');
     note._raw = ''; note._noteId = n.id; note.scrollTop = 0;
@@ -2103,6 +2214,9 @@ setInterval(async () => {
       if (window.AtlasMarkdown) note.innerHTML = AtlasMarkdown.render(text);
       else note.textContent = text;
       note.scrollTop = 0;
+      $b('brEdit').disabled = r.editable === false;
+      $b('brEdit').title = r.editable === false ? 'This note is too large to edit here' : 'Edit this note (E)';
+      loadSuggest(n);
     } catch (_) { note._raw = ''; note.innerHTML = '<p class="md-p">could not load note</p>'; }
   }
 
@@ -2119,13 +2233,14 @@ setInterval(async () => {
   });
 
   const pos = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
-  const endPointer = () => { drag = null; pan = null; moved = false; downId = null; cv.classList.remove('drag'); };
+  const endPointer = () => { drag = null; pan = null; linkDrag = null; moved = false; downId = null; cv.classList.remove('drag'); };
   cv.addEventListener('pointerdown', e => {
     if (downId !== null) return;                       // ignore a second pointer while a gesture is live
     cv.setPointerCapture(e.pointerId);
     const [px, py] = pos(e); moved = false;
     downX = e.clientX; downY = e.clientY; downId = e.pointerId;
     const n = pick(px, py);
+    if (n && e.shiftKey){ linkDrag = {from: n, px, py}; cv.classList.add('drag'); return; }
     if (n){ drag = n; cv.classList.add('drag'); }      // grabbing cursor while dragging a node too
     else { pan = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; cv.classList.add('drag'); viewSaved = null; }
   });
@@ -2133,13 +2248,18 @@ setInterval(async () => {
     if (downId !== null && e.pointerId !== downId) return;
     const [px, py] = pos(e);
     lastPX = px; lastPY = py; pointerIn = true;
+    if (linkDrag){
+      linkDrag.px = px; linkDrag.py = py;
+      const h = pick(px, py); hover = h !== linkDrag.from ? h : null; draw();
+      return;
+    }
     if (drag || pan){
       // A click is only a drag once the pointer has moved past the threshold, so a
       // jittery click still selects instead of silently becoming a drag.
       if (!moved && GM.moved({x: downX, y: downY}, {x: e.clientX, y: e.clientY})) moved = true;
       if (moved){
         if (drag){ const w = toWorld(px, py); drag.x = w.x; drag.y = w.y; alpha = Math.max(alpha, .3); if (!raf) loop(); }
-        else { view.x = pan.vx + e.clientX - pan.x; view.y = pan.vy + e.clientY - pan.y; draw(); }
+        else { view.x = pan.vx + e.clientX - pan.x; view.y = pan.vy + e.clientY - pan.y; if (!raf) loop(); }
       }
     } else {
       const h = pick(px, py); if (h !== hover){ hover = h; setCursor(); draw(); }
@@ -2149,23 +2269,35 @@ setInterval(async () => {
     if (downId !== null && e.pointerId !== downId) return;
     const [px, py] = pos(e);
     lastPX = px; lastPY = py;
-    const wasMoved = moved;
+    if (linkDrag){
+      const from = linkDrag.from, to = pick(px, py);
+      endPointer(); hover = to; setCursor(); draw();
+      if (to && to !== from) linkNotes(from.id, to.id);
+      return;
+    }
+    const wasMoved = moved, dropped = drag;
     endPointer();
+    if (wasMoved && dropped){ dropped.pinned = true; pins[dropped.id] = [dropped.x, dropped.y]; savePins(); }
     if (!wasMoved){ const n = pick(px, py); if (n) openNote(n); else { selected = null; syncToDept(null); } }
     hover = pick(px, py);                              // clear a stale hover left by a drag/pan
     setCursor();
     if (!raf) loop(); else draw();
   });
+  cv.addEventListener('dblclick', e => {               // release a pinned node back to the layout
+    const n = pick(...pos(e));
+    if (n && n.pinned){ n.pinned = false; delete pins[n.id]; savePins(); alpha = Math.max(alpha, .3); if (!raf) loop(); }
+  });
   cv.addEventListener('pointercancel', () => { endPointer(); if (pointerIn) hover = pick(lastPX, lastPY); setCursor(); if (!raf) loop(); });
   cv.addEventListener('lostpointercapture', () => { if (downId !== null){ endPointer(); setCursor(); } });
   cv.addEventListener('pointerleave', () => { pointerIn = false; if (hover){ hover = null; setCursor(); draw(); } });
   cv.addEventListener('pointerenter', e => { const [px, py] = pos(e); pointerIn = true; lastPX = px; lastPY = py; });
+  // Two-finger scroll pans; pinch (the browser reports it as ctrlKey) or ⌘/Ctrl+scroll zooms.
   cv.addEventListener('wheel', e => {
     e.preventDefault();
-    viewSaved = null;                                  // a manual zoom is the new "restore" home
-    const [px, py] = pos(e), before = toWorld(px, py);
-    view.k = Math.max(.35, Math.min(3, view.k * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
-    view.x = px - W / 2 - before.x * view.k; view.y = py - H / 2 - before.y * view.k;
+    viewSaved = null; flyAnim = null;                  // a manual move is the new "restore" home
+    const line = e.deltaMode === 1 ? 16 : 1;           // some mice report lines, not pixels
+    if (e.ctrlKey || e.metaKey){ const [px, py] = pos(e); Object.assign(view, GM.zoomAt(view, e.deltaY * line, px, py, W, H)); }
+    else { view.x -= e.deltaX * line; view.y -= e.deltaY * line; }
     draw();
   }, {passive: false});
 
@@ -2230,21 +2362,279 @@ setInterval(async () => {
     });
   }
 
-  // Trigger live edge pulses when tools read/write notes in ~/Atlas
+  // ══ small helpers ══
+  const pretty = id => String(id).replace(/-/g, ' ');
+  const escA = s => esc(s).replace(/"/g, '&quot;');
+  const post = (url, body) => fetch(url, {method: 'POST', headers: apiHeaders({'content-type': 'application/json'}), body: JSON.stringify(body)})
+    .then(async r => ({status: r.status, ...(await r.json().catch(() => ({})))}))
+    .catch(() => ({ok: false, error: 'Could not reach the dashboard server.'}));
+  const actEl = $b('brActivity'); let actTimer = 0;
+  const chip = (text, ms = 2400) => {                  // small status line on the graph (top-left)
+    if (!actEl) return;
+    clearTimeout(actTimer); actEl.textContent = text || ''; actEl.hidden = !text;
+    if (text && ms) actTimer = setTimeout(() => { actEl.hidden = true; }, ms);
+  };
+  const navPing = () => { const b = $b('navBrain'); if (!b) return; b.classList.remove('brain-ping'); void b.offsetWidth; b.classList.add('brain-ping'); };
+
+  // ══ Atlas ↔ Brain: voice actions, and notes lighting up as Atlas reads or writes them ══
+  const WRITE_TOOL = /write|patch|edit|create|append|save|replace|insert|move/i;
+  let runWrote = false;
+  const notesIn = inp => nodes.filter(n => n.id.length > 3 && (inp.includes('/' + n.id + '.md') || inp.includes('[[' + n.id)
+                                                            || (n.id.length > 5 && inp.includes(n.id))));
   const origBrainHandle = handle;
   handle = ev => {
     try {
-      if (ev.t === 'tool' && ev.phase === 'use' && nodes.length){
-        const inp = String(ev.input || '');
-        for (const n of nodes){
-          if (n.id.length > 3 && inp.includes(n.id)){
-            pulseNode(n.id, 'tool');
-          }
-        }
+      if (ev.t === 'ui' && ev.ui && ev.ui.view === 'brain') voiceAction(ev.ui);
+      else if (ev.t === 'tool' && ev.phase === 'use' && nodes.length){
+        const inp = String(ev.input || ''), write = WRITE_TOOL.test(ev.name || '');
+        if (write && /atlas/i.test(inp)) runWrote = true;
+        const hit = notesIn(inp);
+        for (const n of hit){ touched.set(n.id, {at: performance.now(), kind: write ? 'write' : 'read'}); pulseNode(n.id, 'tool'); }
+        if (hit.length){ chip(`◉ Atlas is ${write ? 'writing' : 'reading'} ${pretty(hit[0].id)}${hit.length > 1 ? ` +${hit.length - 1}` : ''}`, 0); if (ov.hidden) navPing(); }
+      } else if (ev.t === 'complete' || ev.t === 'error'){
+        if (runWrote && !ov.hidden) load();            // new or changed notes appear without a refresh
+        runWrote = false;
+        if (actEl && !actEl.hidden && /^◉/.test(actEl.textContent)) chip(actEl.textContent.replace(/^◉ Atlas is (read|writ)ing/, (m, v) => '✓ Atlas ' + (v === 'read' ? 'read' : 'wrote')), 2500);
       }
     } catch (_) {}
     return origBrainHandle(ev);
   };
+  async function showBrain(id){
+    if (NAV()) for (const k in NAV().views) if (k !== 'brain' && NAV().views[k].close) NAV().views[k].close();
+    if (!isOpen()) return open(id);
+    const n = id && byId.get(id);
+    if (n){ flyTo(n, Math.max(view.k, 1.25)); openNote(n); }
+  }
+  async function voiceAction(a){
+    if (a.action === 'close') return close();
+    if (a.action === 'open') return showBrain(a.id);
+    await showBrain(a.action === 'isolate' ? a.id : undefined);
+    if (a.action === 'isolate' && byId.get(a.id)) setIsolate(a.id, 1);
+    else if (a.action === 'search' && searchInput){ searchInput.value = a.q || ''; searchIdx = 0; updateSearch(false); chip(`No note called “${a.q}”. Closest matches are highlighted.`, 4000); }
+    else if (a.action === 'timeline'){ selected = null; syncToDept(null); showTimeline(true); }   // let the new notes stand out
+  }
+
+  // ══ isolate: a note and its neighbours, 1 or 2 hops ══
+  function setIsolate(id, depth = 1, refit = true){
+    if (!id || !byId.get(id)){ iso = null; isoSet = null; }
+    else {
+      iso = {id, depth}; isoSet = new Set([id]); let edge = [id];
+      for (let d = 0; d < depth; d++){
+        const next = [];
+        for (const f of edge) for (const nb of adj.get(f) || []) if (!isoSet.has(nb)){ isoSet.add(nb); next.push(nb); }
+        edge = next;
+      }
+    }
+    const b = $b('brIsolate');
+    b.setAttribute('aria-pressed', String(!!iso));
+    b.textContent = iso ? `Isolate · ${iso.depth} hop${iso.depth > 1 ? 's' : ''}` : 'Isolate';
+    renderOutline();
+    if (refit) fitTo(nodes.filter(visible), true); else draw();
+  }
+  const cycleIsolate = () => {
+    const n = selected || hover;
+    if (!iso){ if (n) setIsolate(n.id, 1); else chip('Select a note first, then isolate it'); }
+    else if (iso.depth === 1) setIsolate(iso.id, 2);
+    else setIsolate(null);
+  };
+
+  // ══ fold a department into its node ══
+  function toggleFold(slug){
+    if (collapsed.has(slug)) collapsed.delete(slug); else collapsed.add(slug);
+    try { localStorage.setItem(FOLD_KEY, JSON.stringify([...collapsed])); } catch (_) {}
+    if (selected && !visible(selected)){ selected = null; syncToDept(null); }
+    alpha = Math.max(alpha, .3); legend(); renderOutline();
+    if (!raf && !ov.hidden) loop(); else draw();
+  }
+  $b('brLegend').addEventListener('click', e => { const b = e.target.closest('[data-fold]'); if (b) toggleFold(b.dataset.fold); });
+
+  // ══ arrow keys: hop to the linked note that lies in that direction ══
+  function hop(dx, dy){
+    const from = selected && visible(selected) ? selected : null;
+    if (!from){ const s = byId.get('Atlas') || nodes.find(visible); if (s){ flyTo(s, view.k); openNote(s); } return; }
+    const best = list => {
+      let b = null, bs = -1e9;
+      for (const n of list){
+        if (!n || n === from || !visible(n)) continue;
+        const vx = n.x - from.x, vy = n.y - from.y, d = Math.hypot(vx, vy) || 1, cos = (vx * dx + vy * dy) / d;
+        if (cos < .35) continue;                       // roughly that way
+        const s = cos * 1.5 - d / 300;                 // straight ahead first, then nearest
+        if (s > bs){ bs = s; b = n; }
+      }
+      return b;
+    };
+    const n = best([...(adj.get(from.id) || [])].map(id => byId.get(id))) || best(nodes);
+    if (n){ flyTo(n, view.k); openNote(n); }
+  }
+
+  // ══ edit in place, with [[ autocomplete ══
+  const editor = $b('brEditor'), ac = $b('brAC');
+  const editMsg = t => { $b('brEditMsg').textContent = t || ''; };
+  let editing = null;                                  // {id, mtime, orig, armed}
+  const isDirty = () => !!editing && editor.value !== editing.orig;
+  async function startEdit(){
+    const n = selected; if (!n || editing) return;
+    let r = null;
+    try { r = await fetch('/api/brain/note?id=' + encodeURIComponent(n.id), {headers: apiHeaders()}).then(x => x.json()); } catch (_) {}
+    if (!r || r.error){ chip('Could not load this note for editing'); return; }
+    if (r.editable === false){ chip('This note is too large to edit here'); return; }
+    editing = {id: n.id, mtime: r.mtime, orig: r.text, armed: false};
+    editor.value = r.text; editor.hidden = false; $b('brEditBar').hidden = false; $b('brText').hidden = true;
+    $b('brEdit').setAttribute('aria-pressed', 'true');
+    editMsg('⌘S save · Esc cancel · type [[ to link');
+    editor.focus(); editor.setSelectionRange(r.text.length, r.text.length);
+  }
+  function stopEdit(){
+    editing = null; editor.hidden = true; ac.hidden = true;
+    $b('brEditBar').hidden = true; $b('brText').hidden = false; $b('brEdit').setAttribute('aria-pressed', 'false');
+  }
+  async function saveEdit(){
+    if (!editing) return;
+    const {id, mtime} = editing;
+    editMsg('Saving…');
+    const res = await post('/api/brain/note', {id, text: editor.value, base_mtime: mtime});
+    if (!res.ok){
+      editMsg(res.status === 409 ? 'This note changed on disk since you opened it. Copy your text, cancel, and edit again.' : (res.error || 'Could not save.'));
+      return;
+    }
+    stopEdit();
+    touched.set(id, {at: performance.now(), kind: 'write'});
+    await load();
+    const n = byId.get(id);
+    if (n){ openNote(n); pulseNode(id, 'write'); }
+    chip(`✓ Saved ${pretty(id)}`);
+  }
+  let acItems = [], acSel = 0;
+  function acUpdate(){
+    const m = /\[\[([^\]\[\n|#]{0,40})$/.exec(editor.value.slice(0, editor.selectionStart));
+    if (!m){ ac.hidden = true; return; }
+    const q = m[1].toLowerCase().replace(/[-_\s]+/g, ' ').trim();
+    const norm = id => id.toLowerCase().replace(/[-_]+/g, ' ');
+    acItems = nodes.map(n => n.id).filter(id => !q || norm(id).includes(q))
+      .sort((a, b) => (norm(a).startsWith(q) ? 0 : 1) - (norm(b).startsWith(q) ? 0 : 1) || a.length - b.length).slice(0, 7);
+    if (!acItems.length){ ac.hidden = true; return; }
+    acSel = 0; ac.hidden = false;
+    ac.innerHTML = acItems.map((id, i) => `<button type="button" role="option" data-ac="${i}" aria-selected="${i === 0}">${esc(id)}</button>`).join('');
+  }
+  function acPick(i){
+    const id = acItems[i]; if (!id) return;
+    const at = editor.selectionStart, start = editor.value.lastIndexOf('[[', at) + 2;
+    editor.setRangeText(id + (editor.value.slice(at).startsWith(']]') ? '' : ']]'), start, at, 'end');
+    ac.hidden = true; editor.focus();
+  }
+  editor.addEventListener('input', () => { if (editing) editing.armed = false; acUpdate(); });
+  editor.addEventListener('click', acUpdate);
+  ac.addEventListener('mousedown', e => { const b = e.target.closest('[data-ac]'); if (b){ e.preventDefault(); acPick(+b.dataset.ac); } });
+  editor.addEventListener('keydown', e => {
+    e.stopPropagation();                               // keep Space, letters, arrows and Esc away from the mic, shortcuts and graph
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's'){ e.preventDefault(); saveEdit(); return; }
+    if (!ac.hidden){
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+        e.preventDefault();
+        acSel = (acSel + (e.key === 'ArrowDown' ? 1 : acItems.length - 1)) % acItems.length;
+        [...ac.children].forEach((b, i) => b.setAttribute('aria-selected', String(i === acSel)));
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab'){ e.preventDefault(); acPick(acSel); return; }
+      if (e.key === 'Escape'){ e.preventDefault(); ac.hidden = true; return; }
+    }
+    if (e.key === 'Escape'){
+      e.preventDefault();
+      if (isDirty() && !editing.armed){ editing.armed = true; editMsg('Unsaved changes. Esc again to discard, ⌘S to save.'); return; }
+      stopEdit();
+    }
+  });
+  $b('brEdit').addEventListener('click', () => (editing ? (isDirty() ? editMsg('Save or cancel first.') : stopEdit()) : startEdit()));
+  $b('brEditSave').addEventListener('click', saveEdit);
+  $b('brEditCancel').addEventListener('click', stopEdit);
+
+  // ══ new note (linked to the selected one) ══
+  const newForm = $b('brNewForm'), newTitle = $b('brNewTitle');
+  function newNote(){
+    newForm.hidden = false; $b('brNewMsg').textContent = '';
+    $b('brNewNear').textContent = selected ? `linked to ${pretty(selected.id)}` : 'linked to Atlas';
+    newTitle.value = ''; newTitle.focus();
+  }
+  newForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    const title = newTitle.value.trim(); if (!title) return;
+    const res = await post('/api/brain/note', {create: title, near: selected ? selected.id : ''});
+    if (!res.ok){ $b('brNewMsg').textContent = res.error || 'Could not create the note.'; return; }
+    newForm.hidden = true;
+    await load();
+    const n = byId.get(res.note.id);
+    if (n){ nodeSparks.set(n.id, performance.now()); flyTo(n, Math.max(view.k, 1.1)); await openNote(n); startEdit(); }
+  });
+  newTitle.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape'){ e.preventDefault(); newForm.hidden = true; } });
+  $b('brNewCancel').addEventListener('click', () => { newForm.hidden = true; });
+  $b('brNew').addEventListener('click', newNote);
+
+  // ══ links: ⇧-drag, or one click on a suggestion ══
+  async function linkNotes(a, b){
+    const res = await post('/api/brain/link', {source: a, target: b});
+    if (!res.ok){ chip(res.error || 'Could not add the link'); return; }
+    touched.set(a, {at: performance.now(), kind: 'write'});
+    await load(); pulseNode(a, 'write');
+    chip(`✓ Linked ${pretty(a)} → ${pretty(b)}`);
+    if (selected && (selected.id === a || selected.id === b) && !editing) openNote(selected);
+  }
+  async function loadSuggest(n){
+    const box = $b('brSuggest');
+    let s = null;
+    try { s = await fetch('/api/brain/suggest?id=' + encodeURIComponent(n.id), {headers: apiHeaders()}).then(r => r.json()); } catch (_) {}
+    if (selected !== n || !s || s.error) return;
+    const rows = [...(s.mentions || []).map(x => ({src: n.id, dst: x.id, why: 'named here', snip: x.snippet})),
+                  ...(s.mentioned_in || []).map(x => ({src: x.id, dst: n.id, why: 'names this note', snip: x.snippet}))].slice(0, 8);
+    if (!rows.length){ box.hidden = true; return; }
+    box.innerHTML = '<div class="bs-head">Suggested links</div>' + rows.map((r, i) =>
+      `<button type="button" class="bs-item" data-i="${i}" title="${escA(r.snip)}"><b>＋</b>${esc(pretty(r.src === n.id ? r.dst : r.src))}<span>${r.why}</span></button>`).join('');
+    box.onclick = e => { const b = e.target.closest('[data-i]'); if (!b || b.disabled) return; b.disabled = true; const r = rows[+b.dataset.i]; linkNotes(r.src, r.dst); };
+    box.hidden = false;
+  }
+
+  // ══ timeline: replay how the brain grew ══
+  const tlBar = $b('brTimeline'), tlRange = $b('brTlRange'), tlLabel = $b('brTlLabel'), tlPlay = $b('brTlPlay'), tlFresh = $b('brTlFresh');
+  let freshIdx = 0;
+  const fmtWhen = (s, span) => new Date(s * 1000).toLocaleString(undefined,
+    span < 3 * 86400 ? {weekday: 'short', hour: '2-digit', minute: '2-digit'} : {day: 'numeric', month: 'short', year: 'numeric'});
+  function tlSync(){
+    if (!tl.on) return;
+    const span = tl.t1 - tl.t0, fr = nodes.filter(fresh);
+    tlRange.value = String(Math.round(((tl.t - tl.t0) / (span || 1)) * 1000));
+    tlLabel.textContent = `${fmtWhen(tl.t, span)} · ${nodes.filter(n => typeOn(n) && (!n.born || n.born <= tl.t)).length} notes`;
+    tlFresh.textContent = fr.length ? `${fr.length} new that week ▸` : 'nothing new that week';
+    tlFresh.disabled = !fr.length;
+    tlPlay.textContent = tl.playing ? '❚❚' : '▶'; tlPlay.setAttribute('aria-label', tl.playing ? 'Pause' : 'Play');
+  }
+  function showTimeline(on){
+    const b = $b('brTimelineBtn');
+    if (!on){ tl.on = tl.playing = false; tlBar.hidden = true; b.setAttribute('aria-pressed', 'false'); renderOutline(); draw(); return; }
+    const ts = nodes.map(n => n.born).filter(Boolean);
+    if (!ts.length){ chip('No dates found on these notes'); return; }
+    Object.assign(tl, {on: true, playing: false, t0: Math.min(...ts) - 60, t1: Math.max(Date.now() / 1000, ...ts)});
+    tl.t = tl.t1; freshIdx = 0;
+    tlBar.hidden = false; b.setAttribute('aria-pressed', 'true');
+    tlSync(); renderOutline(); draw();
+    if (!raf && !ov.hidden) loop();
+  }
+  function tickTimeline(now){
+    const before = tl.t;
+    tl.t = Math.min(tl.t1, tl.t + (tl.t1 - tl.t0) * Math.min(250, now - tl.last) / 9000);   // whole history in ~9s
+    tl.last = now;
+    for (const n of nodes) if (n.born > before && n.born <= tl.t) nodeSparks.set(n.id, now);
+    if (tl.t >= tl.t1) tl.playing = false;
+    tlSync();
+  }
+  tlPlay.addEventListener('click', () => {
+    if (!tl.playing && tl.t >= tl.t1) tl.t = tl.t0;
+    tl.playing = !tl.playing; tl.last = performance.now(); tlSync();
+    if (!raf && !ov.hidden) loop();
+  });
+  tlRange.addEventListener('input', () => { tl.playing = false; tl.t = tl.t0 + (tl.t1 - tl.t0) * (+tlRange.value / 1000); tlSync(); renderOutline(); draw(); });
+  tlFresh.addEventListener('click', () => { const fr = nodes.filter(fresh); if (!fr.length) return; const n = fr[freshIdx++ % fr.length]; flyTo(n, Math.max(view.k, 1.1)); openNote(n); });
+  $b('brTlClose').addEventListener('click', () => showTimeline(false));
+  $b('brTimelineBtn').addEventListener('click', () => showTimeline(!tl.on));
+  $b('brIsolate').addEventListener('click', cycleIsolate);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && !ov.hidden && !raf) loop();
   });
@@ -2254,9 +2644,12 @@ setInterval(async () => {
     const want = arg && typeof arg === 'string' ? arg : arg && arg.id;
     // reset every piece of transient interaction state so nothing survives a close/reopen
     hover = null; selected = null; drag = null; pan = null; flyAnim = null; moved = false;
-    downId = null; pointerIn = false; lastPX = lastPY = null; viewSaved = null; par.x = par.y = 0;
+    downId = null; pointerIn = false; lastPX = lastPY = null; viewSaved = null; linkDrag = null;
+    iso = null; isoSet = null; $b('brIsolate').setAttribute('aria-pressed', 'false'); $b('brIsolate').textContent = 'Isolate';
+    tl.on = tl.playing = false; tlBar.hidden = true; $b('brTimelineBtn').setAttribute('aria-pressed', 'false');
     ov.hidden = false; navBtn.setAttribute('aria-expanded', 'true'); fit(); view = {x: 0, y: 0, k: 1};
     await load(); fitView(); cancelAnimationFrame(raf); setCursor(); loop();
+    if (editing && byId.get(editing.id)) selected = byId.get(editing.id);   // an unsaved edit survives close / reopen
     const n = want && byId.get(want);
     if (n){                                           // jump to a specific note (e.g. from Departments)
       flyTo(n, 1.25); openNote(n);
@@ -2264,7 +2657,8 @@ setInterval(async () => {
   };
   const close = () => {
     ov.hidden = true; navBtn.setAttribute('aria-expanded', 'false'); cancelAnimationFrame(raf); raf = 0;
-    hover = null; drag = null; pan = null; flyAnim = null; moved = false; downId = null; pointerIn = false; par.x = par.y = 0;
+    hover = null; drag = null; pan = null; flyAnim = null; moved = false; downId = null; pointerIn = false;
+    linkDrag = null; tl.playing = false;
   };
   window.AtlasBrain = {
     open, close, load,
@@ -2279,9 +2673,17 @@ setInterval(async () => {
     labelOf: id => { const n = byId.get(id); return (n && labelVisible(n)) ? labelBand(n) : null; },
     selectedId: () => (selected ? selected.id : null),
     hoverId: () => (hover ? hover.id : null),
-    viewInfo: () => ({x: view.x, y: view.y, k: view.k, par: {x: par.x, y: par.y}, W, H, dpr}),
+    viewInfo: () => ({x: view.x, y: view.y, k: view.k, W, H, dpr}),
     ready: () => nodes.length > 0,
     settled: () => alpha <= 0.021 && !drag && !pan && !flyAnim,   // forces have stopped, nodes still
+    voice: a => voiceAction(a),
+    isolate: (id, depth) => setIsolate(id, depth || 1),
+    fold: slug => toggleFold(slug),
+    timeline: on => showTimeline(on !== false),
+    hop: (dx, dy) => hop(dx, dy),
+    link: (a, b) => linkNotes(a, b),
+    state: () => ({iso: iso && {...iso}, timeline: tl.on, t: tl.t, folded: [...collapsed], editing: editing && editing.id,
+                   visible: nodes.filter(visible).length, touched: [...touched.keys()]}),
   };
   const NAV = () => window.AtlasNav;
   const goDept = () => {                              // the selected note's department / team, if it belongs to one
@@ -2302,8 +2704,25 @@ setInterval(async () => {
   navBtn.addEventListener('click', () => isOpen() ? close() : (NAV() ? NAV().go('brain') : open()));
   $b('brainClose').addEventListener('click', close);
   $b('brRefresh').addEventListener('click', load);
-  ov.addEventListener('click', e => { if (e.target === ov) close(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !ov.hidden) close(); });
+  document.addEventListener('keydown', e => {
+    if (ov.hidden) return;
+    const el = document.activeElement, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName) || el?.isContentEditable;
+    if (e.key === 'Escape'){                           // peel one layer at a time
+      if (linkDrag){ endPointer(); draw(); }
+      else if (!newForm.hidden) newForm.hidden = true;
+      else if (iso) setIsolate(null);
+      else if (tl.on) showTimeline(false);
+      else if (selected){ selected = null; syncToDept(null); draw(); }
+      else close();
+      return;
+    }
+    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    const d = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]}[e.key];
+    if (d){ if (el === $b('brText')) return; e.preventDefault(); hop(d[0], d[1]); return; }
+    const act = {f: () => fitTo(nodes.filter(visible), true), x: cycleIsolate, l: () => showTimeline(!tl.on),
+                 e: () => startEdit(), n: newNote, '/': () => searchInput && searchInput.focus()}[e.key.toLowerCase()];
+    if (act){ e.preventDefault(); act(); }
+  });
   [$b('brNotebooks'), $b('brShared')].forEach(c => c.addEventListener('change', () => { alpha = 1; }));
 })();
 

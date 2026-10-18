@@ -440,6 +440,54 @@ def _fast_teams_summary():
     return f"{len(teams)} teams across {len(depts)} departments: " + ", ".join(teams) + "."
 
 
+_BRAIN = r"(?:the\s+|my\s+)?(?:second\s+)?brain"
+_BRAIN_CLOSE = re.compile(rf"^(?:close|hide|exit|leave)\s+{_BRAIN}$")
+_BRAIN_OPEN = re.compile(rf"^(?:open|show(?:\s+me)?|go\s+to|pull\s+up|bring\s+up)\s+{_BRAIN}$")
+_BRAIN_NEW = re.compile(rf"^(?:what(?:'?s|\s+is)\s+new|what\s+changed)(?:\s+this\s+week)?\s+in\s+{_BRAIN}(?:\s+this\s+week)?$"
+                        rf"|^(?:show|open|play)(?:\s+me)?\s+(?:the\s+|my\s+)?(?:brain\s+)?timeline$")
+_BRAIN_ISOLATE = re.compile(rf"^(?:isolate\s+(.+?)(?:\s+in\s+{_BRAIN})?|(?:focus|zoom)\s+(?:in\s+)?on\s+(.+?)\s+in\s+{_BRAIN})$")
+_BRAIN_FIND = re.compile(rf"^(?:show(?:\s+me)?|open|find|pull\s+up|bring\s+up|go\s+to|take\s+me\s+to|jump\s+to)\s+(.+?)\s+(?:in|from|on)\s+{_BRAIN}$")
+# looser phrasings only claim the turn on a clear name match, so "brain dump my day" still reaches Hermes
+_LOOSE_FIND = re.compile(r"^(?:show(?:\s+me)?|open|pull\s+up|bring\s+up)\s+(.+?\s+notes?)$|^brain[\s,:]+(.+)$")
+
+
+def _brain_intent(q):
+    """Voice control for the Brain graph. Returns a fast-path reply with a `ui` action, or None.
+    "show me X notes" only claims the turn when X really is a note; anything else goes to Hermes."""
+    def ui(action, reply, **kw):
+        return dict(message=None, reply=reply, note=f"fast-path: brain {action}", intent="brain",
+                    fast_path=True, ui=dict(view="brain", action=action, **kw))
+
+    def pretty(name):
+        return name.replace("-", " ")
+
+    if _BRAIN_CLOSE.match(q):
+        return ui("close", "Closing the brain.")
+    if _BRAIN_OPEN.match(q):
+        return ui("open", "Here's your brain.")
+    if _BRAIN_NEW.match(q):
+        return ui("timeline", "Here's what's new in your brain this week.", days=7)
+    m = _BRAIN_ISOLATE.match(q)
+    if m:
+        what = m.group(1) or m.group(2)
+        name = brain.find_note(what)
+        if name:
+            return ui("isolate", f"Isolating {pretty(name)} and its neighbours.", id=name)
+        return ui("search", f"I couldn't find a note matching {what}.", q=what)
+    m = _BRAIN_FIND.match(q)
+    if m:
+        name = brain.find_note(m.group(1))
+        if name:
+            return ui("open", f"Here's {pretty(name)}.", id=name)
+        return ui("search", f"I couldn't find a note matching {m.group(1)}.", q=m.group(1))
+    m = _LOOSE_FIND.match(q)
+    if m:
+        name = brain.find_note(m.group(1) or m.group(2), min_tier=2)
+        if name:
+            return ui("open", f"Here's {pretty(name)}.", id=name)
+    return None
+
+
 def fast_path(message):
     """Local intent router for simple queries (<50ms, zero model/subprocess calls).
 
@@ -489,6 +537,10 @@ def fast_path(message):
                  "I track operations, coordinate departments, and prepare actions for your approval.")
         return dict(message=None, reply=reply, note="fast-path: identity",
                     intent="who_are_you", fast_path=True)
+
+    hit = _brain_intent(q)
+    if hit:
+        return hit
 
     if q in _TODAY_QUERIES:
         d = load()

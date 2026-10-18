@@ -260,6 +260,12 @@ class Handler(BaseHTTPRequestHandler):
             name = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
             found = brain.note(name)
             return self._json(found if found else {"error": "not found"}, 200 if found else 404)
+        if p == "/api/brain/suggest":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            name = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+            found = brain.suggestions(name)
+            return self._json(found if found else {"error": "not found"}, 200 if found else 404)
         if p == "/api/agents":
             # local-only: loopback peer AND loopback Host, plus the session token
             if self.client_address[0] not in ("127.0.0.1", "::1"):
@@ -332,7 +338,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._token_ok():
             return self._json({"error": "unauthorized"}, 401)
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
-        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval", "/api/inbox"} and ctype != "application/json":
+        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval", "/api/inbox", "/api/brain/note", "/api/brain/link"} and ctype != "application/json":
             return self._json({"error": "application/json required"}, 415)
         if p == "/api/listen" and not ctype.startswith("audio/"):
             return self._json({"error": "audio content type required"}, 415)
@@ -358,6 +364,25 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._json({"ok": False, "error": err}, 400)
             return self._json({"ok": True, "item": item})
+
+        if p in ("/api/brain/note", "/api/brain/link"):
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            try:
+                body = json.loads(raw or b"{}")
+            except json.JSONDecodeError:
+                return self._json({"error": "bad json"}, 400)
+            if not isinstance(body, dict):
+                return self._json({"error": "payload must be a JSON object"}, 400)
+            if p == "/api/brain/link":
+                res, err = brain.add_link(str(body.get("source") or ""), str(body.get("target") or ""))
+            elif body.get("create"):
+                res, err = brain.create_note(body.get("create"), str(body.get("near") or "") or None)
+            else:
+                res, err = brain.save_note(str(body.get("id") or ""), body.get("text"), body.get("base_mtime"))
+            if err:
+                return self._json({"ok": False, "error": err}, 409 if err.startswith("conflict") else 400)
+            return self._json({"ok": True, "note": res})
 
         if p == "/api/speak":
             try:
@@ -454,6 +479,8 @@ class Handler(BaseHTTPRequestHandler):
         if cmd:
             if cmd.get("note"):
                 emit(dict(t="note", message=cmd["note"]))
+            if cmd.get("ui"):
+                emit(dict(t="ui", ui=cmd["ui"]))       # e.g. voice "show me pricing in my brain"
             if cmd.get("fresh"):
                 SESSION["id"] = None
                 commands.clear_history()

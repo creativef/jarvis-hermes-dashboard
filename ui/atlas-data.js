@@ -76,7 +76,7 @@
     const b = e.target.closest('[data-nav]');
     if (b) window.AtlasNav.go(b.dataset.nav);
   });
-  setTimeout(() => D.load(), 0);          // after app.js has defined apiHeaders
+  document.addEventListener('DOMContentLoaded', () => D.load());   // after app.js has defined apiHeaders (a 0ms timer could fire first → 401)
   // deep link: #open=brain&focus=pricing  /  #open=departments&dept=finance  (combine with #theme=…&mode=…)
   setTimeout(() => {
     const h = location.hash, m = /open=(brain|departments)/.exec(h); if (!m) return;
