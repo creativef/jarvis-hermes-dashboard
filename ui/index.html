@@ -226,6 +226,13 @@
       <label class="sfield">Auto-close mic after silence (seconds, 0 = never)
         <input id="set-micidle" type="number" min="0" max="3600" step="5">
       </label>
+      <label class="sfield">Voice
+        <select id="set-voice"></select>
+      </label>
+      <label class="sfield">Speaking speed (0.6 – 1.6)
+        <input id="set-speed" type="number" min="0.6" max="1.6" step="0.05">
+      </label>
+      <label class="sfield check"><input id="set-barge" type="checkbox"> Talk over Atlas to interrupt him (works best with headphones)</label>
       <p class="snote">Changes apply to the next request. The working directory must exist on disk.</p>
     </div>
     <div class="settings-actions">

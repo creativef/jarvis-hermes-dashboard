@@ -13,6 +13,7 @@ const env = `
   var Audio = FakeAudio, URL = {createObjectURL:()=> 'blob:', revokeObjectURL(){}};
   var apiHeaders = h => h, fetch = () => incFetch();
   function beginTurn(){ begun++; } function startBrowserRecognition(){}
+  var turnT = {}, markT = () => {};
 `;
 const tick = () => new Promise(r => setTimeout(r, 5));
 const run = new Function('FakeAudio','plays','getBegun','incBegun','incFetch', env.replace('begun++','incBegun()') + code + `
@@ -51,5 +52,27 @@ let api = run(FakeAudio, plays, () => begun, () => begun++, () => { fetches++;
   const FILLER = eval('(' + src.match(/^const FILLER = (.*);$/m)[1] + ')');
   check(['Hmm.', 'Uh.', 'Mm.', 'Um...', '.', ''].every(t => FILLER.test(t)), 'filler transcripts are ignored');
   check(!['Yes.', 'No.', 'Okay.', 'Yeah', 'Hmm, what time is it?', 'Ah, open the brain'].some(t => FILLER.test(t)), 'real words are kept');
+  // 8. barge-in: his own echo never triggers it, your louder voice does,
+  //    and a false trigger makes it less sensitive
+  const bargeSrc = pick('// ── barge-in: talk over Atlas', 'function beginTurn(){');
+  const B = new Function(`
+    let clock = 0, speaking = true, amp = 0, stops = 0, aborts = 0;
+    var performance = {now: () => clock}, localStorage = {getItem: () => null};
+    var document = {body: {classList: {contains: c => c === 'speaking' && speaking}}};
+    var window = {}, convo = true, running = true, activeController = {abort(){ aborts++; }};
+    var vdata = new Uint8Array(64), analyser = {getByteTimeDomainData(d){ d.fill(128 + Math.round(amp * 127)); }};
+    var log = () => {}, apiHeaders = h => h, fetch = () => Promise.resolve(), stopSpeech = () => { stops++; };
+    ${bargeSrc}
+    return {
+      run(a, ms){ amp = a; for (let t = 0; t < ms; t += 40){ clock += 40; bargeCheck(); } },
+      stops: () => stops, aborts: () => aborts, barged: () => bargedTurn, factor: () => bargeFactor,
+      result: r => bargeResult(r),
+    };`)();
+  B.run(0.03, 600);  B.run(0.03, 2000);
+  check(B.stops() === 0, 'his own echo never interrupts him');
+  B.run(0.12, 400);
+  check(B.stops() === 1 && B.aborts() === 1 && B.barged(), 'talking over him stops speech and cancels the run');
+  B.result(false);
+  check(B.factor() > 2.5 && !B.barged(), 'a false interruption makes barge-in less sensitive');
   process.exit(ok ? 0 : 1);
 })();

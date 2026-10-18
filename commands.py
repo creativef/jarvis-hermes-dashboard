@@ -5,6 +5,7 @@ Local commands keep the HUD fast for mission control/status while prompts and
 unknown slash commands are handed to Hermes Agent. Hermes-native tool access comes
 from the runtime subprocess (`hermes chat -q ...`) using the configured profile.
 """
+import copy
 import datetime
 import json
 import os
@@ -28,9 +29,9 @@ _DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "missions
 def _load_unlocked():
     try:
         d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        return {**_DEFAULT, **d}
+        return {**copy.deepcopy(_DEFAULT), **d}
     except (OSError, json.JSONDecodeError):
-        return dict(_DEFAULT)
+        return copy.deepcopy(_DEFAULT)      # never hand out the shared default lists
 
 
 def load():
@@ -120,6 +121,20 @@ def set_settings(updates):
         cleaned["user_name"] = name
     if "greeting" in updates:
         cleaned["greeting"] = bool(updates["greeting"])
+    if "voice" in updates:
+        v = str(updates["voice"]).strip()
+        if not re.fullmatch(r"[a-z]{2}_[a-z]+", v):
+            return None, f"invalid voice: {v}"
+        cleaned["voice"] = v
+    if "voice_speed" in updates:
+        import voice
+        try:
+            sp = round(float(updates["voice_speed"]), 2)
+        except (TypeError, ValueError):
+            return None, "voice speed must be a number"
+        if not (voice.SPEED_MIN <= sp <= voice.SPEED_MAX):
+            return None, f"voice speed must be between {voice.SPEED_MIN} and {voice.SPEED_MAX}"
+        cleaned["voice_speed"] = sp
     def _merge(d):
         d.setdefault("settings", {}).update(cleaned)
     update_state(_merge)
@@ -388,6 +403,42 @@ def _normalize_fast_query(message):
     return " ".join(q.split())
 
 
+_STOP_QUERIES = {"stop", "stop talking", "stop it", "be quiet", "quiet", "shush", "hush",
+                 "never mind", "nevermind", "cancel", "that's all", "thats all", "enough"}
+_REPEAT_QUERIES = {"repeat", "repeat that", "say that again", "say again", "what did you say",
+                   "come again", "pardon", "sorry what", "i missed that"}
+_SLOWER_QUERIES = {"slower", "speak slower", "talk slower", "slow down", "a bit slower"}
+_FASTER_QUERIES = {"faster", "speak faster", "talk faster", "speed up", "a bit faster"}
+_FRESH_QUERIES = {"new topic", "start over", "fresh start", "change of subject", "let's start over",
+                  "lets start over", "new conversation"}
+
+
+def _voice_control(q):
+    """Things you say to Atlas *about the conversation*. Answered at once, no model call."""
+    if q in _STOP_QUERIES:
+        return dict(message=None, reply="", note="voice: stop", intent="stop", fast_path=True)
+    if q in _REPEAT_QUERIES:
+        last = next((t.get("assistant") for t in reversed(get_history()) if t.get("assistant")), "")
+        return dict(message=None, reply=last or "I haven't said anything yet.",
+                    note="voice: repeat", intent="repeat", fast_path=True)
+    if q in _SLOWER_QUERIES or q in _FASTER_QUERIES:
+        import voice
+        step = -0.1 if q in _SLOWER_QUERIES else 0.1
+        new = round(min(voice.SPEED_MAX, max(voice.SPEED_MIN, voice.KOKORO_SPEED + step)), 2)
+        if new == round(voice.KOKORO_SPEED, 2):
+            reply = "That's as slow as I go." if step < 0 else "That's as fast as I go."
+        else:
+            cleaned, _ = set_settings({"voice_speed": new})
+            voice.apply_settings(cleaned or {})
+            reply = "Slower it is." if step < 0 else "Faster it is."
+        return dict(message=None, reply=reply, note=f"voice speed {voice.KOKORO_SPEED}",
+                    intent="speed", fast_path=True)
+    if q in _FRESH_QUERIES:
+        return dict(fresh=True, message=None, reply="Fresh start.", note="Hermes thread reset",
+                    intent="fresh", fast_path=True)
+    return None
+
+
 def _status_reply():
     """One spoken line: what's running and how Atlas hears and speaks. Read aloud, so no paths."""
     import voice
@@ -544,6 +595,10 @@ def fast_path(message):
                  "I track operations, coordinate departments, and prepare actions for your approval.")
         return dict(message=None, reply=reply, note="fast-path: identity",
                     intent="who_are_you", fast_path=True)
+
+    hit = _voice_control(q)
+    if hit:
+        return hit
 
     hit = _brain_intent(q)
     if hit:

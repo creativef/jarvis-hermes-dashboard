@@ -127,6 +127,14 @@ Normal text and voice requests go directly to Hermes Agent.
   - Heads-up: `hermes gateway run` also runs Hermes' cron scheduler and any messaging platforms you've configured. Don't start a second one if you already run a gateway; point `JARVIS_API_URL` at it.
   - With `approvals.mode: smart` (Hermes default) low-risk commands are auto-approved and only uncertain ones prompt; use `hermes config set approvals.mode manual` to be asked every time.
 
+## Talking to Atlas
+
+- **Interrupt him by talking.** Speak over Atlas and he stops and listens (Settings → "Talk over Atlas"). It learns how loud his own voice is in your mic; if it ever cuts him off by itself it gets less sensitive, and headphones make it reliable.
+- **Instant commands, no model call:** "stop", "repeat that", "slower" / "faster", "new topic".
+- **Space while you're talking** sends right away instead of waiting for the 1.2 s pause.
+- **Voice and speed** are in Settings and apply from the next sentence.
+- Each voice turn logs one **TIMING** line (you→text · →first word · →voice) so you can see which step is slow.
+
 ## Architecture
 
 ```text

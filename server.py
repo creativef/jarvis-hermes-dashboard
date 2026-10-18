@@ -59,6 +59,7 @@ import voice            # noqa: E402
 
 # Apply any UI-persisted settings (stored in state.json) over the env defaults.
 runtime.apply_settings(commands.get_settings())
+voice.apply_settings(commands.get_settings())
 
 PORT = int(os.environ.get("JARVIS_PORT", "8730"))
 API_TOKEN = secrets.token_urlsafe(32)
@@ -117,6 +118,9 @@ def _merged_settings():
     st = commands.get_settings()
     out["user_name"] = st.get("user_name", "")
     out["greeting"] = st.get("greeting", True)
+    out["voice"] = voice.KOKORO_VOICE
+    out["voice_speed"] = voice.KOKORO_SPEED
+    out["voices"] = list(voice.VOICES)
     return out
 
 
@@ -429,6 +433,7 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._json({"error": err}, 400)
             runtime.apply_settings(cleaned)
+            voice.apply_settings(cleaned)
             return self._json(_merged_settings())
 
         if p == "/api/run":

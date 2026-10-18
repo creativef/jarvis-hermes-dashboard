@@ -25,6 +25,10 @@ WORKER = HERE / "voice_worker.py"
 KOKORO_VOICE = os.environ.get("JARVIS_KOKORO_VOICE", "bm_george")   # British male
 KOKORO_SPEED = float(os.environ.get("JARVIS_KOKORO_SPEED", "1.0"))
 LOCAL_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel")          # `say` fallback
+# Kokoro voices offered in Settings (first letter: a = US, b = British; second: f/m).
+VOICES = ("bm_george", "bm_daniel", "bm_fable", "bm_lewis", "am_adam", "am_michael",
+          "bf_emma", "bf_isabella", "af_heart")
+SPEED_MIN, SPEED_MAX = 0.6, 1.6
 WARM_TIMEOUT = 600      # first run downloads models
 REQ_TIMEOUT = 60
 
@@ -38,6 +42,15 @@ _AUDIO_CACHE = {}
 _AUDIO_CACHE_LOCK = threading.Lock()
 _AUDIO_CACHE_MAX = 64
 SHORT_CACHE_MAX_CHARS = 180
+
+def apply_settings(settings):
+    """Use the voice / speed chosen in Settings (state.json) from the next sentence on."""
+    global KOKORO_VOICE, KOKORO_SPEED
+    if settings.get("voice"):
+        KOKORO_VOICE = str(settings["voice"])
+    if settings.get("voice_speed"):
+        KOKORO_SPEED = float(settings["voice_speed"])
+
 
 def clear_audio_cache():
     with _AUDIO_CACHE_LOCK:

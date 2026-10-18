@@ -57,6 +57,20 @@ function usageBlock(u){
     + `\n  }\n}`;
 }
 
+// ── per-turn timing: heard (end of your speech) → text → sent → first word → voice ──
+let turnT = {};
+const markT = k => { if (turnT[k] == null) turnT[k] = performance.now(); };
+function logTiming(){
+  const T = turnT, sec = (a, b) => ((T[b] - T[a]) / 1000).toFixed(2) + 's';
+  const parts = [];
+  if (T.heard != null && T.text != null) parts.push('you→text ' + sec('heard', 'text'));
+  if (T.sent != null && T.token != null) parts.push('→first word ' + sec('sent', 'token'));
+  if (T.token != null && T.voice != null) parts.push('→voice ' + sec('token', 'voice'));
+  const start = T.heard ?? T.sent, end = T.voice ?? T.token;
+  if (parts.length && start != null && end != null)
+    log('latency', 'TIMING', parts.join(' · ') + ` · total ${((end - start) / 1000).toFixed(2)}s`);
+}
+
 // ── the run ──
 let running = false, answer = '', firstDelta = false, speakThisRun = true;
 let speakDone = Promise.resolve(), activeController = null;
@@ -72,6 +86,8 @@ async function transmit(message, options = {}){
   running = true; answer = ''; firstDelta = false; speakThisRun = options.speak !== false;
   currentUser = message;
   const pausedMic = pauseListening();      // typed while the mic is open: don't let him hear himself
+  if (!options.voice) turnT = {};
+  markT('sent');
 
   const fresh = /^\/new\b/.test(message.trim());
   const id = rid();
@@ -126,6 +142,7 @@ async function transmit(message, options = {}){
   running = false;
   clearInterval(tick);
   await speakDone;                 // don't return until Jarvis has finished talking
+  logTiming(); turnT = {};
   if (pausedMic) resumeListening();
 }
 
@@ -136,6 +153,7 @@ function handle(ev){
         `core online · profile=${ev.profile||'default'} permission=${ev.permission||'normal'}`);
       break;
     case 'latency':
+      markT('token');
       log('latency', 'LATENCY', `first token after ${ev.ms}ms`);
       break;
     case 'tool':
@@ -294,6 +312,7 @@ function speak(text, audio){
         u.rate = 0.95; u.pitch = 0.82; u.volume = 1;
         document.body.classList.add('speaking');
         u.onend = u.onerror = finish;
+        u.onstart = () => { if (turnT.token != null) markT('voice'); };
         speechSynth.speak(u);
       }catch(_){ finish(); }
       return;
@@ -309,6 +328,7 @@ function speak(text, audio){
         document.body.classList.add('speaking');
         const done = () => { URL.revokeObjectURL(url); finish(); };
         player.onended = player.onerror = player.onpause = done;
+        if (turnT.token != null) markT('voice');
         return player.play();
       })
       .catch(finish);
@@ -392,7 +412,7 @@ function startBrowserRecognition(){
     $('#input').value = ''; disarm();
     log('send','SEND',`auto-sent voice: ${full}`);
     suppress = true;                            // deaf while he thinks and speaks
-    await transmit(full);
+    await transmit(full, {voice: true});
     suppress = false;
     if (convo) setTimeout(startBrowserRecognition, 350);
   };
@@ -401,11 +421,56 @@ function startBrowserRecognition(){
 }
 
 // ── one server-side local-STT listening turn ──
+// ── barge-in: talk over Atlas to stop him ──
+// While he speaks, the mic keeps measuring. For the first 600ms of each line it learns
+// how loud his own voice is in the mic (echo); after that, anything clearly louder,
+// held for 300ms, is you: he stops, the run is cancelled, and your turn starts.
+// If a barge-in turns out to be nothing (no words), it gets less sensitive.
+let bargeOn = (() => { try { return localStorage.getItem('jarvis.barge') !== '0'; } catch(_){ return true; } })();
+let bargeFactor = 2.5, bargedTurn = false, speakStart = 0, echoPeak = 0, bargeSince = 0, lastThreshold = 0.02;
+
+function bargeCheck(){                          // true while Atlas is speaking (normal VAD is paused)
+  const talking = document.body.classList.contains('speaking');
+  if (!bargeOn || !talking || !analyser || !convo || window.__approvalOpen){ speakStart = 0; bargeSince = 0; return false; }
+  analyser.getByteTimeDomainData(vdata);
+  let s = 0; for (let i = 0; i < vdata.length; i++){ const v = (vdata[i] - 128) / 128; s += v * v; }
+  const rms = Math.sqrt(s / vdata.length), t = performance.now();
+  if (!speakStart){ speakStart = t; echoPeak = 0; }
+  if (t - speakStart < 600){ echoPeak = Math.max(echoPeak, rms); return true; }
+  if (rms > Math.max(0.04, echoPeak * bargeFactor)){
+    if (!bargeSince) bargeSince = t;
+    else if (t - bargeSince > 300) bargeIn();
+  } else bargeSince = 0;
+  return true;
+}
+
+function bargeIn(){
+  bargeSince = 0; speakStart = 0; bargedTurn = true;
+  log('voice', 'VOICE', 'you talked over Atlas — listening');
+  window.AtlasOrb?.bargeIn?.();
+  if (running && activeController){
+    fetch('/api/cancel', {method:'POST', headers:apiHeaders({'content-type':'application/json'}), body:'{}'}).catch(()=>{});
+    activeController.abort();
+  }
+  stopSpeech();                                 // → the turn ends → beginTurn() picks you up
+}
+
+// Was the last barge-in real speech? If not, make it harder to trigger.
+function bargeResult(real){
+  if (!bargedTurn) return;
+  bargedTurn = false;
+  if (!real){
+    bargeFactor = Math.min(8, bargeFactor * 1.6);
+    log('voice', 'VOICE', `false interruption — barge-in made less sensitive (×${bargeFactor.toFixed(1)})`);
+  }
+}
+
 function beginTurn(){
   if (!convo || suppress || !micStream) return;
   if (recorder && recorder.state === 'recording'){ recorder._cancel = true; try{ recorder.stop(); }catch(_){} }
   spoke = false; peak = 0;
   floorSum = 0; floorN = 0; calibrating = true; threshold = 0.02;
+  if (bargedTurn){ calibrating = false; threshold = lastThreshold; spoke = true; }
   // chunks belong to their recorder, so a late chunk can't leak into the next turn
   const rec = recorder = new MediaRecorder(micStream, pickMime()), parts = [];
   rec.ondataavailable = e => { if (e.data?.size) parts.push(e.data); };
@@ -423,6 +488,7 @@ function meter(rms){
 }
 
 function endTurn(reason){
+  turnT = {}; markT('heard');
   log('voice','VOICE',`${reason} · peak ${peak.toFixed(3)} · thr ${threshold.toFixed(3)}`);
   try { recorder.stop(); } catch(_){}           // → ship()
 }
@@ -434,6 +500,7 @@ function pickMime(){
 }
 
 function vtick(){
+  if (bargeCheck()) return;
   if (!analyser || suppress || !recorder || recorder.state!=='recording') return;
   analyser.getByteTimeDomainData(vdata);
   let s=0; for (let i=0;i<vdata.length;i++){ const v=(vdata[i]-128)/128; s+=v*v; }
@@ -448,7 +515,7 @@ function vtick(){
     if (t - turnStart > 300){
       const floor = floorSum / Math.max(1, floorN);
       threshold = Math.max(0.006, floor * 1.6 + 0.003);
-      calibrating = false;
+      calibrating = false; lastThreshold = threshold;
     }
     return;
   }
@@ -470,6 +537,7 @@ async function ship(rec, parts){
   const blob = new Blob(parts, {type: rec.mimeType || 'audio/webm'});
   // no speech heard, too short, or too small — just listen again, don't ship ambient noise
   if (!spoke || blob.size < 1400 || performance.now()-turnStart < MIN_TURN_MS){
+    bargeResult(false);
     if (convo && !suppress) beginTurn();
     return;
   }
@@ -484,12 +552,14 @@ async function ship(rec, parts){
     const ms = Math.round(performance.now() - t0);
     if (!text){
       log(r.error ? 'error' : 'voice', 'VOICE', r.error ? `speech engine: ${r.error}` : 'nothing transcribed');
+      bargeResult(false);
       suppress = false;
       if (convo) beginTurn(); else setState('','STANDBY','nothing heard');
       return;
     }
     if (FILLER.test(text)){
       log('voice','VOICE',`ignored "${text}" (noise, not a request)`);
+      bargeResult(false);
       suppress = false;
       if (convo) beginTurn();
       return;
@@ -499,7 +569,9 @@ async function ship(rec, parts){
     const full = (armed ? armed + ' ' : '') + text;
     $('#input').value = ''; disarm();
     log('send','SEND',`auto-sent voice: ${full}`);
-    await transmit(full);                       // runs, then speaks; both with mic deaf
+    markT('text');
+    bargeResult(true);
+    await transmit(full, {voice: true});        // runs, then speaks; both with mic deaf
     // turn's done — hand the floor back and listen again
     suppress = false;
     if (convo) beginTurn();
@@ -1177,6 +1249,37 @@ setInterval(async () => {
     if ((ev.t === 'complete' || ev.t === 'error') && cur) close();
     return original(ev);
   };
+})();
+
+// ══════════ settings: voice, speed, barge-in ══════════
+(() => {
+  const label = v => {
+    const [kind, name] = String(v).split('_');
+    return `${(name || v)[0].toUpperCase()}${(name || v).slice(1)} · ${kind?.[0] === 'b' ? 'British' : 'American'}`;
+  };
+  $('#settingsBtn').addEventListener('click', async () => {
+    $('#set-barge').checked = bargeOn;
+    try {
+      const s = await fetch('/api/settings', {headers: apiHeaders()}).then(r => r.json());
+      const voices = s.voices || [];
+      if (s.voice && !voices.includes(s.voice)) voices.unshift(s.voice);
+      $('#set-voice').innerHTML = voices.map(v => `<option value="${esc(v)}">${esc(label(v))}</option>`).join('');
+      $('#set-voice').value = s.voice || '';
+      $('#set-speed').value = s.voice_speed ?? 1;
+    } catch(_){}
+  });
+  $('#settingsSave').addEventListener('click', async () => {
+    bargeOn = $('#set-barge').checked;
+    try { localStorage.setItem('jarvis.barge', bargeOn ? '1' : '0'); } catch(_){}
+    const body = {voice_speed: parseFloat($('#set-speed').value)};
+    if ($('#set-voice').value) body.voice = $('#set-voice').value;
+    try {
+      const r = await fetch('/api/settings', {method:'POST', headers: apiHeaders({'content-type':'application/json'}),
+        body: JSON.stringify(body)}).then(r => r.json());
+      if (r.error) log('error', 'SETTINGS', r.error);
+      else log('note', 'SETTINGS', `voice ${r.voice} at ${r.voice_speed}× · barge-in ${bargeOn ? 'on' : 'off'}`);
+    } catch(_){ log('error', 'SETTINGS', 'could not save voice settings'); }
+  });
 })();
 
 // ══════════ settings: provider + model (read-only) ══════════
