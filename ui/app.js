@@ -73,6 +73,7 @@ function logTiming(){
 
 // ── the run ──
 let running = false, answer = '', firstDelta = false, speakThisRun = true;
+let inTransmit = 0, pendingTurn = null;   // a turn said while paused waits for the current answer to finish
 let speakDone = Promise.resolve(), activeController = null;
 let history = [], currentUser = '';
 
@@ -83,7 +84,7 @@ async function transmit(message, options = {}){
     log('note','BUSY',`still working — "${message.slice(0,40)}" not sent. Wait, or press Esc to cancel.`);
     return;
   }
-  running = true; answer = ''; firstDelta = false; speakThisRun = options.speak !== false;
+  running = true; inTransmit++; answer = ''; firstDelta = false; speakThisRun = options.speak !== false;
   currentUser = message;
   const pausedMic = pauseListening();      // typed while the mic is open: don't let him hear himself
   if (!options.voice) turnT = {};
@@ -108,7 +109,7 @@ async function transmit(message, options = {}){
     activeController = new AbortController();
     const res = await fetch('/api/run', {
       method:'POST', headers:apiHeaders({'content-type':'application/json'}),
-      body: JSON.stringify({message, fresh}), signal:activeController.signal
+      body: JSON.stringify({message, fresh, system: options.system || undefined}), signal:activeController.signal
     });
     if (!res.ok) throw new Error(`backend returned HTTP ${res.status}`);
     const reader = res.body.getReader();
@@ -143,6 +144,13 @@ async function transmit(message, options = {}){
   clearInterval(tick);
   await speakDone;                 // don't return until Jarvis has finished talking
   logTiming(); turnT = {};
+  // You interrupted with something new: the answer above has finished (so Hermes kept it
+  // in the session); now send what you said, with a note of where he was cut off.
+  while (pendingTurn){
+    const p = pendingTurn; pendingTurn = null;
+    await transmit(p.text, {voice: true, system: p.system});
+  }
+  inTransmit--;
   if (pausedMic) resumeListening();
 }
 
@@ -281,7 +289,31 @@ function say(text){
   return ttsChain;
 }
 
+// Pause keeps the current line and everything queued after it; resumeSpeech() replays
+// the interrupted line from its start and carries on. stopSpeech() still drops it all.
+let speechPaused = false, resumeWaiters = [], currentLine = '';
+const untilResumed = () => speechPaused ? new Promise(r => resumeWaiters.push(r)) : Promise.resolve();
+function pauseSpeech(){
+  if (speechPaused) return;
+  speechPaused = true;
+  if (player && !player.paused){ try{ player.pause(); }catch(_){} }   // onpause holds, doesn't finish
+  try{ speechSynth?.pause(); }catch(_){}
+  document.body.classList.remove('speaking');
+}
+function resumeSpeech(){
+  if (!speechPaused) return;
+  speechPaused = false;
+  if (player && player._held){
+    player._held = false; player.currentTime = 0;
+    document.body.classList.add('speaking');
+    player.play().catch(() => player.onerror?.());
+  }
+  try{ if (speechSynth?.paused){ speechSynth.resume(); document.body.classList.add('speaking'); } }catch(_){}
+  resumeWaiters.splice(0).forEach(r => r());
+}
+
 function stopSpeech(){
+  speechPaused = false; resumeWaiters.splice(0).forEach(r => r());
   speechEpoch++;                                // anything still queued is dropped
   if (player){ try{ player.pause(); }catch(_){} }
   try{ speechSynth?.cancel(); }catch(_){}
@@ -313,7 +345,7 @@ function speak(text, audio){
       finished = true;
       if (endSpeech === finish) endSpeech = null;
       document.body.classList.remove('speaking');
-      if (pausedMic) resumeListening();
+      if (pausedMic && !inTransmit) resumeListening();   // inside a turn, the turn re-opens the mic
       resolve();
     };
     endSpeech = finish;
@@ -324,13 +356,14 @@ function speak(text, audio){
         u.rate = 0.95; u.pitch = 0.82; u.volume = 1;
         document.body.classList.add('speaking');
         u.onend = u.onerror = finish;
-        u.onstart = () => { if (turnT.token != null) markT('voice'); };
+        u.onstart = () => { currentLine = spoken; if (turnT.token != null) markT('voice'); };
         speechSynth.speak(u);
       }catch(_){ finish(); }
       return;
     }
     if (!RT.tts) return finish();
     (audio || fetchAudio(spoken))
+      .then(blob => untilResumed().then(() => blob))   // paused between lines: wait
       .then(blob => {
         if (finished) return;                   // stopped while the audio was being made
         if (!blob) return finish();
@@ -339,7 +372,10 @@ function speak(text, audio){
         player = new Audio(url);
         document.body.classList.add('speaking');
         const done = () => { URL.revokeObjectURL(url); finish(); };
-        player.onended = player.onerror = player.onpause = done;
+        const me = player;
+        player.onended = player.onerror = done;
+        player.onpause = () => { if (speechPaused) me._held = true; else done(); };
+        currentLine = spoken;
         if (turnT.token != null) markT('voice');
         return player.play();
       })
@@ -433,13 +469,20 @@ function startBrowserRecognition(){
 }
 
 // ── one server-side local-STT listening turn ──
-// ── barge-in: talk over Atlas to stop him ──
-// While he speaks, the mic keeps measuring. For the first 600ms of each line it learns
+// ── barge-in: talk over Atlas (or tap Space) to pause him ──
+// While he speaks, the mic keeps measuring. For the first second of each line it learns
 // how loud his own voice is in the mic (echo); after that, anything clearly louder,
-// held for 300ms, is you: he stops, the run is cancelled, and your turn starts.
-// If a barge-in turns out to be nothing (no words), it gets less sensitive.
+// held for 300ms, is you. He PAUSES — the answer keeps being written in the background —
+// and listens. Then what you said decides:
+//   nothing / noise / "go on"   → he picks up from the start of the interrupted line
+//   "wait", "hold on"           → stays paused and keeps listening
+//   "stop", "never mind"        → drops the rest
+//   anything else               → drops the rest and answers you, knowing where he was cut off
+// A false trigger (nothing said) makes barge-in less sensitive.
 let bargeOn = (() => { try { return localStorage.getItem('jarvis.barge') !== '0'; } catch(_){ return true; } })();
-let bargeFactor = 2.5, bargedTurn = false, speakStart = 0, echoPeak = 0, bargeSince = 0, lastThreshold = 0.02;
+let bargeFactor = 1.8, bargedTurn = false, bargeSpoke = false, interruptedLine = '';
+let speakStart = 0, echoPeak = 0, bargeSince = 0, lastThreshold = 0.02;
+const ECHO_LEARN_MS = 1000;
 
 function bargeCheck(){                          // true while Atlas is speaking (normal VAD is paused)
   const talking = document.body.classList.contains('speaking');
@@ -448,7 +491,7 @@ function bargeCheck(){                          // true while Atlas is speaking 
   let s = 0; for (let i = 0; i < vdata.length; i++){ const v = (vdata[i] - 128) / 128; s += v * v; }
   const rms = Math.sqrt(s / vdata.length), t = performance.now();
   if (!speakStart){ speakStart = t; echoPeak = 0; }
-  if (t - speakStart < 600){ echoPeak = Math.max(echoPeak, rms); return true; }
+  if (t - speakStart < ECHO_LEARN_MS){ echoPeak = Math.max(echoPeak, rms); return true; }
   if (rms > Math.max(0.04, echoPeak * bargeFactor)){
     if (!bargeSince) bargeSince = t;
     else if (t - bargeSince > 300) bargeIn();
@@ -456,15 +499,27 @@ function bargeCheck(){                          // true while Atlas is speaking 
   return true;
 }
 
-function bargeIn(){
+function bargeIn(via = 'voice'){
   bargeSince = 0; speakStart = 0; bargedTurn = true;
-  log('voice', 'VOICE', 'you talked over Atlas — listening');
+  bargeSpoke = via === 'voice';                 // talked over him: you're already speaking
+  interruptedLine = currentLine;
+  log('voice', 'VOICE', via === 'voice' ? 'you talked over Atlas — paused, listening' : 'paused — listening');
   window.AtlasOrb?.bargeIn?.();
-  if (running && activeController){
-    fetch('/api/cancel', {method:'POST', headers:apiHeaders({'content-type':'application/json'}), body:'{}'}).catch(()=>{});
-    activeController.abort();
-  }
-  stopSpeech();                                 // → the turn ends → beginTurn() picks you up
+  pauseSpeech();                                // NOT a cancel: the answer finishes and stays in the session
+  suppress = false;
+  beginTurn();
+}
+
+// What you said after interrupting him.
+const HOLD_RE   = /^(?:wait|hold on|hang on|one (?:sec|second|moment)|just a (?:sec|second|moment)|pause|give me a (?:sec|second))\b[\s\S]{0,12}$/i;
+const RESUME_RE = /^(?:go on|continue|carry on|keep going|go ahead|sorry,? (?:go on|go ahead|continue)|never ?mind,? (?:go on|continue)|ok(?:ay)?,? (?:go on|continue))[\s.,!?]*$/i;
+const STOP_RE   = /^(?:stop|stop talking|stop it|be quiet|quiet|shush|hush|never ?mind|cancel|that'?s all|enough|ok(?:ay)? stop)[\s.,!?]*$/i;
+function interjectionKind(text){
+  const t = String(text || '').trim();
+  if (!t || FILLER.test(t) || RESUME_RE.test(t)) return 'resume';
+  if (HOLD_RE.test(t)) return 'hold';
+  if (STOP_RE.test(t)) return 'stop';
+  return 'say';
 }
 
 // Was the last barge-in real speech? If not, make it harder to trigger.
@@ -482,7 +537,8 @@ function beginTurn(){
   if (recorder && recorder.state === 'recording'){ recorder._cancel = true; try{ recorder.stop(); }catch(_){} }
   spoke = false; peak = 0;
   floorSum = 0; floorN = 0; calibrating = true; threshold = 0.02;
-  if (bargedTurn){ calibrating = false; threshold = lastThreshold; spoke = true; }
+  if (bargedTurn && bargeSpoke){ calibrating = false; threshold = lastThreshold; spoke = true; }
+  bargeSpoke = false;
   // chunks belong to their recorder, so a late chunk can't leak into the next turn
   const rec = recorder = new MediaRecorder(micStream, pickMime()), parts = [];
   rec.ondataavailable = e => { if (e.data?.size) parts.push(e.data); };
@@ -550,6 +606,7 @@ async function ship(rec, parts){
   // no speech heard, too short, or too small — just listen again, don't ship ambient noise
   if (!spoke || blob.size < 1400 || performance.now()-turnStart < MIN_TURN_MS){
     bargeResult(false);
+    if (speechPaused){ suppress = true; resumeSpeech(); return; }   // you said nothing: carry on
     if (convo && !suppress) beginTurn();
     return;
   }
@@ -562,6 +619,7 @@ async function ship(rec, parts){
       headers:apiHeaders({'content-type':blob.type||'audio/webm'}), body:blob}).then(r=>r.json());
     const text = (r.text||'').trim();
     const ms = Math.round(performance.now() - t0);
+    if (speechPaused) return afterInterruption(text);
     if (!text){
       log(r.error ? 'error' : 'voice', 'VOICE', r.error ? `speech engine: ${r.error}` : 'nothing transcribed');
       bargeResult(false);
@@ -597,6 +655,32 @@ async function ship(rec, parts){
 // Noise often transcribes as a lone "Hmm." or "Uh." — don't spend a Hermes turn on it.
 // Real one-word answers ("yes", "no", "okay") are kept.
 const FILLER = /^(?:u+h+|u+m+|h+m+|m+h*m+|a+h+|o+h+|e+r+m*|huh|mhm|uh-huh)?[\s.,!?…-]*$/i;
+
+// You talked over Atlas and he paused; this is what you said (already transcribed).
+async function afterInterruption(text){
+  const kind = interjectionKind(text);
+  bargeResult(!!text.trim() && !FILLER.test(text));     // noise or silence → less sensitive next time
+  if (text) log('voice', 'VOICE', `while paused you said: "${text}" → ${kind}`);
+  if (kind === 'resume'){ suppress = true; resumeSpeech(); return; }
+  if (kind === 'hold'){ suppress = false; if (convo) beginTurn(); return; }   // still paused, still listening
+  suppress = true;
+  const cutAt = interruptedLine;
+  speakThisRun = false;                         // sentences still arriving for that answer stay silent
+  stopSpeech();                                 // drop the unspoken rest
+  if (kind === 'stop'){ cancelRun(); return; }  // like Esc: end it now so the mic comes straight back
+  const system = 'The user interrupted you while you were speaking. The last thing they heard you say was: "'
+    + cutAt.slice(0, 300) + '". Nothing after that was heard. Respond to what they just said; '
+    + 'if your earlier point still matters, finish it briefly afterwards.';
+  log('send', 'SEND', `interjection: ${text}`);
+  if (inTransmit){                              // sent as soon as the current answer finishes
+    pendingTurn = {text, system};
+    if (running) log('note', 'QUEUED', 'Atlas is still finishing that answer — your point goes next');
+    return;
+  }
+  await transmit(text, {voice: true, system});
+  suppress = false;
+  if (convo) beginTurn();
+}
 
 // ══════════ command matrix ══════════
 function disarm(){
@@ -686,14 +770,16 @@ $('#settingsSave').onclick = async () => {
 };
 document.querySelectorAll('[data-quick]').forEach(b => b.onclick = () =>
   transmit(b.dataset.quick, {speak:false}));
+function cancelRun(){
+  if (!running || !activeController) return false;
+  fetch('/api/cancel', {method:'POST', headers:apiHeaders({'content-type':'application/json'}), body:'{}'}).catch(()=>{});
+  activeController.abort();
+  return true;
+}
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
-  if (running && activeController){
-    fetch('/api/cancel', {method:'POST', headers:apiHeaders({'content-type':'application/json'}), body:'{}'}).catch(()=>{});
-    activeController.abort();
-    stopSpeech();
-    return;
-  }
+  if (cancelRun()){ stopSpeech(); return; }
+  if (speechPaused){ stopSpeech(); return; }    // paused: drop the rest, keep listening
   if (document.body.classList.contains('speaking')){ stopSpeech(); return; }   // first Esc hushes him
   if (convo) stopConvo();
 });
@@ -904,6 +990,7 @@ setInterval(async () => {
     if (callMode) return 'call';
     if (window.__approvalOpen) return 'ask';
     if (!convo) return 'closed';
+    if (speechPaused && !suppress) return 'listening';
     if (suppress || document.body.classList.contains('running') || document.body.classList.contains('speaking')) return 'busy';
     return 'listening';
   }
@@ -944,6 +1031,8 @@ setInterval(async () => {
     if (pending) return;
     if (window.__approvalOpen) return;          // the approval prompt owns the mic right now
     if (callMode){ toast('Call mode is on — press Alt+C to exit first'); return; }
+    // he's talking: Space pauses him and listens (no voice detection needed)
+    if (convo && micStream && document.body.classList.contains('speaking')){ bargeIn('space'); return; }
     // mid-sentence: Space means "I'm done" — send now instead of waiting for silence
     if (convo && spoke && !suppress && recorder && recorder.state === 'recording'){ endTurn('sent with Space'); return; }
     pending = true;

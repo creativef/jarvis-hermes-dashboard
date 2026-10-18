@@ -129,7 +129,10 @@ Normal text and voice requests go directly to Hermes Agent.
 
 ## Talking to Atlas
 
-- **Interrupt him by talking.** Speak over Atlas and he stops and listens (Settings → "Talk over Atlas"). It learns how loud his own voice is in your mic; if it ever cuts him off by itself it gets less sensitive, and headphones make it reliable.
+- **Interrupt him by talking (or tap Space).** He *pauses*, he doesn't lose the answer, and listens. Then:
+  say nothing or "go on" → he picks up from the start of that sentence · "wait" / "hold on" → stays paused ·
+  "stop" → drops the rest · anything else → he answers that, knowing exactly where you cut him off.
+  It learns how loud his own voice is in your mic; if it triggers by itself it gets less sensitive. Headphones make it reliable. Toggle: Settings → "Talk over Atlas". Esc still cancels outright.
 - **Instant commands, no model call:** "stop", "repeat that", "slower" / "faster", "new topic".
 - **Space while you're talking** sends right away instead of waiting for the 1.2 s pause.
 - **Voice and speed** are in Settings and apply from the next sentence.
