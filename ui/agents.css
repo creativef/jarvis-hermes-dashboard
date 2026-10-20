@@ -38,3 +38,7 @@
 #navAgents[data-count]:not([data-count=""])::after{content:attr(data-count);margin-left:8px;padding:1px 7px;border-radius:999px;font-family:var(--mono);font-size:10.5px;color:var(--bg);background:var(--amber)}
 @media (max-width:700px){.ag-grid{grid-template-columns:1fr}.agents-body{padding:14px}}
 @media (prefers-reduced-motion:reduce){.st-running .ag-dot,.ag-live:before{animation:none}}
+.ag-stop{margin-left:6px;cursor:pointer;background:transparent;border:1px solid var(--edge);border-radius:999px;color:var(--text);font-size:11.5px;font-weight:600;padding:3px 11px}
+.ag-stop:hover{border-color:var(--red)}
+.ag-stop.armed{background:var(--red);border-color:var(--red);color:#fff}
+.ag-stop:disabled{opacity:.6;cursor:default}

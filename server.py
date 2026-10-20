@@ -54,6 +54,7 @@ if _env.exists():
 
 import commands         # noqa: E402
 import brain            # noqa: E402
+import brief            # noqa: E402
 import runtime          # noqa: E402
 import voice            # noqa: E402
 
@@ -321,6 +322,10 @@ class Handler(BaseHTTPRequestHandler):
                 inbox_root=inb.get("root", ""),
                 pod=pod_items,
             ))
+        if p == "/api/brief":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json(brief.state())
         if p == "/api/jobs":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -350,7 +355,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._token_ok():
             return self._json({"error": "unauthorized"}, 401)
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
-        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval", "/api/inbox", "/api/brain/note", "/api/brain/link"} and ctype != "application/json":
+        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval", "/api/inbox",
+                 "/api/brain/note", "/api/brain/link", "/api/agents/stop", "/api/brief"} and ctype != "application/json":
             return self._json({"error": "application/json required"}, 415)
         if p == "/api/listen" and not ctype.startswith("audio/"):
             return self._json({"error": "audio content type required"}, 415)
@@ -391,6 +397,22 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._json({"ok": False, "error": err}, 409 if err.startswith("conflict") else 400)
             return self._json({"ok": True, "note": res})
+
+        if p == "/api/brief":
+            # {"refresh": true} = fetch now; {"auto": true} = only if today's isn't done/started
+            body = self._obj(raw)
+            if body is None:
+                return self._json({"error": "payload must be a JSON object"}, 400)
+            return self._json(brief.start(force=bool(body.get("refresh"))))
+
+        if p == "/api/agents/stop":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            body = self._obj(raw)
+            if body is None:
+                return self._json({"error": "payload must be a JSON object"}, 400)
+            res, err = commands.stop_job(body.get("id"))
+            return self._json({"ok": False, "error": err} if err else {"ok": True, **res}, 409 if err else 200)
 
         if p == "/api/speak":
             body = self._obj(raw)

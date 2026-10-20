@@ -2424,7 +2424,9 @@ setInterval(async () => {
 (() => {
   'use strict';
   const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
-  const data = {greeting: '', date: '', agents: [], running: 0, brainCount: 0, brainDepts: [], collapsed: false};
+  const data = {greeting: '', date: '', agents: [], running: 0, brainCount: 0, brainDepts: [], collapsed: false,
+                pulse: null};          // GET /api/brief: business + calendar, fetched by a quiet Hermes helper
+  let pulseTimer = null;
   window.AtlasBrief = {data, focus(){ const b = document.getElementById('brief'); if (b) b.scrollIntoView({behavior: 'smooth', block: 'start'}); }, refresh};
 
   function fmtWhen(ts){
@@ -2462,9 +2464,55 @@ setInterval(async () => {
     } catch (_) {}
     data.agents = out.agents; data.running = out.running;
     data.brainCount = out.brainCount; data.brainDepts = out.brainDepts;
+    await loadPulse();
     data.date = new Date().toLocaleDateString([], {weekday: 'long', month: 'long', day: 'numeric'});
     window.dispatchEvent(new CustomEvent('atlas-brief'));
     render();
+  }
+
+  // ── business + calendar: once a day by itself, ↻ for a fresh fetch ──
+  async function loadPulse(post){
+    try {
+      const r = await fetch('/api/brief', post
+        ? {method: 'POST', headers: apiHeaders({'content-type': 'application/json'}), body: JSON.stringify(post)}
+        : {headers: apiHeaders(), cache: 'no-store'});
+      if (r.ok) data.pulse = await r.json();
+    } catch (_) {}
+    if (!post && data.pulse && data.pulse.auto) return loadPulse({auto: true});
+    clearTimeout(pulseTimer);
+    if (data.pulse && data.pulse.status === 'running')     // watch the helper until it lands
+      pulseTimer = setTimeout(async () => { await loadPulse(); render(); }, 6000);
+  }
+
+  function pulseBody(kind){
+    const p = data.pulse, rows = (p && p.data && p.data[kind]) || [];
+    if (rows.length){
+      const html = rows.map(x => kind === 'business'
+        ? `<div class="bc-item"><span class="bci-t">${esc(x.label)}</span><span class="bci-m">${esc(x.value)}</span></div>`
+        : `<div class="bc-item"><span class="bci-t">${esc(x.what)}</span><span class="bci-m">${esc(x.when)}</span></div>`).join('');
+      const when = p.data.fetched ? new Date(p.data.fetched * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
+      return html + (p.status === 'running' ? '<span class="bc-empty">refreshing…</span>'
+                                             : when ? `<span class="bc-empty">updated ${esc(when)}</span>` : '');
+    }
+    if (!p) return '<span class="bc-empty">Brief data unavailable.</span>';
+    if (p.status === 'running') return '<span class="bc-empty">Asking Hermes for today\'s numbers…</span>';
+    if (p.status === 'failed') return `<span class="bc-empty">${esc(p.error || 'Hermes couldn\'t fetch it.')}</span>`;
+    const why = ((p.data && p.data.missing) || []).filter(m => kind === 'calendar'
+      ? /calendar|event|birthday/i.test(m) : !/calendar|event|birthday/i.test(m));
+    if (p.status === 'ready') return `<span class="bc-empty">${esc(why[0] || 'Nothing to report.')}</span>`;
+    return kind === 'business'
+      ? '<span class="bc-empty">Connect a store in Hermes, then press ↻.</span>'
+      : '<span class="bc-empty">Connect a calendar in Hermes, then press ↻.</span>';
+  }
+
+  function pulseLines(){
+    const d = data.pulse && data.pulse.data;
+    if (!d || (!d.business.length && !d.calendar.length))
+      return ['Business and calendar are not connected in Hermes yet.'];
+    const out = [];
+    if (d.business.length) out.push('Business: ' + d.business.slice(0, 4).map(x => `${x.label}, ${x.value}`).join('; ') + '.');
+    if (d.calendar.length) out.push('Coming up: ' + d.calendar.slice(0, 4).map(x => `${x.what}, ${x.when}`).join('; ') + '.');
+    return out;
   }
 
   function sentence(){
@@ -2511,15 +2559,23 @@ setInterval(async () => {
         ${card('--cyan', 'Running', data.running, runningHtml)}
         ${card('--green', 'Overnight', recent.length, overnightHtml)}
         ${card('--dept-3', 'Second brain', data.brainCount, brainHtml)}
-        ${card('--dept-4', 'Business pulse', null, '<span class="bc-empty">Connect a store to see sales, orders and ad spend.</span>')}
-        ${card('--dept-5', 'Family & calendar', null, '<span class="bc-empty">Connect a calendar to see the dates that matter.</span>')}
+        ${card('--dept-4', 'Business pulse' + refreshBtn(), null, pulseBody('business'))}
+        ${card('--dept-5', 'Family & calendar' + refreshBtn(), null, pulseBody('calendar'))}
       </div></div>`;
     host.querySelectorAll('[data-brief]').forEach(b => b.addEventListener('click', () => {
       const act = b.dataset.brief;
       if (act === 'collapse'){ data.collapsed = true; render(); }
       else if (act === 'expand'){ data.collapsed = false; render(); }
       else if (act === 'play') playBrief();
+      else if (act === 'pulse' && !(data.pulse && data.pulse.status === 'running'))
+        loadPulse({refresh: true}).then(render);
     }));
+  }
+
+  function refreshBtn(){
+    const busy = data.pulse && data.pulse.status === 'running';
+    return `<button type="button" class="bc-refresh" data-brief="pulse" title="${busy ? 'Fetching…' : 'Ask Hermes for fresh numbers'}"
+      aria-label="Refresh business and calendar" ${busy ? 'disabled' : ''}>↻</button>`;
   }
 
   function playBrief(){
@@ -2532,7 +2588,7 @@ setInterval(async () => {
         ? `${data.agents.filter(a => a.status === 'done' || a.status === 'failed').length} missions finished overnight.`
         : 'Nothing finished overnight.',
       data.brainCount ? `Your second brain holds ${data.brainCount} notes.` : 'Your second brain is empty.',
-      'Business and calendar are not connected yet. Connect them to hear the full brief.'
+      ...pulseLines()
     ];
     say(lines.join(' '));
   }

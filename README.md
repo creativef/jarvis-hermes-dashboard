@@ -129,6 +129,11 @@ Normal text and voice requests go directly to Hermes Agent.
   - Heads-up: `hermes gateway run` also runs Hermes' cron scheduler and any messaging platforms you've configured. Don't start a second one if you already run a gateway; point `JARVIS_API_URL` at it.
   - With `approvals.mode: smart` (Hermes default) low-risk commands are auto-approved and only uncertain ones prompt; use `hermes config set approvals.mode manual` to be asked every time.
 
+## Morning brief and helper jobs
+
+- **Business pulse / Family & calendar cards:** once a day, the first time the brief shows, a quiet helper asks Hermes (read-only) for yesterday's and today's orders, revenue and ad spend from any store or ad account you've connected in Hermes, plus your next few days of events. Results land in `logs/brief/<date>.json`; **↻** on either card fetches fresh numbers. If the last fetch found nothing connected, it stops fetching by itself until you press ↻.
+- **Stopping a helper:** in the **Agents** tab, press **Stop** then **Confirm stop** on a running job. Atlas only signals the process it can verify is that job's worker; a worker that already died is simply marked stopped.
+
 ## Talking to Atlas
 
 - **Interrupt him by talking (or tap Space).** He *pauses*, he doesn't lose the answer, and listens. Then:

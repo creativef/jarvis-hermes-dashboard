@@ -1,4 +1,4 @@
-// Atlas · Agents live activity view. Read-only: polls /api/agents (loopback + token).
+// Atlas · Agents live activity view: polls /api/agents (loopback + token); Stop asks /api/agents/stop.
 (() => {
   const TOKEN = document.querySelector('meta[name="jarvis-token"]')?.content || '';
   const btn = document.getElementById('navAgents');
@@ -17,6 +17,7 @@
   const body = ov.querySelector('#agBody'), sum = ov.querySelector('#agSum'), live = ov.querySelector('#agLive');
 
   let data = null, timer = null, fetchedAt = 0, expanded = new Set(), lastErr = '';
+  const armed = new Set(), stopping = new Set();      // two clicks to stop: arm, then confirm
 
   const dur = s => {
     if (s == null) return '—';
@@ -25,7 +26,7 @@
     return h ? `${h}h ${String(m).padStart(2, '0')}m` : m ? `${m}m ${String(x).padStart(2, '0')}s` : `${x}s`;
   };
   const clock = t => t ? new Date(t * 1000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'}) : '—';
-  const LABEL = {running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled'};
+  const LABEL = {running: 'Running', done: 'Done', failed: 'Failed', stalled: 'Stalled', stopped: 'Stopped'};
 
   function card(a){
     const running = a.status === 'running' || a.status === 'stalled';
@@ -36,7 +37,9 @@
     return `<article class="ag-card st-${esc(a.status)}${a.diagnostic ? ' diag' : ''}" data-id="${esc(a.id)}">
       <header><span class="ag-dot"></span><b class="ag-name">${esc(a.name)}</b>
         ${a.diagnostic ? '<span class="ag-tag">diagnostic</span>' : ''}
-        <span class="ag-status">${esc(LABEL[a.status] || a.status)}</span></header>
+        <span class="ag-status">${esc(LABEL[a.status] || a.status)}</span>
+        ${running ? `<button type="button" class="ag-stop${armed.has(a.id) ? ' armed' : ''}" data-stop="${esc(a.id)}"
+          ${stopping.has(a.id) ? 'disabled' : ''}>${stopping.has(a.id) ? 'Stopping…' : armed.has(a.id) ? 'Confirm stop' : 'Stop'}</button>` : ''}</header>
       <div class="ag-brief${open ? ' open' : ''}">${esc(open || !long ? a.brief : a.brief.slice(0, 180) + '…')}</div>
       ${running ? `<div class="ag-step"><span class="ag-k">${a.status === 'stalled' ? 'Last seen' : 'Now'}</span><span class="ag-v">${esc(a.step || '—')}</span></div>` : ''}
       <div class="ag-meta"><span>Started <b>${esc(clock(a.started))}</b></span>
@@ -86,6 +89,22 @@
     setBadge();
     if (!ov.hidden) render();
   }
+  async function stopJob(id){
+    if (!armed.has(id)){                              // first click arms; it disarms itself after 4s
+      armed.add(id); render();
+      setTimeout(() => { if (armed.delete(id)) render(); }, 4000);
+      return;
+    }
+    armed.delete(id); stopping.add(id); render();
+    try {
+      const r = await fetch('/api/agents/stop', {method: 'POST', cache: 'no-store',
+        headers: {'x-jarvis-token': TOKEN, 'content-type': 'application/json'}, body: JSON.stringify({id})});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok){ live.classList.add('err'); live.textContent = `STOP FAILED · ${j.error || r.status}`; }
+    } catch (_) { live.classList.add('err'); live.textContent = 'STOP FAILED · server unreachable'; }
+    setTimeout(() => { stopping.delete(id); poll(); }, 1500);
+  }
+
   function schedule(){
     clearTimeout(timer);
     timer = setTimeout(async () => { await poll(); schedule(); }, ov.hidden ? 8000 : 2000);
@@ -105,6 +124,8 @@
     if (e.target === ov) return close();
     const m = e.target.closest('[data-more]');
     if (m){ const id = m.dataset.more; expanded.has(id) ? expanded.delete(id) : expanded.add(id); render(); }
+    const s = e.target.closest('[data-stop]');
+    if (s && !s.disabled) stopJob(s.dataset.stop);
   });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !ov.hidden){ e.stopPropagation(); close(); } }, true);
   if (window.AtlasNav) AtlasNav.views.agents = {open, close, isOpen: () => !ov.hidden};

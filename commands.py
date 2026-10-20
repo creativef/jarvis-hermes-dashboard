@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -205,8 +206,60 @@ def take_finished():
                 path.write_text(json.dumps(j), encoding="utf-8")
             except OSError:
                 continue
-            done.append(j)
+            if not j.get("quiet"):                 # quiet = internal fetches, e.g. the brief
+                done.append(j)
     return done
+
+
+_JID = re.compile(r"^[A-Za-z0-9]{1,32}$")
+
+
+def _mark_stopped(path):
+    with _JOB_LOCK:
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if job.get("status") == "running":
+            job.update(status="stopped", result="Stopped by you.", finished=time.time(), reported=True)
+            path.write_text(json.dumps(job), encoding="utf-8")
+
+
+def stop_job(jid):
+    """Stop a running helper job. Only ever signals a process that `ps` shows is
+    *that job's* worker (never a recycled pid). A worker that already died is just
+    marked stopped. Returns (result, error)."""
+    if not _JID.match(str(jid or "")):
+        return None, "invalid job id"
+    path = HANDOFF_DIR / f"{jid}.json"
+    try:
+        job = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "no such job"
+    if job.get("status") != "running":
+        return None, "that job is not running"
+    pid = _worker_pids().get(jid)
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)       # the worker stops Hermes and records "stopped"
+        except ProcessLookupError:
+            pid = None
+        except PermissionError:
+            return None, "not allowed to stop that process"
+    if not pid:
+        _mark_stopped(path)
+        return {"id": jid, "stopped": True}, None
+
+    def _escalate():
+        time.sleep(10)
+        if _worker_pids().get(jid) == pid:     # still the same worker: force it
+            try:
+                os.killpg(pid, signal.SIGKILL)  # worker + its Hermes child (own session)
+            except OSError:
+                pass
+        _mark_stopped(path)
+    threading.Thread(target=_escalate, daemon=True).start()
+    return {"id": jid, "stopping": True}, None
 
 
 # ── Agents tab: every running / recent sub-agent job (read-only) ────────

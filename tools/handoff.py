@@ -10,6 +10,7 @@ once when it lands. Nothing here binds a port or touches the network.
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import time
@@ -46,12 +47,17 @@ def _write(path, data):
     os.replace(tmp, path)
 
 
-def launch(mission):
+def launch(mission, quiet=False):
+    """Start a detached helper; returns its job id. `quiet` jobs (e.g. the morning
+    brief's data fetch) are not announced when they finish."""
     HANDOFF_DIR.mkdir(parents=True, exist_ok=True)
     jid = uuid.uuid4().hex[:8]
     path = HANDOFF_DIR / f"{jid}.json"
-    _write(path, {"id": jid, "status": "running", "mission": mission[:200],
-                  "result": "", "started": time.time(), "finished": None})
+    job = {"id": jid, "status": "running", "mission": mission[:200],
+           "result": "", "started": time.time(), "finished": None}
+    if quiet:
+        job["quiet"] = True
+    _write(path, job)
     subprocess.Popen([sys.executable, str(pathlib.Path(__file__).resolve()),
                       "--worker", jid, mission],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -86,6 +92,8 @@ def worker(jid, mission):
     job["pid"] = os.getpid()
     _write(path, job)
     status, text, final = "done", "", ""
+    stopped = threading.Event()
+    old_term = None
     try:
         with open(log_path, "a", encoding="utf-8") as log, open(err_path, "w") as err:
             proc = subprocess.Popen(runtime.build_command(mission, None), stdin=subprocess.PIPE,
@@ -99,6 +107,15 @@ def worker(jid, mission):
                 except OSError:
                     pass
             threading.Thread(target=feed, daemon=True).start()
+
+            def _stop(*_):                    # "Stop" in the Agents tab sends us SIGTERM
+                stopped.set()
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+            if threading.current_thread() is threading.main_thread():
+                old_term = signal.signal(signal.SIGTERM, _stop)
             killer = threading.Timer(3600, proc.kill)
             killer.daemon = True
             killer.start()
@@ -127,9 +144,15 @@ def worker(jid, mission):
             status, text = "failed", (tail or "helper exited with an error")[-260:]
     except Exception as e:  # noqa: BLE001
         status, text = "failed", f"{e}"[:260]
+    finally:
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
     job = json.loads(path.read_text(encoding="utf-8"))
-    job.update(status=status, result=text or "Finished with nothing to report.",
-               finished=time.time())
+    if stopped.is_set():
+        job.update(status="stopped", result="Stopped by you.", finished=time.time(), reported=True)
+    else:
+        job.update(status=status, result=text or "Finished with nothing to report.",
+                   finished=time.time())
     _write(path, job)
 
 

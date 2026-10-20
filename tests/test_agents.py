@@ -42,6 +42,59 @@ class AgentsSnapshotTests(unittest.TestCase):
             self.assertNotIn("reported", json.loads((d / "done0003.json").read_text()))
 
 
+class StopJobTests(unittest.TestCase):
+    def _job(self, d, jid, **kw):
+        job = {"id": jid, "status": "running", "mission": "m", "result": "", "started": time.time(),
+               "finished": None}
+        job.update(kw)
+        (d / f"{jid}.json").write_text(json.dumps(job))
+
+    def test_stop_signals_only_the_verified_worker(self):
+        import signal
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "live0001", pid=11111)        # the file's pid is NOT trusted
+            with mock.patch.object(commands, "HANDOFF_DIR", d), \
+                    mock.patch.object(commands, "_worker_pids", return_value={"live0001": 22222}), \
+                    mock.patch.object(commands.os, "kill") as kill, \
+                    mock.patch.object(commands.threading, "Thread"):
+                res, err = commands.stop_job("live0001")
+            self.assertIsNone(err)
+            self.assertTrue(res["stopping"])
+            kill.assert_called_once_with(22222, signal.SIGTERM)
+
+    def test_dead_worker_is_just_marked_stopped(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "dead0002", pid=999999)
+            with mock.patch.object(commands, "HANDOFF_DIR", d), \
+                    mock.patch.object(commands, "_worker_pids", return_value={}), \
+                    mock.patch.object(commands.os, "kill") as kill:
+                res, err = commands.stop_job("dead0002")
+                announced = commands.take_finished()
+            kill.assert_not_called()
+            job = json.loads((d / "dead0002.json").read_text())
+            self.assertEqual((job["status"], job["reported"]), ("stopped", True))
+            self.assertEqual(announced, [])               # a stop you asked for isn't "announced"
+
+    def test_rejects_bad_ids_and_finished_jobs(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "done0003", status="done")
+            with mock.patch.object(commands, "HANDOFF_DIR", d):
+                self.assertEqual(commands.stop_job("../../etc/passwd")[1], "invalid job id")
+                self.assertEqual(commands.stop_job("nope0000")[1], "no such job")
+                self.assertEqual(commands.stop_job("done0003")[1], "that job is not running")
+
+    def test_quiet_jobs_are_not_announced(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "q0000001", status="done", quiet=True, finished=time.time())
+            with mock.patch.object(commands, "HANDOFF_DIR", d):
+                self.assertEqual(commands.take_finished(), [])
+            self.assertTrue(json.loads((d / "q0000001.json").read_text())["reported"])
+
+
 class HandoffWorkerTests(unittest.TestCase):
     def test_worker_streams_progress_and_result(self):
         import sys
@@ -94,6 +147,39 @@ class HandoffWorkerTests(unittest.TestCase):
             job = json.loads((d / "w0000002.json").read_text())
             self.assertEqual(applied, [{"permission": "normal", "user_name": "Dana"}])
             self.assertEqual(job["result"], "named")
+
+    def test_sigterm_stops_hermes_and_records_stopped(self):
+        # a real detached worker process: SIGTERM must end Hermes and leave "stopped"
+        import signal
+        import subprocess
+        import sys
+        from tools import handoff
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            jid = "sig00001"
+            (d / f"{jid}.json").write_text(json.dumps(
+                {"id": jid, "status": "running", "mission": "x", "result": "",
+                 "started": time.time(), "finished": None}))
+            code = (
+                "import sys,types,json,pathlib\n"
+                f"sys.path.insert(0,{str(pathlib.Path(handoff.__file__).parent.parent)!r})\n"
+                "from tools import handoff\n"
+                f"handoff.HANDOFF_DIR=pathlib.Path({td!r})\n"
+                f"handoff.STATE_FILE=pathlib.Path({td!r})/'none.json'\n"
+                "slow=[sys.executable,'-c','import time,sys;sys.stdin.read();print(\"{}\",flush=True);time.sleep(60)']\n"
+                "sys.modules['runtime']=types.SimpleNamespace(build_command=lambda m,s: slow, WORKDIR=None,"
+                " apply_settings=lambda s: None, user_name=lambda: 'x')\n"
+                f"handoff.worker({jid!r},'x')\n")
+            proc = subprocess.Popen([sys.executable, "-c", code])
+            for _ in range(100):                          # wait for the worker to record its pid
+                time.sleep(0.05)
+                if "pid" in json.loads((d / f"{jid}.json").read_text()):
+                    break
+            time.sleep(0.3)
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=10)
+            job = json.loads((d / f"{jid}.json").read_text())
+            self.assertEqual((job["status"], job["result"]), ("stopped", "Stopped by you."))
 
 
 if __name__ == "__main__":
