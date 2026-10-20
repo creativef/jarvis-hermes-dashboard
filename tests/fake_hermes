@@ -48,6 +48,9 @@ def main(argv):
         emit({"type": "text", "text": "hello"})
         emit({"type": "result", "session_id": session_id, "exit_code": 0, "text": "hello",
               "tokens": {"input": 10, "output": 2, "total": 12, "cache_read": 0, "cache_write": 0}})
+        exit_stall = int(os.environ.get("FAKE_HERMES_EXIT_STALL_MS", "0"))
+        if exit_stall:
+            time.sleep(exit_stall / 1000.0)  # slow shutdown after the answer (MCP, memory save)
         return 0
     print("fake hermes: unknown args", file=sys.stderr)
     return 2

@@ -18,12 +18,26 @@ import uuid
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HANDOFF_DIR = ROOT / "logs" / "handoff"
 
-RULES = (
-    "You are a helper working for Atlas on a job for Mr Thompson. Do the job fully "
-    "and carefully. Never send messages or emails, spend money, or commit him to "
-    "anything. When finished, reply with one or two plain spoken sentences "
-    "stating the outcome: no markdown, no lists, no process narration.\n\nJOB:\n"
-)
+STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
+
+
+def _settings():
+    """The dashboard's Settings (state.json). Read directly: importing commands would
+    reconcile the live server's state as a side effect."""
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8")).get("settings") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def rules(name=""):
+    who = name or "the user"
+    return (
+        f"You are a helper working for Atlas on a job for {who}. Do the job fully "
+        "and carefully. Never send messages or emails, spend money, or commit them to "
+        "anything. When finished, reply with one or two plain spoken sentences "
+        "stating the outcome: no markdown, no lists, no process narration.\n\nJOB:\n"
+    )
 
 
 def _write(path, data):
@@ -60,6 +74,11 @@ def worker(jid, mission):
     sys.path.insert(0, str(ROOT))
     import runtime
     import threading
+    settings = _settings()
+    # Same permission / working folder / timeout as the Settings panel shows, not
+    # just whatever the environment says (the UI may have tightened .env's choice).
+    runtime.apply_settings(settings)
+    name = str(settings.get("user_name") or "").strip() or runtime.user_name()
     path = HANDOFF_DIR / f"{jid}.json"
     log_path = HANDOFF_DIR / f"{jid}.log"
     err_path = HANDOFF_DIR / f"{jid}.err"
@@ -75,7 +94,7 @@ def worker(jid, mission):
 
             def feed():
                 try:
-                    proc.stdin.write(RULES + mission)
+                    proc.stdin.write(rules(name) + mission)
                     proc.stdin.close()
                 except OSError:
                     pass

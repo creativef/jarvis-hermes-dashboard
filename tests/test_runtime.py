@@ -107,6 +107,39 @@ class IdleTimeoutTests(unittest.TestCase):
         self.assertIn("error", kinds)
 
 
+class CancelAndShutdownTests(unittest.TestCase):
+    def _env(self, td, **extra):
+        env = {"HERMES_CMD": f"{sys.executable} {FAKE}",
+               "FAKE_HERMES_LOG": str(pathlib.Path(td) / "fake.log")}
+        env.update(extra)
+        return env
+
+    def test_user_stop_is_a_cancel_not_an_error(self):
+        # Esc kills Hermes (exit -15). That must come out as `cancelled`, because the
+        # server forgets the conversation on `error`.
+        import threading
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, self._env(td, FAKE_HERMES_STALL_MS="5000"), clear=False), \
+             mock.patch.object(runtime, "RUNTIME", "hermes"), \
+             mock.patch.object(runtime, "BACKEND", "cli"):
+            runtime._TTL_CACHE.clear()
+            threading.Timer(0.8, runtime.cancel_active).start()
+            events = list(runtime.run("hi", None, None))
+        kinds = [e.get("t") for e in events]
+        self.assertIn("cancelled", kinds)
+        self.assertNotIn("error", kinds)
+
+    def test_slow_exit_after_answer_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, self._env(td, FAKE_HERMES_EXIT_STALL_MS="7000"), clear=False), \
+             mock.patch.object(runtime, "RUNTIME", "hermes"):
+            runtime._TTL_CACHE.clear()
+            events = list(runtime.run("hi", None, None))
+        kinds = [e.get("t") for e in events]
+        self.assertIn("complete", kinds)
+        self.assertNotIn("error", kinds)
+
+
 class UserNameTests(unittest.TestCase):
     def test_falls_back_to_os_user(self):
         name = runtime.user_name()

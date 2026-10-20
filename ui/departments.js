@@ -1,5 +1,5 @@
 /* Atlas · Departments view — three switchable layouts (grid · sidebar · orbit).
-   Data: window.AtlasData (atlas-data.js — loaded from /api/departments, with a built-in fallback).
+   Data: window.AtlasData (atlas-data.js — loaded from /api/departments).
    Self-contained overlay; styles live in departments.css and use theme variables only.
    Linked to the Brain view through window.AtlasNav (open the matching notes / come back from a note). */
 (() => {
@@ -124,7 +124,9 @@
     ov.querySelectorAll('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === view)));
     ov.dataset.view = view;
     const keep = body.scrollTop;
-    body.innerHTML = view === 'sidebar' ? sidebarView() : view === 'orbit' ? orbitView() : gridView();
+    body.innerHTML = !D.length
+      ? '<div class="ag-empty">No departments yet. Add one as ~/Atlas/departments/&lt;slug&gt;/&lt;slug&gt;.md</div>'
+      : view === 'sidebar' ? sidebarView() : view === 'orbit' ? orbitView() : gridView();
     body.scrollTop = keep;
     const ob = body.querySelector(".ob-scroll"); if (ob && !keep) ob.scrollLeft = (ob.scrollWidth - ob.clientWidth) / 2;
     body.querySelector(".ds-nav .on")?.scrollIntoView({block: "nearest", inline: "center"});

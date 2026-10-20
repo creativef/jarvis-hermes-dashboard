@@ -11,8 +11,6 @@ import json
 import os
 import pathlib
 import re
-import shlex
-import shutil
 import subprocess
 import threading
 import time
@@ -23,7 +21,7 @@ import brain
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
 _LOCK = threading.Lock()
-_DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "missions": [], "session": None, "history": [], "settings": {}}
+_DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "session": None, "history": [], "settings": {}}
 
 
 def _load_unlocked():
@@ -156,44 +154,11 @@ def context_block():
     return "\n\n".join(out)
 
 
-JOBS = {}
-_JOB_LOCK = threading.Lock()
-
-
-def start_background(mission, runner):
-    jid = uuid.uuid4().hex[:8]
-    with _JOB_LOCK:
-        JOBS[jid] = {"id": jid, "status": "running", "mission": mission,
-                     "result": "", "started": time.time(), "finished": None}
-    update_state(lambda d: d["missions"].append(
-        {"id": jid, "mission": mission, "status": "running", "at": time.time()}))
-
-    def _work():
-        text = ""
-        status = "done"
-        try:
-            for ev in runner(mission):
-                if ev.get("t") == "delta":
-                    text += ev["text"]
-                elif ev.get("t") == "error":
-                    status = "failed"
-                    text = text or ("failed: " + str(ev.get("message", ""))[:260])
-        except Exception as e:  # noqa: BLE001
-            status = "failed"
-            text = f"failed: {e}"[:260]
-        with _JOB_LOCK:
-            JOBS[jid].update(status="done", result=text.strip(), finished=time.time())
-        def finish(d2):
-            for item in d2.get("missions", []):
-                if item.get("id") == jid:
-                    item.update(status=status, finished=time.time(), result=text.strip()[:500])
-        update_state(finish)
-
-    threading.Thread(target=_work, daemon=True).start()
-    return jid
-
-
+# Background work = detached tools/handoff.py helpers. They survive dashboard
+# restarts and log progress; /background launches one too.
 HANDOFF_DIR = ROOT / "logs" / "handoff"
+_JOB_LOCK = threading.Lock()          # two polling tabs must not both announce one job
+_KEEP_REPORTED_S = 30 * 86400          # announced jobs older than this are pruned
 
 
 def _handoff_jobs():
@@ -214,29 +179,30 @@ def _handoff_jobs():
 
 
 def jobs_snapshot():
-    with _JOB_LOCK:
-        mem = [dict(j) for j in JOBS.values()]
-    files = [{k: v for k, v in j.items() if k != "_path"}
-             for j in _handoff_jobs() if j.get("status") == "running"]
-    return mem + files
-
-
-def running_background():
-    with _JOB_LOCK:
-        return any(j["status"] == "running" for j in JOBS.values())
+    return [{k: v for k, v in j.items() if k != "_path"}
+            for j in _handoff_jobs() if j.get("status") == "running"]
 
 
 def take_finished():
+    """Finished helper jobs not announced yet, each returned exactly once.
+    Also prunes long-announced jobs so the folder doesn't grow forever."""
+    done, now = [], time.time()
     with _JOB_LOCK:
-        done = [dict(j) for j in JOBS.values() if j["status"] == "done"]
-        for j in done:
-            JOBS.pop(j["id"], None)
-    for j in _handoff_jobs():
-        if j.get("status") in ("done", "failed") and not j.get("reported"):
-            path = j.pop("_path")
+        for j in _handoff_jobs():
+            path = pathlib.Path(j.pop("_path"))
+            if j.get("reported"):
+                if (j.get("finished") or now) < now - _KEEP_REPORTED_S:
+                    for ext in (".json", ".log", ".err"):
+                        try:
+                            path.with_suffix(ext).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                continue
+            if j.get("status") not in ("done", "failed"):
+                continue
             j["reported"] = True
             try:
-                pathlib.Path(path).write_text(json.dumps(j), encoding="utf-8")
+                path.write_text(json.dumps(j), encoding="utf-8")
             except OSError:
                 continue
             done.append(j)
@@ -296,17 +262,13 @@ def _agent_name(mission):
 
 
 def agents_snapshot(limit=40):
-    """Running and recent handoff jobs (+ in-memory /background missions),
-    running first then newest first. Never mutates job files."""
+    """Running and recent handoff jobs, running first then newest first. Never mutates job files."""
     now = time.time()
     jobs = []
     for j in _handoff_jobs():
         j.pop("_path", None)
         j["kind"] = "handoff"
         jobs.append(j)
-    with _JOB_LOCK:
-        for j in JOBS.values():
-            jobs.append(dict(j, kind="background"))
     pids = _worker_pids() if any(j.get("status") == "running" for j in jobs) else {}
     out = []
     for j in jobs:
@@ -323,8 +285,6 @@ def agents_snapshot(limit=40):
                     step = step or "worker process is no longer running"
                 elif not step:
                     step = "working… (no live output captured for this job)"
-        elif status == "running":
-            step = "working inside the dashboard server"
         mission = j.get("mission") or ""
         out.append(dict(
             id=jid, kind=j["kind"], name=_agent_name(mission), brief=mission,
@@ -441,11 +401,10 @@ def _voice_control(q):
 
 def _status_reply():
     """One spoken line: what's running and how Atlas hears and speaks. Read aloud, so no paths."""
+    import runtime
     import voice
-    profile = os.environ.get("HERMES_PROFILE", os.environ.get("JARVIS_PROFILE", "default"))
-    with _JOB_LOCK:
-        mem = sum(1 for j in JOBS.values() if j.get("status") == "running")
-    running = mem + sum(1 for j in _handoff_jobs() if j.get("status") == "running")
+    profile = runtime.PROFILE
+    running = sum(1 for j in _handoff_jobs() if j.get("status") == "running")
     speaks = {"kokoro": "Kokoro", "local": "the Mac voice"}.get(voice.tts_engine(), "the browser voice")
     hears = "Parakeet" if voice.stt_engine() == "parakeet" else "browser speech recognition"
     jobs = (f"{running} background job{'s' if running != 1 else ''} running" if running
@@ -454,12 +413,8 @@ def _status_reply():
 
 
 def _fast_jobs_summary():
-    with _JOB_LOCK:
-        mem = [dict(j) for j in JOBS.values()]
-    handoff = _handoff_jobs()
-    running = [j for j in mem if j.get("status") == "running"]
-    done_count = sum(1 for j in mem if j.get("status") in ("done", "failed"))
-    for j in handoff:
+    running, done_count = [], 0
+    for j in _handoff_jobs():
         st = j.get("status")
         if st == "running":
             pid = j.get("pid")
@@ -591,7 +546,9 @@ def fast_path(message):
                     intent="help", fast_path=True)
 
     if q in _WHO_QUERIES:
-        reply = ("I am Atlas, Mr Thompson's chief-of-staff dashboard powered by Hermes Agent. "
+        name = str(get_settings().get("user_name") or "").strip()
+        whose = f"{name}'s" if name else "your"
+        reply = (f"I am Atlas, {whose} chief-of-staff dashboard powered by Hermes Agent. "
                  "I track operations, coordinate departments, and prepare actions for your approval.")
         return dict(message=None, reply=reply, note="fast-path: identity",
                     intent="who_are_you", fast_path=True)
@@ -615,22 +572,10 @@ def fast_path(message):
     return None
 
 
-route_intent = fast_path
-
-
-def _hermes_command(*args):
-    configured = os.environ.get("HERMES_CMD", "").strip()
-    if configured:
-        return shlex.split(configured) + list(args)
-    executable = shutil.which("hermes")
-    if executable:
-        return [executable, *args]
-    return ["python3", "-m", "hermes_cli.main", *args]
-
-
 def _shell(cmd, timeout=25):
+    import runtime
     try:
-        p = subprocess.run(cmd, text=True, cwd=os.getcwd(), stdout=subprocess.PIPE,
+        p = subprocess.run(cmd, text=True, cwd=runtime.WORKDIR, stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, timeout=timeout)
         return (p.stdout or p.stderr or "").strip()[:3500]
     except Exception as e:  # noqa: BLE001
@@ -658,7 +603,7 @@ def _commands_reply():
 You can also type normal Hermes prompts. Unknown slash commands are forwarded to Hermes."""
 
 
-def handle(message, runner=None):
+def handle(message):
     m = _CMD.match(message or "")
     if not m:
         return fast_path(message)
@@ -679,7 +624,8 @@ def handle(message, runner=None):
 
     if cmd in ("tools", "toolsets"):
         if cmd == "tools":
-            out = _shell(_hermes_command("tools", "list"))
+            import runtime
+            out = _shell(runtime._hermes_base() + ["tools", "list"])
             reply = out or "No tool list returned. Start from a shell where `hermes tools list` works, or set HERMES_CMD."
             return dict(message=None, reply=reply, note="Hermes tools listed")
         return dict(message="List my enabled Hermes toolsets and connected third-party tools. Include browser/Chrome availability if present. Keep it concise.", note="toolsets requested")
@@ -738,28 +684,8 @@ def handle(message, runner=None):
     if cmd == "background":
         if not arg:
             return dict(message=None, reply="Give me a mission.", note="background empty")
-        if runner is None:
-            return dict(message=None, reply="Background missions aren't available.", note="background unavailable")
-        jid = start_background(arg, runner)
+        from tools import handoff
+        jid = handoff.launch(arg)
         return dict(message=None, reply=f"Background Hermes mission {jid} launched. I'll report when it lands.", note=f"mission {jid} started: {arg[:50]}")
 
     return None
-
-
-def _reconcile_orphaned_missions():
-    """Missions marked 'running' in state.json were running in a now-dead process
-    (the JOBS registry is in-memory). On boot, mark them failed so they don't
-    linger as 'running' forever."""
-    d = _load_unlocked()
-    changed = False
-    for m in d.get("missions", []):
-        if m.get("status") == "running":
-            m["status"] = "failed"
-            m["finished"] = m.get("at", time.time())
-            m["result"] = m.get("result") or "interrupted by dashboard restart"
-            changed = True
-    if changed:
-        _save_unlocked(d)
-
-
-_reconcile_orphaned_missions()

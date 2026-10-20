@@ -1,8 +1,8 @@
-"""Headless-browser click test for the Atlas Brain graph (ui/app.js).
+"""Headless-browser click test for the Atlas Brain graph (ui/brain.js).
 
 The interaction maths is unit-tested in test_brain_graph_ui.py, but the complaint
 was behavioural: "nodes do not respond when I am clearly on them". This test drives
-the REAL page — the real ui/index.html, app.js and styles.css served by the real
+the REAL page — the real ui/index.html, app.js, brain.js and styles.css served by the real
 server.py — in headless Chrome over the DevTools Protocol and clicks the canvas at
 a node's *drawn* centre (and at an offset of several pixels) and asserts a selection
 happens. It also checks that nothing is eating pointer events over the canvas and

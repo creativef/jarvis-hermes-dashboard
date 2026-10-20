@@ -173,6 +173,11 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, body, code=200):
         data = json.dumps(body).encode()
         self.send_response(code)
+        if code >= 400:
+            # Rejections can happen before the body is read. On a kept-alive connection
+            # those unread bytes would be parsed as the next request, so close it.
+            self.close_connection = True
+            self.send_header("Connection", "close")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -194,6 +199,15 @@ class Handler(BaseHTTPRequestHandler):
         if n < 0 or n > limit:
             raise ValueError(f"request body exceeds {limit} bytes")
         return self.rfile.read(n) if n else b""
+
+    @staticmethod
+    def _obj(raw):
+        """Parse a JSON object body, or None for bad JSON / a non-object."""
+        try:
+            body = json.loads(raw or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        return body if isinstance(body, dict) else None
 
     def _host_ok(self):
         host = self.headers.get("Host", "")
@@ -232,14 +246,16 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/status":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
+            api_ok = runtime.api_backend_ready()
+            model = runtime.model_info()
             return self._json(dict(
                 runtime=runtime.runtime_kind(),
                 permission=runtime.PERMISSION,
                 profile=runtime.PROFILE,
                 source=runtime.SOURCE,
                 workdir=runtime.WORKDIR,
-                model=runtime.model_info()["model_name"],
-                model_provider=runtime.model_info()["model_provider"],
+                model=model["model_name"],
+                model_provider=model["model_provider"],
                 tools=runtime.hermes_tools_snapshot(),
                 browser_stt=True,
                 browser_tts=True,
@@ -248,8 +264,8 @@ class Handler(BaseHTTPRequestHandler):
                 tts=voice.tts_engine(),
                 voice_ready=voice.ready(),
                 session=SESSION["id"],
-                backend=("api" if runtime.api_backend_ready() else "cli"),
-                approvals=runtime.api_backend_ready()))
+                backend=("api" if api_ok else "cli"),
+                approvals=api_ok))
         if p == "/api/brain/graph":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -291,24 +307,15 @@ class Handler(BaseHTTPRequestHandler):
             snap = commands.agents_snapshot()
             inb = brain.inbox_list()
             pod_items = []
-            try:
-                import importlib
-                pod_mod = importlib.import_module("pod_engine")
-                if hasattr(pod_mod, "recent_items"):
-                    pod_items = pod_mod.recent_items()
-            except Exception:
-                pass
-            if not pod_items:
-                for n in ("pod-idea-queue", "concept-engine-review", "weekly-review-template"):
-                    found = brain.note(n)
-                    if found:
-                        pod_items.append({"id": found["id"], "path": found["path"],
-                                          "preview": (found["text"] or "")[:360]})
+            for n in ("pod-idea-queue", "concept-engine-review", "weekly-review-template"):
+                found = brain.note(n)
+                if found:
+                    pod_items.append({"id": found["id"], "path": found["path"],
+                                      "preview": (found["text"] or "")[:360]})
             return self._json(dict(
                 now=snap["now"],
                 running=snap["running"],
                 agents=snap["agents"],
-                missions=commands.load().get("missions", [])[-30:],
                 inbox=inb.get("items", [])[:30],
                 inbox_root=inb.get("root", ""),
                 pod=pod_items,
@@ -316,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/jobs":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
-            # finished background missions, reported once each
+            # finished helper jobs (handoff + /background), reported once each
             return self._json(dict(done=commands.take_finished(),
                                    running=[j for j in commands.jobs_snapshot()
                                             if j["status"] == "running"]))
@@ -355,10 +362,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/inbox":
             if self.client_address[0] not in ("127.0.0.1", "::1"):
                 return self._json({"error": "local only"}, 403)
-            try:
-                body = json.loads(raw or b"{}")
-            except json.JSONDecodeError:
-                return self._json({"error": "bad json"}, 400)
+            body = self._obj(raw)
+            if body is None:
+                return self._json({"error": "payload must be a JSON object"}, 400)
             if body.get("action") in ("file", "status", "discard"):
                 res, err = brain.inbox_action(body)
                 if err:
@@ -372,11 +378,8 @@ class Handler(BaseHTTPRequestHandler):
         if p in ("/api/brain/note", "/api/brain/link"):
             if self.client_address[0] not in ("127.0.0.1", "::1"):
                 return self._json({"error": "local only"}, 403)
-            try:
-                body = json.loads(raw or b"{}")
-            except json.JSONDecodeError:
-                return self._json({"error": "bad json"}, 400)
-            if not isinstance(body, dict):
+            body = self._obj(raw)
+            if body is None:
                 return self._json({"error": "payload must be a JSON object"}, 400)
             if p == "/api/brain/link":
                 res, err = brain.add_link(str(body.get("source") or ""), str(body.get("target") or ""))
@@ -389,8 +392,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "note": res})
 
         if p == "/api/speak":
+            body = self._obj(raw)
+            if body is None:
+                return self._json({"error": "payload must be a JSON object"}, 400)
             try:
-                text = (json.loads(raw or b"{}").get("text") or "").strip()
+                text = str(body.get("text") or "").strip()
                 data, mime = voice.speak(text)
                 return self._bytes(data, mime)
             except Exception as e:                        # noqa: BLE001
@@ -404,10 +410,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(e)[:300], "text": ""}, 503)
 
         if p == "/api/approval":
-            try:
-                body = json.loads(raw or b"{}")
-            except json.JSONDecodeError:
-                return self._json({"error": "bad json"}, 400)
+            body = self._obj(raw)
+            if body is None:
+                return self._json({"error": "payload must be a JSON object"}, 400)
             ok, res = runtime.resolve_approval(body.get("run_id"), body.get("request_id"), body.get("choice"))
             return self._json({"ok": True, **(res if isinstance(res, dict) else {})} if ok
                               else {"ok": False, "error": res}, 200 if ok else 409)
@@ -425,10 +430,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "stopped": stopped})
 
         if p == "/api/settings":
-            try:
-                updates = json.loads(raw or b"{}")
-            except json.JSONDecodeError:
-                return self._json({"error": "bad json"}, 400)
+            updates = self._obj(raw)
+            if updates is None:
+                return self._json({"error": "payload must be a JSON object"}, 400)
             cleaned, err = commands.set_settings(updates)
             if err:
                 return self._json({"error": err}, 400)
@@ -448,13 +452,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── the run: NDJSON stream of events ─────────────────────
     def _stream_run(self, raw):
-        try:
-            payload = json.loads(raw or b"{}")
-        except json.JSONDecodeError:
-            return self._json({"error": "bad json"}, 400)
-        message = (payload.get("message") or "").strip()
+        payload = self._obj(raw)
+        if payload is None:
+            return self._json({"error": "payload must be a JSON object"}, 400)
+        message = str(payload.get("message") or "").strip()
         original_message = message
-        extra = (payload.get("system") or "").strip()
+        extra = str(payload.get("system") or "").strip()
         system = "\n\n".join(x for x in (persona(), extra) if x) or None
         fresh = bool(payload.get("fresh"))
         if not message:
@@ -474,13 +477,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write((json.dumps(ev) + "\n").encode())
             self.wfile.flush()
 
-        # Background missions run in their own process, outside the execution
-        # lock, so they neither block nor get interrupted by this conversation.
-
         # ── the command matrix: /new /profile /goal /personality /kanban /mission /background /tools /status /browser
-        cmd = commands.handle(
-            message,
-            runner=lambda m: runtime.run_background(m, persona()))
+        # (/background hands the mission to a detached tools/handoff.py helper)
+        cmd = commands.handle(message)
         if cmd:
             if cmd.get("note"):
                 emit(dict(t="note", message=cmd["note"]))

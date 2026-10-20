@@ -135,13 +135,13 @@ def _user_name_raw():
     return name[:1].upper() + name[1:] if name else name
 
 
-# One Hermes subprocess at a time. Hermes session state and profile resources are
-# shared, so foreground runs and /background missions must not overlap. The active
-# process handle lets the browser Escape key stop the backend work, not just the
-# frontend fetch.
-EXECUTION_LOCK = threading.RLock()
+# The active foreground process handle lets the browser Escape key stop the backend
+# work, not just the frontend fetch. server.RUN_LOCK keeps it to one turn at a time.
 _ACTIVE_PROC = None
 _ACTIVE_LOCK = threading.Lock()
+# Set by cancel_active(). The error that follows a user stop is a cancel, not a
+# broken session, so the caller must keep the conversation.
+_CANCELLED = threading.Event()
 
 # Runtime probes (`hermes --version`, `hermes tools list`) are subprocess spawns
 # that can each take tens of seconds; cache them briefly so every request does
@@ -342,9 +342,19 @@ def prewarm_probes(background=False):
     return _warm()
 
 
+_HEALTH = {"at": -1e9, "ok": False}
+
+
 def api_backend_ready():
-    import api_backend
-    return BACKEND == "api" and api_backend.healthy(API_URL)
+    """Is the Hermes API server up? Cached for a few seconds: /api/status and every
+    turn ask, and a down server costs a 1.5s timeout each time."""
+    if BACKEND != "api":
+        return False
+    now = time.monotonic()
+    if now - _HEALTH["at"] > 5:
+        import api_backend
+        _HEALTH.update(at=now, ok=api_backend.healthy(API_URL))
+    return _HEALTH["ok"]
 
 
 def resolve_approval(run_id, request_id, choice):
@@ -354,6 +364,7 @@ def resolve_approval(run_id, request_id, choice):
 
 def cancel_active():
     """Terminate the currently running Hermes child process, if any."""
+    _CANCELLED.set()
     if BACKEND == "api":
         import api_backend
         if api_backend.cancel_active(API_URL, API_KEY):
@@ -482,17 +493,6 @@ def _tools_snapshot_raw(limit=36):
 
 
 def run_hermes(message, session_id=None, system=None):
-    with EXECUTION_LOCK:
-        yield from _run_hermes_locked(message, session_id, system)
-
-
-def run_background(message, system=None):
-    """Run a mission in its own Hermes process, outside the execution lock, so the
-    foreground conversation is never blocked or interrupted by it."""
-    yield from _run_hermes_locked(message, None, system, background=True)
-
-
-def _run_hermes_locked(message, session_id=None, system=None, background=False):
     global _ACTIVE_PROC
     started = _mono_ms()
     cmd = build_command(message, session_id)
@@ -519,9 +519,8 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
         proc = subprocess.Popen(cmd, cwd=WORKDIR, text=True, bufsize=1,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, env=child_env)
-        if not background:
-            with _ACTIVE_LOCK:
-                _ACTIVE_PROC = proc
+        with _ACTIVE_LOCK:
+            _ACTIVE_PROC = proc
     except FileNotFoundError:
         raise RuntimeError("Hermes CLI not found. Set HERMES_CMD to your Hermes executable.")
 
@@ -548,6 +547,8 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
                     raw.flush()
                 with lock:
                     q.append(ln)
+        except Exception:
+            pass                     # pipe closed under us; the main loop reports the exit
         finally:
             done.set()
 
@@ -662,8 +663,18 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
                     yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
                 yield dict(t="complete", session_id=result_session or session_id,
                            text=final_text, ms=_mono_ms() - started)
+                # The answer is in. Give Hermes a moment to exit, but a slow shutdown
+                # (MCP servers, saving memory) is not an error: it is reaped below.
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                return
 
-        rc = proc.wait(timeout=5)
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            rc = -1
         if not completed:
             if rc != 0:
                 err = " | ".join(list(errbuf)[-6:])
@@ -680,14 +691,26 @@ def _run_hermes_locked(message, session_id=None, system=None, background=False):
                 raw.close()
         except Exception:
             pass
-        if proc.poll() is None:
-            proc.terminate()
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            try:
-                if stream is not None:
-                    stream.close()
-            except Exception:
-                pass
+        if completed and proc.poll() is None:
+            # Answer delivered and Hermes is still shutting down: never kill it mid-save.
+            # The pump threads keep draining its pipes; reap it in the background.
+            def _reap(p=proc):
+                p.wait()
+                for s in (p.stdout, p.stderr):
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+            threading.Thread(target=_reap, daemon=True).start()
+        else:
+            if proc.poll() is None:
+                proc.terminate()
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except Exception:
+                    pass
         with _ACTIVE_LOCK:
             if _ACTIVE_PROC is proc:
                 _ACTIVE_PROC = None
@@ -701,6 +724,17 @@ def run_mock(message, session_id=None, system=None):
 
 
 def run(message, session_id=None, system=None):
+    """One foreground turn. An error caused by the user pressing stop is reported as
+    `cancelled` instead, so the caller keeps the conversation."""
+    _CANCELLED.clear()
+    for ev in _run(message, session_id, system):
+        if ev.get("t") == "error" and _CANCELLED.is_set():
+            yield dict(t="cancelled", message="stopped")
+            return
+        yield ev
+
+
+def _run(message, session_id=None, system=None):
     # Acknowledgement first; the UI only speaks it if no sentence arrives quickly.
     yield dict(t="ack", text=random.choice(ACKS), ms=0)
 
@@ -713,25 +747,24 @@ def run(message, session_id=None, system=None):
                 import api_backend
                 sbuf = SentenceBuffer()
                 started = _mono_ms()
-                with EXECUTION_LOCK:
-                    for ev in api_backend.run(
-                        message, session_id, build_prompt(message, system),
-                        base=API_URL, key=API_KEY, idle_timeout=IDLE_TIMEOUT,
-                        valid_session=valid_session, mono_ms=_mono_ms,
-                        profile=PROFILE, permission=PERMISSION,
-                        auto_approve=(PERMISSION == "bypass"),
-                    ):
-                        if ev.get("t") == "delta":
-                            chunk = ev.get("text") or ""
-                            yield ev
-                            for s_idx, sent in sbuf.feed(chunk):
-                                yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
-                        elif ev.get("t") == "complete":
-                            for s_idx, sent in sbuf.flush():
-                                yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
-                            yield ev
-                        else:
-                            yield ev
+                for ev in api_backend.run(
+                    message, session_id, build_prompt(message, system),
+                    base=API_URL, key=API_KEY, idle_timeout=IDLE_TIMEOUT,
+                    valid_session=valid_session, mono_ms=_mono_ms,
+                    profile=PROFILE, permission=PERMISSION,
+                    auto_approve=(PERMISSION == "bypass"),
+                ):
+                    if ev.get("t") == "delta":
+                        chunk = ev.get("text") or ""
+                        yield ev
+                        for s_idx, sent in sbuf.feed(chunk):
+                            yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
+                    elif ev.get("t") == "complete":
+                        for s_idx, sent in sbuf.flush():
+                            yield dict(t="sentence", text=sent, index=s_idx, ms=_mono_ms() - started)
+                        yield ev
+                    else:
+                        yield ev
                 return
             yield dict(t="note", message="Hermes API server isn't reachable, so this turn used the standard "
                                          "backend (no spoken approvals). Start it with ./start-gateway.sh")

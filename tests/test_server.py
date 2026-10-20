@@ -66,5 +66,67 @@ class CancelKeepsSessionTests(unittest.TestCase):
             server.SESSION["id"] = saved
 
 
+class RejectionTests(unittest.TestCase):
+    def _post(self, path, body, token=True):
+        import io
+        h = server.Handler.__new__(server.Handler)
+        h.request_version, h.requestline, h.command = "HTTP/1.1", "", "POST"
+        h.path, h.client_address = path, ("127.0.0.1", 0)
+        h.headers = {"Host": f"127.0.0.1:{server.PORT}", "Origin": f"http://127.0.0.1:{server.PORT}",
+                     "X-Jarvis-Token": server.API_TOKEN if token else "nope",
+                     "Content-Type": "application/json", "Content-Length": str(len(body))}
+        h.rfile, h.wfile = io.BytesIO(body), io.BytesIO()
+        h.close_connection = False
+        h.do_POST()
+        return h, h.wfile.getvalue().decode()
+
+    def test_rejection_closes_the_connection(self):
+        # the body is never read on a 401, so the connection must not be reused
+        h, out = self._post("/api/run", b'{"message":"x"}', token=False)
+        self.assertIn(" 401 ", out.splitlines()[0])
+        self.assertTrue(h.close_connection)
+        self.assertIn("Connection: close", out)
+
+    def test_non_object_json_gets_a_400(self):
+        for path in ("/api/run", "/api/approval", "/api/speak", "/api/settings", "/api/inbox"):
+            _, out = self._post(path, b"[1, 2]")
+            self.assertIn(" 400 ", out.splitlines()[0], path)
+
+
+class StreamKeepsSessionTests(unittest.TestCase):
+    def _stream(self, events):
+        import io
+        from unittest import mock
+        h = server.Handler.__new__(server.Handler)
+        h.request_version, h.requestline, h.command = "HTTP/1.1", "", "POST"
+        h.client_address = ("127.0.0.1", 0)
+        h.wfile = io.BytesIO()
+        with mock.patch.object(server.runtime, "run", return_value=iter(events)), \
+             mock.patch.object(server.commands, "handle", return_value=None), \
+             mock.patch.object(server.commands, "set_session") as set_session:
+            h._stream_run(b'{"message": "hello"}')
+        return set_session
+
+    def test_cancelled_turn_keeps_the_conversation(self):
+        sid = "20261020_120000_keepme"
+        saved = server.SESSION["id"]
+        server.SESSION["id"] = sid
+        try:
+            set_session = self._stream([{"t": "ack"}, {"t": "cancelled", "message": "stopped"}])
+            self.assertEqual(server.SESSION["id"], sid)
+            set_session.assert_not_called()
+        finally:
+            server.SESSION["id"] = saved
+
+    def test_error_turn_drops_the_session(self):
+        saved = server.SESSION["id"]
+        server.SESSION["id"] = "20261020_120000_broken"
+        try:
+            self._stream([{"t": "error", "message": "boom"}])
+            self.assertIsNone(server.SESSION["id"])
+        finally:
+            server.SESSION["id"] = saved
+
+
 if __name__ == "__main__":
     unittest.main()

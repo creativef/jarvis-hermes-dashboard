@@ -51,13 +51,15 @@ class HandoffWorkerTests(unittest.TestCase):
                 "print(json.dumps({'type':'tool','name':'read_file'}),flush=True)\n"
                 "print(json.dumps({'type':'result','text':'All good.'}),flush=True)\n")
         fake_runtime = types.SimpleNamespace(
-            build_command=lambda m, s: [sys.executable, "-c", fake], WORKDIR=None)
+            build_command=lambda m, s: [sys.executable, "-c", fake], WORKDIR=None,
+            apply_settings=lambda s: None, user_name=lambda: "Sam")
         with tempfile.TemporaryDirectory() as td:
             d = pathlib.Path(td)
             (d / "w0000001.json").write_text(json.dumps(
                 {"id": "w0000001", "status": "running", "mission": "x", "result": "",
                  "started": time.time(), "finished": None}))
             with mock.patch.object(handoff, "HANDOFF_DIR", d), \
+                    mock.patch.object(handoff, "STATE_FILE", d / "missing.json"), \
                     mock.patch.dict(sys.modules, {"runtime": fake_runtime}):
                 handoff.worker("w0000001", "x")
             job = json.loads((d / "w0000001.json").read_text())
@@ -66,6 +68,32 @@ class HandoffWorkerTests(unittest.TestCase):
             lines = (d / "w0000001.log").read_text().splitlines()
             self.assertTrue(lines[0].endswith("tool: read_file"))
             self.assertTrue(lines[-1].endswith("result: All good."))
+
+    def test_worker_uses_dashboard_settings_and_name(self):
+        # Settings → Permission must reach helpers too, not just the .env value.
+        import sys
+        import types
+        from tools import handoff
+        fake = ("import sys,json\nt=sys.stdin.read()\n"
+                "print(json.dumps({'type':'result','text':'named' if 'for Dana.' in t else t[:80]}),flush=True)\n")
+        applied = []
+        fake_runtime = types.SimpleNamespace(
+            build_command=lambda m, s: [sys.executable, "-c", fake], WORKDIR=None,
+            apply_settings=applied.append, user_name=lambda: "os-user")
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            state = d / "state.json"
+            state.write_text(json.dumps({"settings": {"permission": "normal", "user_name": "Dana"}}))
+            (d / "w0000002.json").write_text(json.dumps(
+                {"id": "w0000002", "status": "running", "mission": "x", "result": "",
+                 "started": time.time(), "finished": None}))
+            with mock.patch.object(handoff, "HANDOFF_DIR", d), \
+                    mock.patch.object(handoff, "STATE_FILE", state), \
+                    mock.patch.dict(sys.modules, {"runtime": fake_runtime}):
+                handoff.worker("w0000002", "x")
+            job = json.loads((d / "w0000002.json").read_text())
+            self.assertEqual(applied, [{"permission": "normal", "user_name": "Dana"}])
+            self.assertEqual(job["result"], "named")
 
 
 if __name__ == "__main__":

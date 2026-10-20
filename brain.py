@@ -439,12 +439,14 @@ def inbox_save(payload):
     if not isinstance(payload, dict):
         return None, "payload must be a JSON object"
 
-    raw_name = (payload.get("name") or payload.get("title") or "").strip()
+    raw_name = str(payload.get("name") or payload.get("title") or "").strip()
     text_content = payload.get("content")
     b64_data = payload.get("data_base64")
-    kind_hint = (payload.get("kind") or payload.get("type") or "").strip().lower()
-    dept = (payload.get("department") or "").strip().lower()
-    note_comment = (payload.get("note") or "").strip()
+    if b64_data is not None and not isinstance(b64_data, str):
+        return None, "data_base64 must be a string"
+    kind_hint = str(payload.get("kind") or payload.get("type") or "").strip().lower()
+    dept = str(payload.get("department") or "").strip().lower()
+    note_comment = str(payload.get("note") or "").strip()
 
     if text_content is None and not b64_data and not raw_name:
         return None, "nothing to save (provide content, data_base64, or name)"

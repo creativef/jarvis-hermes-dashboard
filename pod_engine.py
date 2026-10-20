@@ -283,7 +283,7 @@ def weekly_review(
     lines = [
         f"# {label}",
         "",
-        "Prepared by Atlas. Mr Thompson decides everything that spends or sends.",
+        "Prepared by Atlas. You decide everything that spends or sends.",
         "",
         "## 1. Numbers",
         "",

@@ -1,6 +1,7 @@
 import json
 import pathlib
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -57,31 +58,43 @@ class StateTests(unittest.TestCase):
                 _, err = commands.set_settings({"permission": "yolo"})
                 self.assertIsNotNone(err)
 
-    def test_reconcile_orphaned_missions(self):
-        with tempfile.TemporaryDirectory() as td:
-            state = pathlib.Path(td) / "state.json"
-            state.write_text(json.dumps({
-                "profile": [], "goal": "", "personality": "", "tasks": [],
-                "missions": [
-                    {"id": "abc", "mission": "old", "status": "running", "at": 1.0},
-                    {"id": "def", "mission": "done", "status": "done", "at": 1.0, "finished": 2.0},
-                ],
-            }))
-            with mock.patch.object(commands, "STATE_FILE", state):
-                commands._reconcile_orphaned_missions()
-                d = commands.load()
-            by_id = {m["id"]: m for m in d["missions"]}
-            self.assertEqual(by_id["abc"]["status"], "failed")
-            self.assertEqual(by_id["abc"]["result"], "interrupted by dashboard restart")
-            self.assertEqual(by_id["def"]["status"], "done")
-
 
 class BackgroundJobTests(unittest.TestCase):
-    def test_running_background(self):
-        self.assertFalse(commands.running_background())
-        with mock.patch.dict(commands.JOBS, {"abc": {"id": "abc", "status": "running"}}, clear=True):
-            self.assertTrue(commands.running_background())
-        self.assertFalse(commands.running_background())
+    def test_background_launches_a_handoff_helper(self):
+        from tools import handoff
+        with mock.patch.object(handoff, "launch", return_value="ab12cd34") as launch:
+            res = commands.handle("/background tidy the inbox")
+        launch.assert_called_once_with("tidy the inbox")
+        self.assertIsNone(res["message"])
+        self.assertIn("ab12cd34", res["reply"])
+
+    def _job(self, d, jid, **kw):
+        job = {"id": jid, "status": "done", "mission": "m", "result": "ok",
+               "started": 1.0, "finished": time.time()}
+        job.update(kw)
+        (d / f"{jid}.json").write_text(json.dumps(job))
+
+    def test_finished_jobs_are_announced_exactly_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "done0001")
+            self._job(d, "fail0002", status="failed", result="boom")
+            self._job(d, "run00003", status="running", finished=None)
+            with mock.patch.object(commands, "HANDOFF_DIR", d):
+                first = sorted(j["id"] for j in commands.take_finished())
+                second = commands.take_finished()
+            self.assertEqual(first, ["done0001", "fail0002"])
+            self.assertEqual(second, [])
+
+    def test_old_announced_jobs_are_pruned(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "old00001", reported=True, finished=time.time() - 40 * 86400)
+            (d / "old00001.log").write_text("x")
+            self._job(d, "new00002", reported=True)
+            with mock.patch.object(commands, "HANDOFF_DIR", d):
+                commands.take_finished()
+            self.assertEqual(sorted(p.name for p in d.iterdir()), ["new00002.json"])
 
 
 if __name__ == "__main__":

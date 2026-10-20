@@ -1,4 +1,4 @@
-"""Tests for the Atlas Brain graph interaction fixes in ui/app.js.
+"""Tests for the Atlas Brain graph interaction fixes in ui/brain.js.
 
 The graph lives inside a browser IIFE, so it is checked two ways:
 
@@ -22,7 +22,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 UI = os.path.normpath(os.path.join(HERE, "..", "ui"))
-APP_JS = os.path.join(UI, "app.js")
+APP_JS = os.path.join(UI, "brain.js")
 STYLES_CSS = os.path.join(UI, "styles.css")
 THEMES_CSS = os.path.join(UI, "themes.css")
 INDEX_HTML = os.path.join(UI, "index.html")
@@ -37,7 +37,7 @@ const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const START = '/* @graph-math:start */', END = '/* @graph-math:end */';
 const a = src.indexOf(START), b = src.indexOf(END);
-if (a < 0 || b < 0) throw new Error('graph-math markers not found in app.js');
+if (a < 0 || b < 0) throw new Error('graph-math markers not found in brain.js');
 eval(src.slice(a, b + END.length));
 const G = window.AtlasGraphMath;
 if (!G) throw new Error('window.AtlasGraphMath was not exported');

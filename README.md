@@ -157,7 +157,8 @@ commands.py     dashboard slash commands and mission queue
 voice.py        local Kokoro/Parakeet worker client, with say/browser fallback
 voice_worker.py the model process (runs in .venv-voice)
 persona.md      concise spoken JARVIS persona
-ui/             dependency-free HTML/CSS/JavaScript HUD
+ui/             dependency-free HTML/CSS/JavaScript HUD (app.js; brain.js = the Brain graph)
+tools/handoff.py detached helper jobs (also what /background launches)
 install.sh      first-run setup and launch
 start.sh        local launcher
 ```
