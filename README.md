@@ -132,6 +132,7 @@ Normal text and voice requests go directly to Hermes Agent.
 ## Morning brief and helper jobs
 
 - **Business pulse / Family & calendar cards:** once a day, the first time the brief shows, a quiet helper asks Hermes (read-only) for yesterday's and today's orders, revenue and ad spend from any store or ad account you've connected in Hermes, plus your next few days of events. Results land in `logs/brief/<date>.json`; **↻** on either card fetches fresh numbers. If the last fetch found nothing connected, it stops fetching by itself until you press ↻.
+- **Needs your decision:** the first brief card lists what's waiting on you (an approval, inbox items to file, a helper that died or failed in the last day, numbers that didn't load), each with one button to deal with it.
 - **Stopping a helper:** in the **Agents** tab, press **Stop** then **Confirm stop** on a running job. Atlas only signals the process it can verify is that job's worker; a worker that already died is simply marked stopped.
 
 ## Talking to Atlas
@@ -141,6 +142,7 @@ Normal text and voice requests go directly to Hermes Agent.
   "stop" → drops the rest · anything else → he answers that, knowing exactly where you cut him off.
   It learns how loud his own voice is in your mic; if it triggers by itself it gets less sensitive. Headphones make it reliable. Toggle: Settings → "Talk over Atlas". Esc still cancels outright.
 - **Instant commands, no model call:** "stop", "repeat that", "slower" / "faster", "new topic".
+- **Helper jobs by voice, no model call:** "start a job to compare hoodie base prices", "how's the flight job going?", "what did the flight job find?", "stop the flight job", "stop all jobs". Any word from the job's brief picks it.
 - **Space while you're talking** sends right away instead of waiting for the 1.2 s pause.
 - **Voice and speed** are in Settings and apply from the next sentence.
 - Each voice turn logs one **TIMING** line (you→text · →first word · →voice) so you can see which step is slow.

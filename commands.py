@@ -344,6 +344,7 @@ def agents_snapshot(limit=40):
             status=status, step=step, step_at=step_at, started=started, finished=finished,
             elapsed=max(0, (finished or now) - started) if started else None,
             result=j.get("result") or "",
+            quiet=bool(j.get("quiet")),
             diagnostic="diagnostic" in mission.lower()))
     out.sort(key=lambda a: (a["status"] not in ("running", "stalled"), -(a["started"] or 0)))
     return dict(now=now, agents=out[:limit],
@@ -564,6 +565,97 @@ def _brain_intent(q):
     return None
 
 
+# ── voice control for helper jobs ("stop the flight job", "what did the brief helper find") ──
+_JOB = r"(?:background\s+)?(?:job|helper|agent|mission|task)"
+_JOB_STOP_ALL = re.compile(rf"^(?:stop|cancel|kill|end|abort)\s+(?:all|every|everything)(?:\s+(?:the\s+)?(?:running\s+)?{_JOB}s?)?(?:\s+running)?$")
+_JOB_STOP = re.compile(rf"^(?:stop|cancel|kill|end|abort)\s+(?:the\s+|that\s+|this\s+|my\s+)?(.*?)\s*{_JOB}$")
+_JOB_ASK = re.compile(rf"^(?:what\s+(?:did|has)\s+(?:the\s+|that\s+|my\s+)?(.*?)\s*{_JOB}\s+(?:find|found|say|said|report|get|come\s+back\s+with)"
+                      rf"|how(?:'?s|\s+is)\s+(?:the\s+|that\s+|my\s+)?(.*?)\s*{_JOB}(?:\s+(?:going|doing))?"
+                      rf"|(?:status|result)\s+of\s+(?:the\s+|that\s+|my\s+)?(.*?)\s*{_JOB})$")
+_JOB_START = re.compile(rf"^\s*(?:please\s+)?(?:start|launch|kick\s+off|spin\s+up)\s+(?:a\s+|an\s+)?{_JOB}\s+(?:to|that|for)\s+(.+)$", re.I | re.S)
+_JOB_FILLER = {"the", "a", "an", "my", "that", "this", "one", "background", "running", "last", "latest"}
+
+
+def _stem(w):
+    return w[:5]
+
+
+def find_job(query, running_only=False):
+    """The helper job a spoken phrase means: best word overlap with its brief, newest first.
+    A vague phrase ("the job") means the only running one, if there is exactly one."""
+    words = {_stem(w) for w in re.sub(r"[^a-z0-9 ]+", " ", query.lower()).split() if w not in _JOB_FILLER}
+    jobs = sorted(_handoff_jobs(), key=lambda j: -(j.get("started") or 0))
+    if running_only:
+        jobs = [j for j in jobs if j.get("status") == "running"]
+    if not words:
+        running = [j for j in jobs if j.get("status") == "running"]
+        if len(running) == 1:
+            return running[0]
+        if not running and not running_only and jobs:
+            return jobs[0]                          # "what did the job find" = the latest one
+        return None                                 # several running: too vague to pick
+    best, best_score = None, 0
+    for j in jobs:
+        text = re.sub(r"[^a-z0-9 ]+", " ", str(j.get("mission") or "").lower())
+        score = len(words & {_stem(w) for w in text.split()})
+        if score > best_score:
+            best, best_score = j, score
+    return best
+
+
+def _job_reply(j):
+    name = _agent_name(j.get("mission", ""))
+    status = j.get("status")
+    if status == "running":
+        mins = int(max(0, time.time() - (j.get("started") or time.time())) // 60)
+        _, step = _last_log_line(j.get("id") or "")
+        when = f"{mins} minute{'s' if mins != 1 else ''} in" if mins else "just started"
+        return f"{name} is still working, {when}." + (f" Last step: {step[:120]}." if step else "")
+    if status == "failed":
+        return f"{name} failed: {str(j.get('result') or 'no reason given')[:240]}"
+    if status == "stopped":
+        return f"{name} was stopped."
+    return f"{name}: {str(j.get('result') or 'Finished with nothing to report.')[:400]}"
+
+
+def _jobs_intent(q, message):
+    def out(reply, intent, note):
+        return dict(message=None, reply=reply, note=note, intent=intent, fast_path=True)
+
+    raw = re.sub(r"^\s*(?:hey\s+atlas|ok\s+atlas|atlas|jarvis)[,:\s]+", "", message or "", flags=re.I)
+    m = _JOB_START.match(raw)
+    if m and len(m.group(1).split()) >= 2:
+        from tools import handoff
+        mission = " ".join(m.group(1).split())
+        jid = handoff.launch(mission[:1].upper() + mission[1:])
+        return out("On it. I've handed that to a helper and I'll tell you when it lands.", "job_start",
+                   f"helper {jid} started: {mission[:50]}")
+    if _JOB_STOP_ALL.match(q):
+        running = [j for j in _handoff_jobs() if j.get("status") == "running"]
+        for j in running:
+            stop_job(j.get("id"))
+        n = len(running)
+        return out(f"Stopping {n} helper{'s' if n != 1 else ''}." if n else "Nothing is running.",
+                   "job_stop", f"stop all: {n}")
+    m = _JOB_STOP.match(q)
+    if m:
+        j = find_job(m.group(1), running_only=True)
+        if not j:
+            return out("I couldn't tell which running job you mean. Say it with a word from its brief.",
+                       "job_stop", "stop: no match")
+        _, err = stop_job(j.get("id"))
+        name = _agent_name(j.get("mission", ""))
+        return out(f"Stopping {name}." if not err else f"I couldn't stop {name}: {err}.", "job_stop",
+                   f"stop {j.get('id')}")
+    m = _JOB_ASK.match(q)
+    if m:
+        j = find_job(m.group(1) or m.group(2) or m.group(3) or "")
+        if not j:
+            return out("I couldn't find a job like that.", "job_status", "job: no match")
+        return out(_job_reply(j), "job_status", f"job {j.get('id')}")
+    return None
+
+
 def fast_path(message):
     """Local intent router for simple queries (<50ms, zero model/subprocess calls).
 
@@ -610,6 +702,10 @@ def fast_path(message):
                     intent="who_are_you", fast_path=True)
 
     hit = _voice_control(q)
+    if hit:
+        return hit
+
+    hit = _jobs_intent(q, message)
     if hit:
         return hit
 

@@ -1185,6 +1185,15 @@ setInterval(async () => {
   const voiceOK = () => !callOn() && !muted;
 
   const parse = t => NO.test(t) ? 'deny' : (YES.test(t) ? 'once' : null);   // any "no" wins
+  // read by the brief's "Needs your decision" card
+  const changed = () => window.dispatchEvent(new Event('atlas-approval'));
+  window.AtlasApprovals = {
+    pending(){
+      if (!cur) return null;
+      return {description: cur.description || 'run a command', high: assessRisk(cur).tier === 'high', count: 1 + queue.length};
+    },
+    focus(){ card.scrollIntoView({behavior: 'smooth', block: 'center'}); $('#apOk')?.focus(); },
+  };
 
   const HIGH_RE = /(delet|remove|rm\s|rmdir|wipe|erase|format|overwrit|truncate|force|--hard|reset|sudo|chmod|chown|kill|pkill|shutdown|reboot|drop\s|send|email|mail|message|post|publish|push|deploy|purchase|buy|pay|transfer|charge|curl[^|]*\|\s*(ba)?sh|credential|secret|password|token|ssh|\.env)/i;
   const LOW_RE = /^\s*(ls|cat|head|tail|pwd|find|grep|rg|git\s+(status|log|diff|show|branch)|echo|which|whoami|date|uptime|wc|du|df|stat)\b/i;
@@ -1227,11 +1236,13 @@ setInterval(async () => {
       ? 'High-risk tier: spoken "yes" is disabled. Press Enter or click Approve once, or say "no" / press Esc to deny.'
       : (voiceOK() ? 'Say "yes" or "no", or use the buttons below.' : 'Use the buttons or the keyboard.');
     card.hidden = false;
+    changed();
   }
 
   function close(){
     cur = null; window.__approvalOpen = false;
     clearInterval(tick); tick = null; card.hidden = true;
+    changed();
     if (listening){ listening.cancel(); listening = null; }
     if (queue.length){
       const next = queue.shift();
@@ -2425,7 +2436,8 @@ setInterval(async () => {
   'use strict';
   const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
   const data = {greeting: '', date: '', agents: [], running: 0, brainCount: 0, brainDepts: [], collapsed: false,
-                pulse: null};          // GET /api/brief: business + calendar, fetched by a quiet Hermes helper
+                pulse: null,           // GET /api/brief: business + calendar, fetched by a quiet Hermes helper
+                inbox: []};
   let pulseTimer = null;
   window.AtlasBrief = {data, focus(){ const b = document.getElementById('brief'); if (b) b.scrollIntoView({behavior: 'smooth', block: 'start'}); }, refresh};
 
@@ -2461,6 +2473,10 @@ setInterval(async () => {
       const nodes = b.nodes || [];
       out.brainCount = nodes.length;
       out.brainDepts = nodes.filter(n => n.type === 'dept').map(n => n.id.replace(/-/g, ' '));
+    } catch (_) {}
+    try {
+      const i = await fetch('/api/inbox', {headers: apiHeaders(), cache: 'no-store'}).then(r => r.json());
+      data.inbox = Array.isArray(i.items) ? i.items : [];
     } catch (_) {}
     data.agents = out.agents; data.running = out.running;
     data.brainCount = out.brainCount; data.brainDepts = out.brainDepts;
@@ -2515,10 +2531,50 @@ setInterval(async () => {
     return out;
   }
 
+  // ── "Needs your decision": everything waiting on you, each with one action ──
+  function decisions(){
+    const out = [];
+    const ap = window.AtlasApprovals && AtlasApprovals.pending();
+    if (ap) out.push({t: `Approve: ${ap.description}`, btn: 'Answer', act: 'approval',
+                      m: ap.count > 1 ? `${ap.count} waiting` : ap.high ? 'keyboard only' : 'say yes or no'});
+    const dayAgo = Date.now() / 1000 - 86400;
+    for (const a of data.agents){
+      if (a.status === 'stalled') out.push({t: a.name, m: 'helper stopped mid-job', btn: 'Clear', act: 'clear', id: a.id});
+      else if (a.status === 'failed' && !a.quiet && (a.finished || 0) > dayAgo) out.push({t: a.name, m: 'failed: see why', btn: 'Open', act: 'agents'});
+    }
+    const waiting = data.inbox.filter(i => i.status === 'new' || i.status === 'needs-question');
+    if (waiting.length) out.push({t: `${waiting.length} inbox item${waiting.length > 1 ? 's' : ''} to file`,
+                                  m: waiting.slice(0, 2).map(i => i.name).join(', '), btn: 'Review', act: 'inbox'});
+    if (data.pulse && data.pulse.status === 'failed')
+      out.push({t: "Today's numbers didn't load", m: data.pulse.error || '', btn: 'Retry', act: 'pulse'});
+    return out;
+  }
+
+  function decisionsHtml(items){
+    return items.slice(0, 5).map((d, i) => `<div class="bc-item bc-act"><span class="bci-t">${esc(d.t)}</span>
+      <span class="bci-m">${esc(d.m)}</span><button type="button" class="bc-go" data-decide="${i}">${esc(d.btn)}</button></div>`).join('');
+  }
+
+  async function decide(d){
+    if (d.act === 'approval') return window.AtlasApprovals && AtlasApprovals.focus();
+    if (d.act === 'agents') return window.AtlasAgents && AtlasAgents.open();
+    if (d.act === 'inbox') return window.AtlasInbox && AtlasInbox.open();
+    if (d.act === 'pulse') return loadPulse({refresh: true}).then(render);
+    if (d.act === 'clear'){
+      try {
+        await fetch('/api/agents/stop', {method: 'POST', headers: apiHeaders({'content-type': 'application/json'}),
+                                         body: JSON.stringify({id: d.id})});
+      } catch (_) {}
+      return refresh();
+    }
+  }
+
   function sentence(){
+    const waiting = decisions().length;
     const done = data.agents.filter(a => a.status === 'done' || a.status === 'failed').length;
     const running = data.running;
     const parts = [];
+    if (waiting) parts.push(`${waiting} need${waiting > 1 ? '' : 's'} your decision`);
     if (running) parts.push(`${running} mission${running > 1 ? 's' : ''} running`);
     if (done) parts.push(`${done} finished overnight`);
     if (data.brainCount) parts.push(`${data.brainCount} notes in the second brain`);
@@ -2539,6 +2595,7 @@ setInterval(async () => {
         <div class="b-actions"><button class="ctl aux" data-brief="expand">Show full brief ▴</button></div></div>`;
       return;
     }
+    const items = decisions();
     const running = data.agents.filter(a => a.status === 'running' || a.status === 'stalled');
     const recent = data.agents.filter(a => !(a.status === 'running' || a.status === 'stalled')).slice(0, 3);
     const runningHtml = running.length
@@ -2555,7 +2612,7 @@ setInterval(async () => {
         <div class="b-actions"><button class="ctl aux" data-brief="play">▶ Play my brief</button><button class="ctl aux" data-brief="collapse">Collapse ▴</button></div></div>
       <div class="b-sentence">${esc(sentence())}</div>
       <div class="b-grid">
-        ${card('--amber', 'Needs your decision', 0, '<span class="bc-empty">Nothing needs your approval right now.</span>')}
+        ${card('--amber', 'Needs your decision', items.length, decisionsHtml(items), 'Nothing needs you right now.')}
         ${card('--cyan', 'Running', data.running, runningHtml)}
         ${card('--green', 'Overnight', recent.length, overnightHtml)}
         ${card('--dept-3', 'Second brain', data.brainCount, brainHtml)}
@@ -2569,6 +2626,10 @@ setInterval(async () => {
       else if (act === 'play') playBrief();
       else if (act === 'pulse' && !(data.pulse && data.pulse.status === 'running'))
         loadPulse({refresh: true}).then(render);
+    }));
+    host.querySelectorAll('[data-decide]').forEach(b => b.addEventListener('click', () => {
+      b.disabled = true;
+      decide(items[+b.dataset.decide]);
     }));
   }
 
@@ -2588,7 +2649,8 @@ setInterval(async () => {
         ? `${data.agents.filter(a => a.status === 'done' || a.status === 'failed').length} missions finished overnight.`
         : 'Nothing finished overnight.',
       data.brainCount ? `Your second brain holds ${data.brainCount} notes.` : 'Your second brain is empty.',
-      ...pulseLines()
+      ...pulseLines(),
+      ...decisions().slice(0, 3).map(d => `Needs your decision: ${d.t}.`)
     ];
     say(lines.join(' '));
   }
@@ -2609,6 +2671,7 @@ setInterval(async () => {
     refresh();
   }
   document.addEventListener('atlas-brief', () => { if (window.AtlasAmbient) AtlasAmbient.onBriefData(data); });
+  window.addEventListener('atlas-approval', () => render());   // an approval appeared or was answered
 })();
 
 // ══════════ IIFE · ambient wall-display mode on the focus layout ══════════
