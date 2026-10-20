@@ -50,10 +50,16 @@ IDLE_TIMEOUT = int(os.environ.get("JARVIS_TIMEOUT", "120"))
 # Raw transcripts can contain private prompts. Logging is off by default.
 RAW_LOG = os.environ.get("JARVIS_RAW_LOG", "").strip()
 TOOLSETS = os.environ.get("HERMES_TOOLSETS", "").strip()
-# Optional backend with real per-command approvals (see api_backend.py).
-BACKEND = os.environ.get("JARVIS_BACKEND", "cli").strip().lower()      # cli | api
+# Backend (see api_backend.py):
+#   auto  (default) use the Hermes API server when it answers ("Hermes kept warm": no new
+#         process per turn, spoken approvals), else the one-shot CLI, silently
+#   api   same, but say so on every turn that has to fall back to the CLI
+#   cli   always the one-shot CLI
+BACKEND = os.environ.get("JARVIS_BACKEND", "auto").strip().lower()
 API_URL = os.environ.get("JARVIS_API_URL", "http://127.0.0.1:8642").strip().rstrip("/")
 API_KEY = os.environ.get("JARVIS_API_KEY", "").strip()
+# Start `hermes gateway run` ourselves when nothing answers at API_URL (auto/api only).
+START_GATEWAY = os.environ.get("JARVIS_START_GATEWAY", "1").strip() != "0"
 
 
 def apply_settings(settings):
@@ -348,13 +354,104 @@ _HEALTH = {"at": -1e9, "ok": False}
 def api_backend_ready():
     """Is the Hermes API server up? Cached for a few seconds: /api/status and every
     turn ask, and a down server costs a 1.5s timeout each time."""
-    if BACKEND != "api":
+    if BACKEND not in ("api", "auto"):
         return False
     now = time.monotonic()
     if now - _HEALTH["at"] > 5:
         import api_backend
         _HEALTH.update(at=now, ok=api_backend.healthy(API_URL))
     return _HEALTH["ok"]
+
+
+# ── keep Hermes warm: our own gateway child when none is running ────────────────
+_GATEWAY = {"proc": None, "state": "off", "note": ""}
+_GATEWAY_LOG = pathlib.Path(__file__).resolve().parent / "logs" / "gateway.log"
+
+
+def _append_env(path, key, value):
+    """Add KEY=value to the dashboard's private .env (created 0600 if missing)."""
+    path = pathlib.Path(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(f"\n# Hermes API server key (created by the dashboard)\n{key}={value}\n")
+    os.chmod(path, 0o600)
+
+
+def gateway_status():
+    """(state, note): off | external | starting | ours | failed | slow."""
+    return _GATEWAY["state"], _GATEWAY["note"]
+
+
+def start_gateway(env_file):
+    """Keep Hermes warm. When the API backend is wanted and nothing answers at API_URL,
+    run `hermes gateway run` with its API server switched on, as our child, and stop
+    it when the dashboard stops. Never blocks: turns use the CLI until it is up.
+
+    Note: a gateway also runs Hermes' cron jobs and any messaging bots you set up.
+    Hermes itself refuses a second gateway, so this never duplicates one."""
+    global API_KEY
+    if BACKEND == "cli" or not START_GATEWAY or RUNTIME == "mock":
+        return
+    from urllib.parse import urlparse
+    url = urlparse(API_URL)
+    if url.hostname not in ("127.0.0.1", "localhost"):
+        _GATEWAY.update(state="external", note=f"using the API server at {API_URL}")
+        return
+    if not API_KEY:
+        API_KEY = __import__("secrets").token_urlsafe(32)
+        try:
+            _append_env(env_file, "JARVIS_API_KEY", API_KEY)
+        except OSError:
+            pass                                   # still works for this launch
+
+    def work():
+        import api_backend
+        if api_backend.healthy(API_URL):
+            _GATEWAY.update(state="external", note=f"an API server is already running at {API_URL}")
+            return
+        env = dict(os.environ, HERMES_PROFILE=PROFILE, API_SERVER_ENABLED="true",
+                   API_SERVER_KEY=API_KEY, API_SERVER_HOST="127.0.0.1",
+                   API_SERVER_PORT=str(url.port or 8642))
+        env["PATH"] = ":".join(dict.fromkeys([env.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin",
+                                              os.path.expanduser("~/.local/bin")]))
+        try:
+            _GATEWAY_LOG.parent.mkdir(parents=True, exist_ok=True)
+            log = open(_GATEWAY_LOG, "ab")
+            proc = subprocess.Popen(_hermes_base() + ["gateway", "run"], cwd=WORKDIR, env=env,
+                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+            log.close()                            # the child keeps its own handle
+        except OSError as e:
+            _GATEWAY.update(state="failed", note=f"could not start the Hermes gateway: {e}")
+            return
+        _GATEWAY.update(proc=proc, state="starting", note="Hermes gateway starting")
+        deadline = time.monotonic() + 90           # MCP servers and tools load first
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                _GATEWAY.update(proc=None, state="failed", note=(
+                    "the Hermes gateway would not start (often: a gateway service is already "
+                    "running without its API server). Using the CLI. See logs/gateway.log"))
+                return
+            if api_backend.healthy(API_URL, timeout=1):
+                _HEALTH.update(at=-1e9)            # use it from the next turn
+                _GATEWAY.update(state="ours", note=f"Hermes kept warm (gateway pid {proc.pid})")
+                return
+            time.sleep(0.5)
+        _GATEWAY.update(state="slow", note="Hermes gateway still starting; using the CLI until it answers")
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def stop_gateway():
+    """Stop the gateway we started (never one we found running)."""
+    proc = _GATEWAY["proc"]
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=15)                     # let it finish a turn and save sessions
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    _GATEWAY.update(proc=None, state="off", note="")
 
 
 def resolve_approval(run_id, request_id, choice):
@@ -365,7 +462,7 @@ def resolve_approval(run_id, request_id, choice):
 def cancel_active():
     """Terminate the currently running Hermes child process, if any."""
     _CANCELLED.set()
-    if BACKEND == "api":
+    if BACKEND != "cli":
         import api_backend
         if api_backend.cancel_active(API_URL, API_KEY):
             return True
@@ -433,16 +530,24 @@ def runtime_kind():
     return "hermes" if ok else "mock"
 
 
+_ANSWER_RULE = ("Answer the request now. Start with the words ATLAS should say aloud; never include "
+                "session IDs, runtime metadata, or process narration. If on-screen detail helps, put it "
+                "after a line containing only --- (that part is shown, not spoken).")
+
+
 def build_prompt(message, system=None):
     # Hermes chat has no separate --system flag (verified v0.22.2), so the voice
     # persona and the request are combined into one explicit turn. This stops the
     # model answering as a coding agent that narrates its own machinery.
     if not system:
         return message
-    return (f"{system}\n\n## Current user request\n{message}\n\n"
-            "Answer the request now. Start with the words ATLAS should say aloud; never include "
-            "session IDs, runtime metadata, or process narration. If on-screen detail helps, put it "
-            "after a line containing only --- (that part is shown, not spoken).")
+    return f"{system}\n\n## Current user request\n{message}\n\n{_ANSWER_RULE}"
+
+
+def build_instructions(system=None):
+    """API backend: the persona travels as per-turn `instructions` (Hermes' ephemeral
+    system prompt), so the saved conversation holds only what you actually said."""
+    return f"{system}\n\n{_ANSWER_RULE}" if system else None
 
 
 def build_command(message, session_id=None):
@@ -742,13 +847,13 @@ def _run(message, session_id=None, system=None):
         yield from run_mock(message, session_id, system)
         return
     try:
-        if BACKEND == "api":
+        if BACKEND in ("api", "auto"):
             if api_backend_ready():
                 import api_backend
                 sbuf = SentenceBuffer()
                 started = _mono_ms()
                 for ev in api_backend.run(
-                    message, session_id, build_prompt(message, system),
+                    message, session_id, build_instructions(system),
                     base=API_URL, key=API_KEY, idle_timeout=IDLE_TIMEOUT,
                     valid_session=valid_session, mono_ms=_mono_ms,
                     profile=PROFILE, permission=PERMISSION,
@@ -766,8 +871,9 @@ def _run(message, session_id=None, system=None):
                     else:
                         yield ev
                 return
-            yield dict(t="note", message="Hermes API server isn't reachable, so this turn used the standard "
-                                         "backend (no spoken approvals). Start it with ./start-gateway.sh")
+            if BACKEND == "api":
+                yield dict(t="note", message="Hermes API server isn't reachable, so this turn used the standard "
+                                             "backend (no spoken approvals). " + (_GATEWAY["note"] or ""))
         yield from run_hermes(message, session_id, system)
     except Exception as e:  # noqa: BLE001
         yield dict(t="error", message=f"could not start Hermes core: {e}")

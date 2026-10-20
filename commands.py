@@ -409,7 +409,10 @@ def _status_reply():
     hears = "Parakeet" if voice.stt_engine() == "parakeet" else "browser speech recognition"
     jobs = (f"{running} background job{'s' if running != 1 else ''} running" if running
             else "nothing running in the background")
-    return f"Online on the {profile} profile. Speaking with {speaks}, listening with {hears}. {jobs[0].upper() + jobs[1:]}."
+    warm = ("Hermes is kept warm through its API server" if runtime.api_backend_ready()
+            else "Hermes starts fresh for each turn")
+    return (f"Online on the {profile} profile. Speaking with {speaks}, listening with {hears}. "
+            f"{warm}. {jobs[0].upper() + jobs[1:]}.")
 
 
 def _fast_jobs_summary():

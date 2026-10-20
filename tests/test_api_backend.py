@@ -23,6 +23,7 @@ class Fake(BaseHTTPRequestHandler):
     stop_calls = []
     run_bodies = []
     events = EVENTS
+    refuse_sessions = False
 
     def log_message(self, *a):
         pass
@@ -48,6 +49,8 @@ class Fake(BaseHTTPRequestHandler):
             self.send_response(401); self.end_headers(); return
         if self.path == "/v1/runs":
             type(self).run_bodies.append(body)
+            if type(self).refuse_sessions and "session_id" in body:
+                self.send_response(409); self.send_header("Content-Length", "0"); self.end_headers(); return
             out = {"run_id": "run_abc123", "status": "started"}
         elif self.path.endswith("/approval"):
             type(self).approvals.append(body); out = {"resolved": 1, "choice": body["choice"]}
@@ -73,6 +76,7 @@ class ApiBackendTests(unittest.TestCase):
 
     def setUp(self):
         Fake.approvals.clear(); Fake.stop_calls.clear(); Fake.run_bodies.clear(); Fake.events = EVENTS
+        Fake.refuse_sessions = False
 
     def _run(self, **kw):
         return list(api_backend.run("hi", kw.pop("session_id", None), "PROMPT", base=self.base, key="secret",
@@ -92,12 +96,23 @@ class ApiBackendTests(unittest.TestCase):
         done = evs[-1]
         self.assertEqual(done["t"], "complete")
         self.assertEqual(done["session_id"], "run_abc123")      # fresh session → run id
-        self.assertEqual(Fake.run_bodies[0]["input"], "PROMPT")
+        # persona goes as Hermes `instructions`; the saved user turn is only what was said
+        self.assertEqual(Fake.run_bodies[0]["input"], "hi")
+        self.assertEqual(Fake.run_bodies[0]["instructions"], "PROMPT")
 
     def test_resumes_given_session(self):
         evs = self._run(session_id="20261015_171425_cfb3ae")
         self.assertEqual(evs[-1]["session_id"], "20261015_171425_cfb3ae")
         self.assertEqual(Fake.run_bodies[0]["session_id"], "20261015_171425_cfb3ae")
+
+    def test_session_refused_starts_a_fresh_thread(self):
+        Fake.refuse_sessions = True
+        evs = self._run(session_id="20261015_171425_cfb3ae")
+        self.assertEqual(len(Fake.run_bodies), 2)
+        self.assertNotIn("session_id", Fake.run_bodies[1])
+        self.assertTrue(any(e["t"] == "note" and "fresh" in e["message"] for e in evs))
+        self.assertEqual(evs[-1]["t"], "complete")
+        self.assertEqual(evs[-1]["session_id"], "run_abc123")
 
     def test_bypass_auto_approves_and_logs(self):
         evs = self._run(auto_approve=True)

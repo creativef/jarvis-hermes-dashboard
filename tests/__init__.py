@@ -12,3 +12,6 @@ os.environ["JARVIS_STATE"] = str(pathlib.Path(_TMP) / "state.json")
 # Never let unit tests probe or drive the real Hermes CLI; the one integration
 # test that exercises the subprocess machinery monkeypatches RUNTIME explicitly.
 os.environ["JARVIS_RUNTIME"] = "mock"
+# ...and never reach a real Hermes API server/gateway that may be running on this machine.
+os.environ["JARVIS_BACKEND"] = "cli"
+os.environ["JARVIS_START_GATEWAY"] = "0"

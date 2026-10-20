@@ -265,6 +265,7 @@ class Handler(BaseHTTPRequestHandler):
                 voice_ready=voice.ready(),
                 session=SESSION["id"],
                 backend=("api" if api_ok else "cli"),
+                backend_note=runtime.gateway_status()[1],
                 approvals=api_ok))
         if p == "/api/brain/graph":
             if not self._token_ok():
@@ -536,6 +537,9 @@ def main():
     vo = (f"Kokoro ({voice.KOKORO_VOICE}) + Parakeet — local, warming up…" if voice.worker_installed()
           else "local worker not installed (run ./install-voice.sh) — falling back to say / browser")
     perm = runtime.PERMISSION
+    backend = {"cli": "Hermes CLI, one process per turn",
+               "api": "Hermes API server (falls back to the CLI, with a note)",
+               }.get(runtime.BACKEND, "Hermes API server when up (gateway auto-start), else the CLI")
     perm_note = ("  can run tools without asking — set JARVIS_PERMISSION=default to require approval"
                  if perm == "bypass" else "")
 
@@ -546,11 +550,19 @@ def main():
   profile      {runtime.PROFILE}
   workdir      {runtime.WORKDIR}
   permission   {perm}{perm_note}
+  backend      {backend}
   voice        {vo}
   open         http://localhost:{PORT}
 """, flush=True)
 
     _setup_error_log()
+    runtime.start_gateway(_env)                # keep Hermes warm (no-op for JARVIS_BACKEND=cli)
+    # launchd stops us with SIGTERM: turn it into a normal shutdown so our gateway stops too
+    import signal
+
+    def _on_term(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _on_term)
     voice.start_async()
     runtime.prewarm_probes(background=True)   # first turn must not pay for `hermes --version` / `tools list`
     srv = JarvisServer(("127.0.0.1", PORT), Handler)
@@ -560,7 +572,9 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n  down.")
-        srv.shutdown()
+    finally:
+        runtime.stop_gateway()
+        srv.server_close()
 
 
 if __name__ == "__main__":

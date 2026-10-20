@@ -140,6 +140,87 @@ class CancelAndShutdownTests(unittest.TestCase):
         self.assertNotIn("error", kinds)
 
 
+class KeepHermesWarmTests(unittest.TestCase):
+    """auto backend: start a gateway when none answers, then run turns through it."""
+
+    def _free_port(self):
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _wait(self, want, secs=15):
+        import time
+        end = time.monotonic() + secs
+        while time.monotonic() < end and runtime.gateway_status()[0] != want:
+            time.sleep(0.1)
+        return runtime.gateway_status()[0]
+
+    def test_starts_gateway_runs_turns_through_it_and_stops_it(self):
+        port = self._free_port()
+        with tempfile.TemporaryDirectory() as td:
+            env_file = pathlib.Path(td) / ".env"
+            log = pathlib.Path(td) / "fake.log"
+            with mock.patch.dict(os.environ, {"HERMES_CMD": f"{sys.executable} {FAKE}",
+                                              "FAKE_HERMES_LOG": str(log)}, clear=False), \
+                 mock.patch.object(runtime, "RUNTIME", "hermes"), \
+                 mock.patch.object(runtime, "BACKEND", "auto"), \
+                 mock.patch.object(runtime, "START_GATEWAY", True), \
+                 mock.patch.object(runtime, "API_URL", f"http://127.0.0.1:{port}"), \
+                 mock.patch.object(runtime, "API_KEY", ""), \
+                 mock.patch.object(runtime, "_GATEWAY_LOG", pathlib.Path(td) / "gateway.log"):
+                runtime._TTL_CACHE.clear()
+                runtime._HEALTH.update(at=-1e9)
+                try:
+                    runtime.start_gateway(env_file)
+                    self.assertEqual(self._wait("ours"), "ours")
+                    self.assertIn("JARVIS_API_KEY=", env_file.read_text())
+                    events = list(runtime.run("hi there", None, "PERSONA"))
+                    proc = runtime._GATEWAY["proc"]
+                finally:
+                    runtime.stop_gateway()
+            kinds = [e.get("t") for e in events]
+            self.assertIn("complete", kinds)
+            self.assertEqual("".join(e["text"] for e in events if e.get("t") == "delta"), "warm hello.")
+            sent = [json.loads(x)["gateway_run"] for x in log.read_text().splitlines() if "gateway_run" in x]
+            self.assertEqual(sent[0]["input"], "hi there")          # persona is not in the transcript
+            self.assertIn("PERSONA", sent[0]["instructions"])
+            self.assertIsNotNone(proc.poll())                         # our gateway was stopped
+            self.assertEqual(runtime.gateway_status()[0], "off")
+
+    def test_uses_a_gateway_that_is_already_running(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Ok(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers()
+                self.wfile.write(b"{}")
+        srv = HTTPServer(("127.0.0.1", 0), Ok)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with mock.patch.object(runtime, "RUNTIME", "hermes"), \
+                 mock.patch.object(runtime, "BACKEND", "auto"), \
+                 mock.patch.object(runtime, "START_GATEWAY", True), \
+                 mock.patch.object(runtime, "API_KEY", "k"), \
+                 mock.patch.object(runtime, "API_URL", f"http://127.0.0.1:{srv.server_address[1]}"), \
+                 mock.patch.object(subprocess_mod(), "Popen", side_effect=AssertionError("must not spawn")):
+                runtime.start_gateway("/nonexistent/.env")
+                self.assertEqual(self._wait("external", 5), "external")
+                self.assertIsNone(runtime._GATEWAY["proc"])
+        finally:
+            srv.shutdown()
+            runtime._GATEWAY.update(proc=None, state="off", note="")
+
+
+def subprocess_mod():
+    import subprocess
+    return subprocess
+
+
 class UserNameTests(unittest.TestCase):
     def test_falls_back_to_os_user(self):
         name = runtime.user_name()

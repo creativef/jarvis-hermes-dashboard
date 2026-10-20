@@ -1,4 +1,4 @@
-"""Optional Hermes API-server backend (JARVIS_BACKEND=api).
+"""Hermes API-server backend (default when it answers: JARVIS_BACKEND=auto).
 
 Why this exists: the default backend runs `hermes chat -q` as a one-shot
 subprocess, and in that mode Hermes never *asks* about a flagged command — it
@@ -137,22 +137,35 @@ def resolve_approval(base, key, run_id, request_id, choice):
         return False, str(e)[:200]
 
 
-def run(message, session_id, prompt, *, base, key, idle_timeout, approval_timeout=100,
+def run(message, session_id, instructions=None, *, base, key, idle_timeout, approval_timeout=100,
         valid_session=lambda s: False, mono_ms=lambda: int(time.monotonic() * 1000),
         profile="default", permission="normal", auto_approve=False):
     """Generator of dashboard events for one turn, driven by the Hermes API server."""
     started = mono_ms()
-    body = {"input": prompt}
+    # `instructions` is Hermes' per-turn system prompt; `session_id` continues a
+    # conversation (Hermes loads its transcript). With no session, the run id becomes it.
+    body = {"input": message}
+    if instructions:
+        body["instructions"] = instructions
     if valid_session(session_id):
         body["session_id"] = str(session_id)
-    try:
-        run_info = _post(base, key, "/v1/runs", body, timeout=30)
-    except urllib.error.HTTPError as e:
-        yield dict(t="error", message=f"Hermes API refused the run (HTTP {e.code}). Check JARVIS_API_KEY.")
-        return
-    except Exception as e:  # noqa: BLE001
-        yield dict(t="error", message=f"Hermes API unreachable: {str(e)[:200]}")
-        return
+    while True:
+        try:
+            run_info = _post(base, key, "/v1/runs", body, timeout=30)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 409 and "session_id" in body:
+                # That conversation belongs to another Hermes surface (e.g. the CLI backend):
+                # carry on in a fresh thread rather than failing the turn.
+                body.pop("session_id")
+                session_id = None
+                yield dict(t="note", message="Started a fresh Hermes thread on the API server.")
+                continue
+            yield dict(t="error", message=f"Hermes API refused the run (HTTP {e.code}). Check JARVIS_API_KEY.")
+            return
+        except Exception as e:  # noqa: BLE001
+            yield dict(t="error", message=f"Hermes API unreachable: {str(e)[:200]}")
+            return
 
     run_id = run_info.get("run_id")
     if not run_id:
