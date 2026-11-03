@@ -35,14 +35,28 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
 
 MODEL = os.environ.get("JARVIS_MODEL", "").strip()
+# Provider override from the settings picker (JARVIS_PROVIDER). When set, the CLI is
+# invoked with `--provider`; when empty, Hermes falls back to config.yaml's model.provider.
+PROVIDER = os.environ.get("JARVIS_PROVIDER", "").strip()
 PROFILE = os.environ.get("HERMES_PROFILE", os.environ.get("JARVIS_PROFILE", "default")).strip() or "default"
-SOURCE = os.environ.get("HERMES_SOURCE", "jarvis-dashboard").strip() or "jarvis-dashboard"
+# Hermes' gateway only accepts a fixed set of creation surfaces for `hermes chat --source`
+# (cli, tui, gui, acp, tool, oneshot). An unlisted label — e.g. the old "jarvis-dashboard" — is
+# refused at session.create with "Gateway does not support source ...". "tool" is the documented
+# label for third-party integrations driving the CLI: it hides the session from the human CLI/TUI
+# pickers and resolves to the same "cli" toolset surface, so nothing else changes.
+_SUPPORTED_SOURCES = {"cli", "tui", "gui", "desktop", "acp", "tool", "oneshot"}
+SOURCE = os.environ.get("HERMES_SOURCE", "tool").strip() or "tool"
+if SOURCE not in _SUPPORTED_SOURCES:
+    SOURCE = "tool"
 WORKDIR = os.path.expanduser(os.environ.get("JARVIS_WORKDIR", os.getcwd()))
 PERMISSION = os.environ.get("JARVIS_PERMISSION", os.environ.get("HERMES_PERMISSION", "normal")).strip().lower()
 RUNTIME = os.environ.get("JARVIS_RUNTIME", "auto").strip().lower()  # auto|hermes|mock
@@ -64,7 +78,7 @@ START_GATEWAY = os.environ.get("JARVIS_START_GATEWAY", "1").strip() != "0"
 
 def apply_settings(settings):
     """Apply UI-supplied settings to the runtime globals (no restart needed)."""
-    global PERMISSION, IDLE_TIMEOUT, WORKDIR
+    global PERMISSION, IDLE_TIMEOUT, WORKDIR, MODEL, PROVIDER
     if settings.get("permission"):
         PERMISSION = str(settings["permission"]).strip().lower()
     if settings.get("timeout"):
@@ -74,6 +88,18 @@ def apply_settings(settings):
             pass
     if settings.get("workdir"):
         WORKDIR = os.path.expanduser(str(settings["workdir"]).strip())
+    # Provider/model chosen in the settings picker. Empty means "leave Hermes' own
+    # default in place"; a value rides into every `hermes chat` as --provider/--model.
+    # A saved value identical to the profile config is NOT an override: it must not
+    # pin the old value and shadow a later change made on the Hermes side.
+    native_provider, native_name = _native_model_config()
+    if "model_name" in settings:
+        chosen = str(settings.get("model_name") or "").strip()
+        MODEL = chosen if chosen and chosen != native_name else ""
+    if "model_provider" in settings:
+        chosen = str(settings.get("model_provider") or "").strip()
+        PROVIDER = chosen if chosen and not _same_provider(chosen, native_provider) else ""
+    clear_cache()      # model_info() keys off MODEL/PROVIDER; drop stale probe entries
 
 
 def current_settings():
@@ -98,7 +124,16 @@ def model_info():
     return _ttl_cached(key, _PROBE_TTL, _model_info_raw)
 
 
-def _model_info_raw():
+def _same_provider(a, b):
+    """Compare provider ids, treating the local alias ``local`` as ``llamacpp``."""
+    norm = {"local": "llamacpp", "llama.cpp": "llamacpp", "llama-cpp": "llamacpp"}
+    a = norm.get(str(a or "").strip().lower(), str(a or "").strip().lower())
+    b = norm.get(str(b or "").strip().lower(), str(b or "").strip().lower())
+    return a == b
+
+
+def _native_model_config():
+    """(provider, model) as the Hermes profile's config.yaml declares them."""
     provider = name = ""
     try:
         text = (_profile_home() / "config.yaml").read_text(encoding="utf-8")
@@ -116,9 +151,25 @@ def _model_info_raw():
                 name = m.group(1).strip("'\"")
     except OSError:
         pass
-    if MODEL:
-        name = MODEL
-    return {"model_provider": provider or "Hermes default", "model_name": name or "Hermes default"}
+    return provider, name
+
+
+def _model_info_raw():
+    provider, name = _native_model_config()
+    # The live value Hermes itself is configured with. A saved dashboard choice is
+    # an override ONLY when it actually differs from this — a stored value that
+    # matches the profile config must never shadow a later Hermes-side change.
+    prov_override = bool(PROVIDER) and not _same_provider(PROVIDER, provider)
+    name_override = bool(MODEL) and MODEL != name
+    eff_provider = PROVIDER if prov_override else (provider or "Hermes default")
+    eff_name = MODEL if name_override else (name or "Hermes default")
+    return {
+        "model_provider": eff_provider or "Hermes default",
+        "model_name": eff_name or "Hermes default",
+        "model_provider_native": provider or "Hermes default",
+        "model_name_native": name or "Hermes default",
+        "model_override": bool(prov_override or name_override),
+    }
 
 
 def user_name():
@@ -560,6 +611,8 @@ def build_command(message, session_id=None):
         cmd += ["--resume", str(session_id)]
     if MODEL:
         cmd += ["--model", MODEL]
+    if PROVIDER:
+        cmd += ["--provider", PROVIDER]
     if TOOLSETS:
         cmd += ["--toolsets", TOOLSETS]
     # JARVIS_PERMISSION=bypass maps to Hermes --yolo (skip dangerous-command
@@ -595,6 +648,337 @@ def _tools_snapshot_raw(limit=36):
         return tools or [out[:120]] if out else []
     except Exception:
         return []
+
+
+# ── provider + model discovery (for the settings picker) ─────────────────────
+# The picker must offer the models Hermes can genuinely use, so the list is
+# discovered from the Hermes runtime instead of being hardcoded here. No file in
+# hermes_cli/ is stable enough to depend on; instead we run the CLI's own Python
+# API (`hermes_cli.models.list_available_providers` / `curated_models_for_provider`)
+# in its own interpreter, exactly as `hermes model` does. When the install or the
+# interpreter cannot be found — or the call fails — we return an empty list and a
+# reason rather than inventing names.
+_MODELS_PROBE_MARK = "__JARVIS_MODELS__"
+_MODELS_PROBE_SRC = r'''
+import json, os, sys
+
+root, home, provider = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "")
+out = {"ok": False, "providers": [], "models": [], "error": ""}
+try:
+    if home:
+        os.environ["HERMES_HOME"] = home
+    sys.path.insert(0, root)
+    import hermes_bootstrap  # noqa: F401  (sets up the Hermes dependency graph)
+    from hermes_cli import models as M
+    out["providers"] = [
+        {"id": p.get("id"), "label": p.get("label") or p.get("id"),
+         "authenticated": bool(p.get("authenticated"))}
+        for p in M.list_available_providers()
+    ]
+    if provider:
+        out["models"] = [m[0] for m in M.curated_models_for_provider(provider)]
+    out["ok"] = True
+except Exception as e:  # noqa: BLE001
+    out["error"] = "%s: %s" % (type(e).__name__, e)
+print("__JARVIS_MODELS__" + json.dumps(out))
+'''
+_MODELS_TTL = float(os.environ.get("JARVIS_MODELS_TTL", "300"))
+_MODELS_TIMEOUT = float(os.environ.get("JARVIS_MODELS_TIMEOUT", "30"))
+
+
+def _hermes_home_base():
+    """The Hermes install root (~/.hermes), independent of the selected profile."""
+    return pathlib.Path(os.path.expanduser(os.environ.get("HERMES_HOME") or "~/.hermes"))
+
+
+def _hermes_agent_root():
+    """The checkout that holds ``hermes_cli/`` — the import root the CLI uses."""
+    seen = []
+    for base in (_hermes_home_base(), pathlib.Path(os.path.expanduser("~/.hermes"))):
+        if base in seen:
+            continue
+        seen.append(base)
+        cand = base / "hermes-agent"
+        if (cand / "hermes_cli").is_dir():
+            return cand
+    return None
+
+
+def _hermes_store_python():
+    """The store interpreter that runs Hermes (``<home>/tools/python-*/bin/python3``)."""
+    seen = []
+    for base in (_hermes_home_base(), pathlib.Path(os.path.expanduser("~/.hermes"))):
+        if base in seen:
+            continue
+        seen.append(base)
+        tools = base / "tools"
+        if tools.is_dir():
+            found = sorted(tools.glob("python-*/bin/python3"))
+            if found:
+                return found[-1]
+    return None
+
+
+def _discover_models(provider=""):
+    key = ("models_discovery", str(_profile_home()), str(provider))
+    return _ttl_cached(key, _MODELS_TTL, _discover_models_raw, provider)
+
+
+def _discover_models_raw(provider=""):
+    py = _hermes_store_python()
+    root = _hermes_agent_root()
+    if not py or not root:
+        return {"ok": False, "providers": [], "models": [],
+                "error": "Hermes install (hermes-agent + its bundled Python) was not found, "
+                         "so the model list is unavailable."}
+    path = None
+    try:
+        fd, path = tempfile.mkstemp(prefix="jarvis-models-", suffix=".py")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(_MODELS_PROBE_SRC)
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
+        proc = subprocess.run(
+            [str(py), "-I", path, str(root), str(_profile_home()), str(provider or "")],
+            cwd=str(root), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, timeout=_MODELS_TIMEOUT)
+        payload = None
+        for line in (proc.stdout or "").splitlines():
+            if line.startswith(_MODELS_PROBE_MARK):
+                try:
+                    payload = json.loads(line[len(_MODELS_PROBE_MARK):])
+                except ValueError:
+                    payload = None
+        if payload is None:
+            tail = [ln for ln in (proc.stderr or "").strip().splitlines() if ln.strip()]
+            detail = tail[-1][:200] if tail else "the Hermes runtime produced no output."
+            return {"ok": False, "providers": [], "models": [],
+                    "error": f"Model discovery failed: {detail}"}
+        return payload
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "providers": [], "models": [],
+                "error": f"Model discovery timed out after {int(_MODELS_TIMEOUT)}s."}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "providers": [], "models": [],
+                "error": f"Model discovery failed: {str(e)[:200]}"}
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+_LOCAL_TTL = float(os.environ.get("JARVIS_LOCAL_TTL", "15"))
+_LOCAL_ALIASES = {"local": "llamacpp", "llama.cpp": "llamacpp", "llama-cpp": "llamacpp"}
+
+
+def _canonical_provider(pid):
+    """Map the local alias ``local`` (and spellings) to the canonical ``llamacpp``."""
+    return _LOCAL_ALIASES.get(str(pid or "").strip().lower(), str(pid or "").strip())
+
+
+def _local_alias_model():
+    """``model_aliases.local.model`` from the profile config, or ``""``."""
+    try:
+        text = (_profile_home() / "config.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    block = re.search(r"^model_aliases:[ \t]*\n((?:[ \t]+.*\n?)*)", text, re.M)
+    if not block:
+        return ""
+    sub = re.search(r"^[ \t]+local:[ \t]*\n((?:[ \t]{4,}.*\n?)*)", block.group(1), re.M)
+    if sub:
+        m = re.search(r"^[ \t]+model:[ \t]*(\S+)", sub.group(1), re.M)
+        if m:
+            return m.group(1).strip("'\"")
+    return ""
+
+
+def _local_llamacpp_raw():
+    """Describe the Hermes-managed local llama.cpp runtime (provider ``llamacpp``).
+
+    Reads ``~/.hermes/runtimes/llamacpp/server.json`` for the live base URL and API
+    key, probes ``/health`` so a stopped server is reported honestly, then lists
+    ``/v1/models``. Nothing is invented: a down server yields ``reachable`` false and
+    an empty model list with a reason."""
+    path = _hermes_home_base() / "runtimes" / "llamacpp" / "server.json"
+    out = {"id": "llamacpp", "label": "Local · llama.cpp", "aliases": ["local"],
+           "local": True, "reachable": False, "base_url": "", "models": [], "reason": ""}
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        out["reason"] = "No managed llama.cpp server is configured."
+        return out
+    base = str(cfg.get("base_url") or "").strip().rstrip("/")
+    key = str(cfg.get("api_key") or "").strip()
+    out["base_url"] = base
+    if not base:
+        out["reason"] = "The managed llama.cpp server has no base URL."
+        return out
+    root = base[:-3] if base.endswith("/v1") else base
+    try:
+        with urllib.request.urlopen(root + "/health", timeout=3) as r:
+            out["reachable"] = 200 <= int(getattr(r, "status", 200)) < 300
+    except (urllib.error.URLError, OSError, ValueError):
+        out["reachable"] = False
+    if not out["reachable"]:
+        out["reason"] = "The local llama.cpp server is not running."
+        return out
+    try:
+        req = urllib.request.Request(base + "/models")
+        if key:
+            req.add_header("Authorization", "Bearer " + key)
+        with urllib.request.urlopen(req, timeout=6) as r:
+            payload = json.loads(r.read().decode("utf-8") or "{}")
+        out["models"] = [str(m.get("id")) for m in (payload.get("data") or [])
+                         if isinstance(m, dict) and m.get("id")]
+    except (urllib.error.URLError, OSError, ValueError):
+        out["reason"] = "Local server is reachable, but its model list could not be read."
+    if not out["models"]:
+        alias = _local_alias_model()
+        if alias:
+            out["models"] = [alias]
+            out["reason"] = ""
+    return out
+
+
+def _local_llamacpp():
+    return _ttl_cached(("local_llamacpp", str(_hermes_home_base())), _LOCAL_TTL, _local_llamacpp_raw)
+
+
+def models_catalog(provider=None):
+    """Providers plus the models available for ``provider`` (defaults to the active one).
+
+    Shape: {ok, provider, providers:[{id,label,authenticated,aliases,local,reachable}],
+    models:[id], reason, source}. The managed local llama.cpp runtime is merged in as
+    the ``llamacpp`` provider (alias ``local``) even though the Hermes CLI catalog does
+    not enumerate it. ``models`` is empty with a human-readable ``reason`` whenever a
+    list could not be produced — never a fabricated one."""
+    info = model_info()
+    raw_target = str(provider or PROVIDER or info.get("model_provider") or "").strip()
+    if raw_target in ("", "Hermes default"):
+        raw_target = ""
+    target = _canonical_provider(raw_target)
+    local = _local_llamacpp()
+    # Discovery is provider-scoped; for the local runtime the CLI has no entry, so
+    # only the provider list is needed from it.
+    found = _discover_models("" if target == "llamacpp" else target)
+
+    providers, seen = [], set()
+    for p in (found.get("providers") or []):
+        pid = str(p.get("id") or "").strip()
+        if not pid or pid in seen:      # the Hermes catalog can repeat e.g. "custom"
+            continue
+        seen.add(pid)
+        providers.append({"id": pid, "label": p.get("label") or pid,
+                          "authenticated": bool(p.get("authenticated")),
+                          "aliases": list(p.get("aliases") or []),
+                          "local": False, "reachable": None})
+    local_entry = {"id": local["id"], "label": local["label"],
+                   "authenticated": bool(local["reachable"]),
+                   "aliases": list(local.get("aliases") or ["local"]),
+                   "local": True, "reachable": bool(local["reachable"]),
+                   "base_url": local.get("base_url") or ""}
+    existing = next((p for p in providers if p["id"] == local["id"]), None)
+    if existing:
+        existing.update(local_entry)
+    else:
+        providers.insert(0, local_entry)
+
+    tgt = next((p for p in providers if p.get("id") == target), None)
+    if target == "llamacpp":
+        models = [str(m) for m in (local.get("models") or [])]
+        ok = True
+        reason = "" if models else (local.get("reason") or
+                                    "The local llama.cpp server has no models available.")
+    else:
+        models = [str(m) for m in (found.get("models") or [])]
+        ok = bool(found.get("ok"))
+        reason = ""
+        if not ok:
+            reason = found.get("error") or "Model discovery is unavailable."
+        elif not target:
+            reason = "No provider is configured yet."
+        elif not models:
+            if tgt and not tgt.get("authenticated"):
+                reason = (f"No credentials available for {tgt.get('label') or target}. "
+                          "Sign in with `hermes model`.")
+            else:
+                reason = f"No models discovered for {target}. Run `hermes model` to refresh the catalog."
+    return {
+        "ok": bool(ok),
+        "provider": ({"id": target, "label": (tgt or {}).get("label") or target,
+                      "authenticated": bool((tgt or {}).get("authenticated")),
+                      "local": bool((tgt or {}).get("local")),
+                      "reachable": (tgt or {}).get("reachable"),
+                      "aliases": list((tgt or {}).get("aliases") or [])} if target else None),
+        "providers": providers,
+        "models": models,
+        "reason": reason,
+        "source": "local-runtime" if target == "llamacpp" else
+                  ("hermes-cli" if found.get("ok") else "unavailable"),
+    }
+
+
+def test_model(provider=None, model=None):
+    """Fire one trivial prompt through Hermes with the candidate provider/model and
+    report the round-trip. Nothing is persisted: this only validates the choice."""
+    provider = str(provider or "").strip()
+    model = str(model or "").strip()
+    cmd = _hermes_base() + ["chat", "--format", "stream-json", "--query-file", "-", "--source", SOURCE]
+    if model:
+        cmd += ["--model", model]
+    if provider:
+        cmd += ["--provider", provider]
+    if PERMISSION == "bypass":
+        cmd += ["--yolo"]
+    child_env = dict(os.environ)
+    child_env["HERMES_PROFILE"] = PROFILE
+    home = os.path.expanduser("~")
+    child_env["PATH"] = ":".join(dict.fromkeys([
+        child_env.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin",
+        os.path.join(home, ".local", "bin"), os.path.join(home, ".npm-global", "bin"),
+        "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+    ]))
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(cmd, cwd=WORKDIR, input="Reply with the single word: pong",
+                              text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=child_env, timeout=float(os.environ.get("JARVIS_TEST_TIMEOUT", "120")))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "The test prompt timed out before the model answered."}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not launch Hermes: {str(e)[:200]}"}
+    reply, result, exit_code = "", None, None
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "text":
+            reply += ev.get("text") or ""
+        elif ev.get("type") == "result":
+            result = ev
+            exit_code = ev.get("exit_code")
+            reply = ev.get("text") or reply
+    ms = int((time.monotonic() - started) * 1000)
+    if result is None or (exit_code not in (None, 0)):
+        detail = ""
+        if result is not None:
+            detail = str(result.get("error") or result.get("text") or "")
+        if not detail:
+            tail = [ln for ln in (proc.stderr or "").strip().splitlines() if ln.strip()]
+            detail = tail[-1] if tail else "no answer came back"
+        return {"ok": False, "error": detail[:300], "ms": ms}
+    reply = reply.strip()
+    if not reply:
+        return {"ok": False, "error": "The model returned an empty answer.", "ms": ms}
+    return {"ok": True, "reply": reply[:400], "ms": ms}
 
 
 def run_hermes(message, session_id=None, system=None):
@@ -858,6 +1242,7 @@ def _run(message, session_id=None, system=None):
                     valid_session=valid_session, mono_ms=_mono_ms,
                     profile=PROFILE, permission=PERMISSION,
                     auto_approve=(PERMISSION == "bypass"),
+                    model=MODEL, provider=PROVIDER,
                 ):
                     if ev.get("t") == "delta":
                         chunk = ev.get("text") or ""

@@ -95,6 +95,7 @@
         <div class="stbrand">ATLAS</div>
         <div class="stword" id="stword">STANDBY</div>
         <div class="strun" id="strun">awaiting uplink</div>
+        <div class="stmodel" id="stModel" title="Active provider and model read live from Hermes">—</div>
         <div class="sttool" id="stTool" hidden></div>
       </div>
     </div>
@@ -125,6 +126,7 @@
       </div>
     </div>
     <div class="composer">
+      <div class="attachchips" id="attachChips" hidden aria-live="polite"></div>
       <div class="armedchip" id="armedChip" hidden><span>Armed</span><b id="armedName"></b><button id="armedX" aria-label="Disarm command">✕</button></div>
       <div class="slashmenu" id="slashMenu" role="listbox" hidden></div>
       <div class="field">
@@ -133,6 +135,8 @@
       <div class="actions">
         <button id="mic" class="ctl mic" title="Voice / microphone">◉ Browser Voice</button>
         <button id="clearBtn" class="ctl aux" title="Clear conversation">Clear</button>
+        <button id="attachBtn" class="ctl attach" type="button" title="Attach a file or image — or drop / paste it into the chat" aria-label="Attach a file or image">📎 Attach</button>
+        <input type="file" id="attachInput" multiple hidden>
         <button id="run" class="ctl run" title="Send (⌘↵)">Send ▸</button>
       </div>
       <div class="tip" id="tip">Use <b>Browser Voice</b> for local speech recognition, or local Parakeet/Kokoro if installed. Try <b>/browser</b> “open Chrome and inspect the current tab”.</div>
@@ -202,11 +206,22 @@
       <div class="picklabel">Display Mode</div>
       <div class="pickgrid" id="displayModeGrid" style="grid-template-columns:repeat(2,1fr)"></div>
       <label class="sfield">Provider
-        <input id="set-provider" type="text" readonly tabindex="-1">
+        <select id="set-provider" aria-label="Provider"></select>
       </label>
-      <label class="sfield">Model
-        <input id="set-model" type="text" readonly tabindex="-1">
-      </label>
+      <div class="sfield">Model
+        <div class="combo" id="modelCombo">
+          <input id="set-model" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="Search models…" role="combobox" aria-autocomplete="list"
+                 aria-expanded="false" aria-controls="modelList">
+          <button type="button" id="modelClear" class="combo-x" aria-label="Clear model" hidden>✕</button>
+          <div id="modelList" class="combo-list" role="listbox" hidden></div>
+        </div>
+      </div>
+      <p class="snote" id="modelNote" hidden></p>
+      <div class="testrow">
+        <button type="button" id="modelTest" class="ctl aux">Test connection</button>
+        <span id="modelTestOut" class="testout" aria-live="polite"></span>
+      </div>
       <label class="sfield">Permission
         <select id="set-permission">
           <option value="normal">Normal — ask before running tools</option>
@@ -361,6 +376,9 @@
 </div>
 
 <!-- Full-window drag-and-drop overlay -->
+
+<!-- Hermes error lightbox -->
+<div id="errorLightbox" class="error-lightbox" hidden role="dialog" aria-modal="true" aria-label="Error">\n  <div class="error-panel glass">\n    <div class="rhead"><span>Something went wrong</span></div>\n    <div class="error-body"><p id="errorMessage"></p></div>\n    <div class="error-actions"><button id="errorDismiss" class="ctl run">Dismiss</button></div>\n  </div>\n</div>
 <div id="windowDropOverlay" class="window-drop-overlay" hidden aria-hidden="true">
   <div class="wdo-box">
     <div class="wdo-ico">⬇</div>

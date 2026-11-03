@@ -37,6 +37,23 @@ function setState(cls, word, sub){
 function setTag(cls, text){ const t=$('#rtag'); t.className='rtag '+cls; t.textContent=text; }
 
 // ── action log ──
+
+// Error lightbox controller
+const errorBox = $('#errorLightbox');
+const errorMsg = $('#errorMessage');
+const errorDismiss = $('#errorDismiss');
+errorDismiss.addEventListener('click', ()=>{document.body.classList.remove('error');errorBox.hidden=true;});
+const observer = new MutationObserver(mutations=>{
+  mutations.forEach(m=>{
+    if(m.target.classList.contains('error')){
+      const msg = $('#stword').textContent || $('#strun').textContent || 'Unknown error';
+      errorMsg.textContent = msg;
+      errorBox.hidden = false;
+    }
+  });
+});
+observer.observe(document.body, {attributes:true, attributeFilter:['class']});
+
 function log(kind, label, msg, jsonHtml){
   const e = document.createElement('div');
   e.className = 'entry k-' + kind;
@@ -1397,16 +1414,272 @@ setInterval(async () => {
   });
 })();
 
-// ══════════ settings: provider + model (read-only) ══════════
+// ══════════ settings: provider + model picker (front-end over /api/models) ══════════
+// The backend already discovers the real provider/model catalog (GET /api/models) and
+// persists the choice (POST /api/settings); this only drives the panel. The active line
+// by the orb is read LIVE from GET /api/settings, so a change made on the Hermes side
+// shows up on reload instead of a stale stored value — a stored choice is an override
+// only when it differs (the backend already enforces that).
 (() => {
-  const btn = $('#settingsBtn'); if (!btn) return;
-  btn.addEventListener('click', async () => {
+  const provSel  = $('#set-provider');
+  const modelIn  = $('#set-model');
+  const modelList= $('#modelList');
+  const clearBtn = $('#modelClear');
+  const noteEl   = $('#modelNote');
+  const testBtn  = $('#modelTest');
+  const testOut  = $('#modelTestOut');
+  const openBtn  = $('#settingsBtn');
+  const saveBtn  = $('#settingsSave');
+  const activeEl = $('#stModel');
+  if (!provSel || !modelIn || !modelList) return;
+
+  const DEFAULT_LABEL = 'Hermes default';
+  const apiJson = extra => fetch(extra.url, {headers: apiHeaders(extra.headers), method: extra.method || 'GET',
+                                             body: extra.body}).then(r => r.json());
+
+  let metaById = {};                    // provider id (and its aliases) -> catalog entry
+  const modelsByProvider = {};          // provider id -> {models:[], reason:''}
+  let listOpen = false, selIdx = -1, shownOpts = [];
+  let liveProviderId = '', liveModel = '';
+
+  const optText = p => {
+    let t = p.label || p.id;
+    if (p.local){ if (p.reachable === false) t += ' · server down'; }
+    else if (!p.authenticated) t += ' · not signed in';
+    return t;
+  };
+  const providerMeta   = () => metaById[provSel.value] || null;
+  const isNoCreds      = () => { const m = providerMeta(); return !!(m && !m.local && !m.authenticated); };
+  const isLocalDown    = () => { const m = providerMeta(); return !!(m && m.local && m.reachable === false); };
+  const blockedReason  = () => isNoCreds() ? 'no credentials' : (isLocalDown() ? 'server down' : '');
+  const syncClear      = () => { clearBtn.hidden = !modelIn.value.trim(); };
+  const setNote        = msg => { noteEl.hidden = !msg; noteEl.textContent = msg || ''; };
+
+  // ── the active provider·model line by the orb — always the LIVE value from Hermes ──
+  async function renderActive(){
+    if (!activeEl) return;
     try {
-      const s = await fetch('/api/settings', {headers: apiHeaders()}).then(r => r.json());
-      $('#set-provider').value = s.model_provider || '';
-      $('#set-model').value = s.model_name || '';
-    } catch (_) {}
+      const s = await apiJson({url: '/api/settings'});
+      const prov = s.model_provider || DEFAULT_LABEL;
+      const mod  = s.model_name || DEFAULT_LABEL;
+      const override = !!s.model_override;
+      activeEl.innerHTML = `<span class="smo">${esc(prov)}</span>`
+        + (mod && mod !== DEFAULT_LABEL ? ' · ' + esc(mod) : '')
+        + (override ? '<span class="smo-badge">OVERRIDE</span>' : '');
+      activeEl.title = override
+        ? `Override in effect — Hermes is configured for ${s.model_provider_native} · ${s.model_name_native}`
+        : 'Active provider and model, read live from Hermes';
+    } catch (_) { /* keep the last known value rather than blanking it */ }
+  }
+
+  // ── Provider select, from a models_catalog() providers list ──
+  function fillProviders(providers, selectedId){
+    metaById = {};
+    const ids = new Set();
+    const opts = [`<option value="">${esc(DEFAULT_LABEL)}</option>`];
+    for (const p of (providers || [])){
+      if (!p || !p.id || ids.has(p.id)) continue;
+      ids.add(p.id);
+      metaById[p.id] = p;
+      for (const a of (p.aliases || [])) metaById[a] = p;
+      const unusable = !p.local && !p.authenticated;
+      const isSel = p.id === selectedId;
+      opts.push(`<option value="${esc(p.id)}"${unusable && !isSel ? ' disabled' : ''}>${esc(optText(p))}</option>`);
+    }
+    // never silently drop a live provider the catalog did not enumerate
+    if (selectedId && selectedId !== DEFAULT_LABEL && !ids.has(selectedId)){
+      opts.push(`<option value="${esc(selectedId)}">${esc(selectedId)}</option>`);
+    }
+    provSel.innerHTML = opts.join('');
+    provSel.value = (selectedId && selectedId !== DEFAULT_LABEL) ? selectedId : '';
+    if (provSel.selectedIndex < 0) provSel.value = '';
+  }
+
+  // keep the provider labels honest when a fresh catalog changes auth / reachability
+  function relabelProviders(){
+    for (const o of provSel.options){
+      const p = o.value && metaById[o.value];
+      if (p) o.textContent = optText(p);
+    }
+  }
+
+  // ── searchable Model combobox (list is scoped to the chosen provider) ──
+  // No argument = show the whole list (focus/click/provider change); pass the typed
+  // text to filter as the user types.
+  function renderModels(filter){
+    const raw = (filter === undefined) ? '' : String(filter);
+    const q = raw.trim().toLowerCase();
+    const pid = provSel.value;
+    const entry = modelsByProvider[pid] || {models: [], reason: ''};
+    const all = entry.models || [];
+    const shown = all.filter(m => !q || m.toLowerCase().includes(q));
+    const blocked = blockedReason();
+    shownOpts = [];
+    if (!shown.length){
+      const why = (all.length && q)
+        ? `No model matches “${raw.trim()}”.`
+        : (entry.reason || (pid ? 'No models discovered for this provider.'
+                                : `No override — ${DEFAULT_LABEL} is in use.`));
+      modelList.innerHTML = `<div class="combo-empty">${esc(why)}</div>`;
+      return;
+    }
+    modelList.innerHTML = shown.map((m, i) => {
+      const cur = !blocked && m === modelIn.value.trim();
+      const tag = blocked ? `<span class="co-tag">${esc(blocked)}</span>` : '';
+      shownOpts.push(m);
+      return `<div class="combo-opt${blocked ? ' disabled' : ''}${cur ? ' sel' : ''}" role="option"`
+        + ` data-i="${i}" aria-disabled="${blocked ? 'true' : 'false'}">${esc(m)}${tag}</div>`;
+    }).join('');
+  }
+  function openList(){ listOpen = true; modelList.hidden = false; modelIn.setAttribute('aria-expanded', 'true');
+                       selIdx = -1; renderModels(); }
+  function closeList(){ listOpen = false; modelList.hidden = true; modelIn.setAttribute('aria-expanded', 'false'); selIdx = -1; }
+  function pick(i){
+    const m = shownOpts[i];
+    if (m == null) return;
+    if (blockedReason()){ setNote(`That provider is unavailable (${blockedReason()}), so its models can’t be chosen.`); return; }
+    modelIn.value = m; syncClear(); closeList(); setNote('');
+  }
+
+  // ── fetch the models for a provider (discovery is provider-scoped server-side) ──
+  async function loadModelsFor(pid, force){
+    if (force || !(pid in modelsByProvider)){
+      try {
+        const url = '/api/models' + (pid ? '?provider=' + encodeURIComponent(pid) : '');
+        const cat = await apiJson({url});
+        modelsByProvider[pid] = {models: cat.models || [], reason: cat.reason || ''};
+        for (const p of (cat.providers || [])){       // refresh auth / reachability too
+          if (!p || !p.id) continue;
+          metaById[p.id] = p;
+          for (const a of (p.aliases || [])) metaById[a] = p;
+        }
+        relabelProviders();
+      } catch (e){
+        modelsByProvider[pid] = {models: [], reason: 'Could not load models: ' + (e.message || e)};
+      }
+    }
+    renderModels();
+    const entry = modelsByProvider[pid] || {};
+    const m = metaById[pid];
+    let msg = '';
+    if (m && m.local && m.reachable === false)        msg = entry.reason || 'The local llama.cpp server is not running.';
+    else if (m && !m.local && !m.authenticated)       msg = entry.reason || `No credentials available for ${m.label || pid}. Sign in with \`hermes model\`.`;
+    else if (!(entry.models || []).length)            msg = entry.reason || '';
+    setNote(msg);
+  }
+
+  // ── open: load the live choice + the catalog, then populate both controls ──
+  async function openPicker(){
+    try {
+      const s = await apiJson({url: '/api/settings'});
+      liveProviderId = s.model_provider || '';
+      liveModel = s.model_name || '';
+      const cat = await apiJson({url: '/api/models'});
+      const targetId = (cat.provider && cat.provider.id) || liveProviderId;
+      modelsByProvider[targetId] = {models: cat.models || [], reason: cat.reason || ''};
+      if (liveProviderId && liveProviderId !== targetId) modelsByProvider[liveProviderId] = modelsByProvider[targetId];
+      fillProviders(cat.providers, targetId);
+      modelIn.value = (liveModel && liveModel !== DEFAULT_LABEL) ? liveModel : '';
+      syncClear();
+      renderModels();
+      const m = metaById[provSel.value];
+      let msg = '';
+      if (m && m.local && m.reachable === false)      msg = modelsByProvider[provSel.value]?.reason || 'The local llama.cpp server is not running.';
+      else if (m && !m.local && !m.authenticated)     msg = modelsByProvider[provSel.value]?.reason || `No credentials available for ${m.label || provSel.value}.`;
+      else if (!(modelsByProvider[provSel.value]?.models || []).length) msg = modelsByProvider[provSel.value]?.reason || '';
+      setNote(msg);
+      const t = modelsByProvider[provSel.value]?.models || [];
+      log('note', 'MODELS', `${(cat.providers || []).length} providers · ${t.length} model${t.length === 1 ? '' : 's'} for ${provSel.value || DEFAULT_LABEL}`);
+    } catch (e){
+      log('error', 'MODELS', 'could not load the model catalog: ' + (e.message || e));
+    }
+  }
+
+  // ── wiring ──
+  provSel.addEventListener('change', async () => {
+    const pid = provSel.value;
+    modelIn.value = (pid === liveProviderId) ? ((liveModel && liveModel !== DEFAULT_LABEL) ? liveModel : '') : '';
+    syncClear(); closeList();
+    log('note', 'MODELS', `provider → ${pid || DEFAULT_LABEL}; loading models…`);
+    await loadModelsFor(pid, true);
+    log('note', 'MODELS', `${(modelsByProvider[pid]?.models || []).length} model(s) for ${pid || DEFAULT_LABEL}`);
   });
+
+  modelIn.addEventListener('focus', openList);
+  modelIn.addEventListener('click', () => { if (!listOpen) openList(); });
+  modelIn.addEventListener('input', () => { syncClear(); if (!listOpen) openList(); else renderModels(modelIn.value); });
+  modelIn.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+      e.preventDefault();
+      if (!listOpen) return openList();
+      const n = shownOpts.length; if (!n) return;
+      if (selIdx < 0) selIdx = (e.key === 'ArrowDown') ? 0 : n - 1;
+      else selIdx = (selIdx + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+      modelList.querySelectorAll('.combo-opt').forEach((o, i) => o.classList.toggle('sel', i === selIdx));
+      const el = modelList.querySelector('.combo-opt.sel'); if (el) el.scrollIntoView({block: 'nearest'});
+    } else if (e.key === 'Enter'){
+      if (listOpen && selIdx >= 0){ e.preventDefault(); pick(selIdx); } else closeList();
+    } else if (e.key === 'Escape' && listOpen){
+      e.preventDefault(); e.stopPropagation(); closeList();      // don't also hush the orb
+    }
+  });
+  modelList.addEventListener('mousedown', e => {
+    const opt = e.target.closest('.combo-opt'); if (!opt) return;
+    e.preventDefault();                    // keep focus on the input
+    pick(parseInt(opt.dataset.i, 10));
+  });
+  document.addEventListener('mousedown', e => { if (listOpen && !e.target.closest('#modelCombo')) closeList(); });
+  clearBtn.addEventListener('click', () => { modelIn.value = ''; syncClear(); openList(); });
+
+  // ── Test connection → POST /api/models/test, result or error inline ──
+  testBtn.addEventListener('click', async () => {
+    const pid = provSel.value, model = modelIn.value.trim();
+    testBtn.disabled = true;
+    testOut.className = 'testout'; testOut.textContent = 'testing…';
+    try {
+      const r = await apiJson({url: '/api/models/test', method: 'POST', headers: {'content-type': 'application/json'},
+                               body: JSON.stringify({provider: pid, model})});
+      if (r && r.ok){
+        testOut.className = 'testout ok';
+        testOut.textContent = `✓ round-trip: ${r.reply || 'ok'}${r.ms != null ? ' · ' + r.ms + ' ms' : ''}`;
+      } else {
+        testOut.className = 'testout err';
+        testOut.textContent = '✕ ' + ((r && r.error) || 'the test failed');
+      }
+    } catch (e){
+      testOut.className = 'testout err';
+      testOut.textContent = '✕ ' + (e.message || 'could not reach the test endpoint');
+    } finally { testBtn.disabled = false; }
+  });
+
+  // ── save provider + model through the existing settings save path ──
+  saveBtn.addEventListener('click', async () => {
+    const body = {model_provider: provSel.value, model_name: modelIn.value.trim()};
+    try {
+      const r = await apiJson({url: '/api/settings', method: 'POST', headers: {'content-type': 'application/json'},
+                               body: JSON.stringify(body)});
+      if (r && r.error){ log('error', 'SETTINGS', r.error); return; }
+      await renderActive();      // reflect the LIVE effective value, not the stored one
+      log('note', 'SETTINGS', `model → ${r.model_provider || DEFAULT_LABEL} · ${r.model_name || DEFAULT_LABEL}${r.model_override ? ' (override)' : ''}`);
+    } catch (_){ log('error', 'SETTINGS', 'could not save provider/model'); }
+  });
+
+  if (openBtn) openBtn.addEventListener('click', () => { openPicker(); renderActive(); });
+
+  renderActive();
+  setInterval(renderActive, 30000);      // keep the orb line live as Hermes-side config changes
+
+  // small read-only surface for tests / other panels
+  window.AtlasModels = {
+    open: openPicker,
+    active: renderActive,
+    catalog: () => ({provider: provSel.value, providers: Object.values(metaById)
+      .filter((p, i, a) => a.findIndex(q => q.id === p.id) === i).map(p => p.id),
+      models: shownOpts.slice()}),
+    modelsFor: pid => (modelsByProvider[pid]?.models || []).slice(),
+    note: () => noteEl.textContent,
+    blocked: () => blockedReason(),
+  };
 })();
 
 // ══════════ living orb: character states · radial waveform · comet/ring · particles · live caption ══════════
@@ -3240,5 +3513,209 @@ setInterval(async () => {
       streamedThisRun = false;
     }
     return prevHandle(ev);
+  };
+})();
+
+// ══════════ chat composer attachments (additive; inbox, Brain and voice untouched) ══════════
+// Files land in <project>/attachments/<YYYY-MM-DD>/ via POST /api/attach and their
+// ABSOLUTE paths are appended to the outgoing message, so the agent knows what to open.
+// Nothing here routes through the inbox or touches ~/Atlas.
+(() => {
+  'use strict';
+  const input  = document.getElementById('input');
+  const btn    = document.getElementById('attachBtn');
+  const picker = document.getElementById('attachInput');
+  const chips  = document.getElementById('attachChips');
+  const card   = document.getElementById('responseWrap');
+  const composer = document.querySelector('.composer');
+  if (!input || !btn || !picker || !chips) return;
+
+  const note = (kind, label, msg) => { try { log(kind, label, msg); } catch (_) {} };
+  const fmtSize = n => n < 1024 ? n + ' B'
+    : n < 1048576 ? (n / 1024).toFixed(1) + ' KB'
+    : (n / 1048576).toFixed(1) + ' MB';
+  const HEADER = 'Attached files (read these):';
+
+  let pending = [];          // {name, bytes, path, mime, error, uploading, el}
+
+  function renderChips(){
+    chips.innerHTML = '';
+    chips.hidden = pending.length === 0;
+    for (const a of pending){
+      const el = document.createElement('span');
+      el.className = 'attachchip' + (a.error ? ' err' : '') + (a.uploading ? ' busy' : '');
+      if (a.error){
+        el.innerHTML = '<span class="aico">⚠</span>'
+          + `<span class="aname">${esc(a.name)}</span>`
+          + `<span class="asize">${esc(a.error)}</span>`;
+      } else if (a.uploading){
+        el.innerHTML = '<span class="aico">📎</span>'
+          + `<span class="aname">${esc(a.name)}</span><span class="asize">saving…</span>`;
+      } else {
+        el.innerHTML = '<span class="aico">📎</span>'
+          + `<span class="aname" title="${esc(a.path || a.name)}">${esc(a.name)}</span>`
+          + `<span class="asize">${fmtSize(a.bytes)}</span>`;
+      }
+      const x = document.createElement('button');
+      x.type = 'button'; x.className = 'ax'; x.textContent = '✕';
+      x.setAttribute('aria-label', 'Remove ' + a.name);
+      x.addEventListener('click', ev => { ev.preventDefault(); remove(a); });
+      el.appendChild(x);
+      a.el = el;
+      chips.appendChild(el);
+    }
+    btn.classList.toggle('on', pending.some(a => a.path && !a.error));
+  }
+
+  function remove(a){
+    const i = pending.indexOf(a);
+    if (i >= 0) pending.splice(i, 1);
+    renderChips();
+    input.focus();
+  }
+
+  function readDataURL(file){
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result || ''));
+      fr.onerror = () => rej(new Error('could not read the file'));
+      fr.readAsDataURL(file);
+    });
+  }
+
+  async function attachFile(file){
+    if (!file) return null;
+    const name = file.name || 'file';
+    if (!file.size){                                     // never silently drop it
+      const bad = {name, bytes: 0, error: 'empty file'};
+      pending.push(bad); renderChips();
+      note('error', 'ATTACH', `${name}: the file is empty — nothing was saved`);
+      return bad;
+    }
+    const entry = {name, bytes: file.size, uploading: true};
+    pending.push(entry); renderChips();
+    let data;
+    try { data = await readDataURL(file); }
+    catch (e){
+      entry.uploading = false; entry.error = 'read failed'; renderChips();
+      note('error', 'ATTACH', `${name}: ${e.message || 'could not read the file'}`);
+      return entry;
+    }
+    try {
+      const r = await fetch('/api/attach', {
+        method: 'POST',
+        headers: apiHeaders({'content-type': 'application/json'}),
+        body: JSON.stringify({name, data_base64: data, kind: file.type || ''}),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok || !j.path) throw new Error(j.error || ('HTTP ' + r.status));
+      entry.uploading = false;
+      entry.path = j.path; entry.name = j.name || entry.name;
+      entry.bytes = (j.bytes != null) ? j.bytes : entry.bytes;
+      entry.mime = j.mime_guess;
+      note('note', 'ATTACH', `${entry.name} (${fmtSize(entry.bytes)}) → ${entry.path}`);
+    } catch (e){
+      entry.uploading = false;
+      const why = String(e.message || e).replace(/\s+/g, ' ').trim().slice(0, 60);
+      entry.error = (why && why !== 'undefined') ? why : 'upload failed';
+      renderChips();
+      note('error', 'ATTACH', `${name}: ${String(e.message || e).slice(0, 180)} — file was NOT attached`);
+      return entry;
+    }
+    renderChips();
+    return entry;
+  }
+
+  async function attachFiles(fileList){
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    input.focus();
+    for (const f of files) await attachFile(f);
+  }
+
+  const readyPaths = () => pending.filter(a => a.path && !a.error).map(a => a.path);
+
+  // Append the saved absolute paths to the outgoing text just before the existing
+  // send handlers read #input — so Enter, ⌘↵ and the Send button all carry them,
+  // and something with attachments but no typed text still sends.
+  function prepareSend(){
+    const paths = readyPaths();
+    if (!paths.length) return false;
+    const typed = input.value.replace(/\s+$/, '');
+    input.value = (typed ? typed + '\n\n' : '') + HEADER + '\n' + paths.join('\n');
+    pending = pending.filter(a => !(a.path && !a.error));   // failed entries stay visible
+    renderChips();
+    note('send', 'ATTACH', `sending ${paths.length} attachment${paths.length > 1 ? 's' : ''} with this message`);
+    return true;
+  }
+
+  // capture phase: runs before the existing Enter / ⌘↵ / Send handlers
+  document.addEventListener('keydown', e => {
+    if (e.target !== input || e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    const sm = document.getElementById('slashMenu');
+    if (sm && !sm.hidden) return;                        // picking a slash command, not sending
+    prepareSend();
+  }, true);
+  document.addEventListener('click', e => {
+    const t = e.target instanceof Element ? e.target : null;
+    if (t && t.closest('#run')) prepareSend();
+  }, true);
+
+  btn.addEventListener('click', () => picker.click());
+  picker.addEventListener('change', () => {
+    if (picker.files && picker.files.length) attachFiles(picker.files);
+    picker.value = '';
+  });
+
+  // paste a file/image straight into the composer
+  input.addEventListener('paste', e => {
+    const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
+    if (!files.length) return;                           // plain text paste behaves as before
+    e.preventDefault();
+    const text = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+    if (text) { try { document.execCommand('insertText', false, text); } catch (_) {} }
+    attachFiles(files);
+  });
+
+  // drag & drop onto the chat card or the composer (queued behind the inbox overlay's
+  // window handler, which is stopped here so a chat drop never becomes an inbox item)
+  const isFileDrag = e => Array.from((e.dataTransfer && e.dataTransfer.types) || []).includes('Files');
+  [card, composer].filter(Boolean).forEach(zone => {
+    zone.addEventListener('dragenter', e => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      zone.classList.add('dragover');
+    });
+    zone.addEventListener('dragover', e => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      zone.classList.add('dragover');
+    });
+    zone.addEventListener('dragleave', e => {
+      e.stopPropagation(); zone.classList.remove('dragover');
+    });
+    zone.addEventListener('drop', e => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      zone.classList.remove('dragover');
+      const overlay = document.getElementById('windowDropOverlay');
+      if (overlay) overlay.hidden = true;                // this drop is for the chat
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length)
+        attachFiles(e.dataTransfer.files);
+    });
+  });
+
+  renderChips();
+
+  // small read-only surface so tests (and other panels) can inspect/queue attachments
+  window.AtlasAttach = {
+    open: () => picker.click(),
+    attach: attachFile,
+    attachFiles,
+    prepareSend,
+    pending: () => pending.map(a => ({name: a.name, path: a.path || null, error: a.error || null})),
+    paths: readyPaths,
+    list: () => fetch('/api/attachments', {headers: apiHeaders()}).then(r => r.json()),
   };
 })();

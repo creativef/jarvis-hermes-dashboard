@@ -105,6 +105,25 @@ class ApiBackendTests(unittest.TestCase):
         self.assertEqual(evs[-1]["session_id"], "20261015_171425_cfb3ae")
         self.assertEqual(Fake.run_bodies[0]["session_id"], "20261015_171425_cfb3ae")
 
+    def test_provider_and_model_ride_into_the_run_body(self):
+        # The settings picker's choice must travel with the run: the API server honours
+        # `provider`/`model` as per-request overrides, so without them the gateway would
+        # answer with its own config.yaml model and the picker would look like it worked.
+        evs = self._run(model="anthropic/claude-opus-5.5", provider="anthropic")
+        self.assertEqual(Fake.run_bodies[0]["model"], "anthropic/claude-opus-5.5")
+        self.assertEqual(Fake.run_bodies[0]["provider"], "anthropic")
+        status = next(e for e in evs if e["t"] == "status")
+        self.assertEqual(status["model"], "anthropic/claude-opus-5.5")
+        self.assertEqual(status["provider"], "anthropic")
+
+    def test_no_override_leaves_the_gateway_default_alone(self):
+        evs = self._run()
+        self.assertNotIn("model", Fake.run_bodies[0])
+        self.assertNotIn("provider", Fake.run_bodies[0])
+        status = next(e for e in evs if e["t"] == "status")
+        self.assertEqual(status["model"], "Hermes API")
+        self.assertIsNone(status["provider"])
+
     def test_session_refused_starts_a_fresh_thread(self):
         Fake.refuse_sessions = True
         evs = self._run(session_id="20261015_171425_cfb3ae")

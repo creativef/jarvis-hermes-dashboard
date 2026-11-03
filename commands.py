@@ -118,6 +118,20 @@ def set_settings(updates):
     if "user_name" in updates:
         name = " ".join(str(updates["user_name"]).split())[:40]
         cleaned["user_name"] = name
+    if "model_provider" in updates:
+        # Provider id as Hermes names it (e.g. "openrouter", "custom", "custom:local").
+        # Empty is allowed: it means "use Hermes' own configured default".
+        prov = str(updates["model_provider"] or "").strip()
+        if prov and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", prov):
+            return None, f"invalid provider: {prov}"
+        cleaned["model_provider"] = prov
+    if "model_name" in updates:
+        # A model id as the provider names it (e.g. "anthropic/claude-opus-5.5"). Empty
+        # is allowed and means "no --model override".
+        mod = str(updates["model_name"] or "").strip()
+        if mod and not re.fullmatch(r"[A-Za-z0-9._:/@+ -]{1,120}", mod):
+            return None, f"invalid model: {mod}"
+        cleaned["model_name"] = mod
     if "greeting" in updates:
         cleaned["greeting"] = bool(updates["greeting"])
     if "voice" in updates:

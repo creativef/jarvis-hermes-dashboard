@@ -139,7 +139,7 @@ def resolve_approval(base, key, run_id, request_id, choice):
 
 def run(message, session_id, instructions=None, *, base, key, idle_timeout, approval_timeout=100,
         valid_session=lambda s: False, mono_ms=lambda: int(time.monotonic() * 1000),
-        profile="default", permission="normal", auto_approve=False):
+        profile="default", permission="normal", auto_approve=False, model="", provider=""):
     """Generator of dashboard events for one turn, driven by the Hermes API server."""
     started = mono_ms()
     # `instructions` is Hermes' per-turn system prompt; `session_id` continues a
@@ -149,6 +149,16 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
         body["instructions"] = instructions
     if valid_session(session_id):
         body["session_id"] = str(session_id)
+    # The settings picker's choice, carried per-run. The API server honours `provider`
+    # and `model` as per-request overrides (`_request_agent_overrides`), so without these
+    # the gateway would silently answer with its own config.yaml model and the picker
+    # would look like it worked while doing nothing. Empty means "gateway default".
+    model = str(model or "").strip()
+    provider = str(provider or "").strip()
+    if model:
+        body["model"] = model
+    if provider:
+        body["provider"] = provider
     while True:
         try:
             run_info = _post(base, key, "/v1/runs", body, timeout=30)
@@ -174,8 +184,9 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
     with _LOCK:
         _ACTIVE["run_id"] = run_id
 
-    yield dict(t="status", model="Hermes API", tools=0, mcp=[], permission=permission,
-               profile=profile, runtime="hermes", session_id=session_id, backend="api")
+    yield dict(t="status", model=model or "Hermes API", tools=0, mcp=[], permission=permission,
+               profile=profile, runtime="hermes", session_id=session_id, backend="api",
+               provider=provider or None)
 
     first, text_seen, completed = True, False, False
     final_session = session_id if valid_session(session_id) else run_id

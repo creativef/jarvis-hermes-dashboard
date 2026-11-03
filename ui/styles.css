@@ -148,6 +148,14 @@ body.listening .stword{color:var(--cyan)}
 .jsonblk .k{color:var(--cyan2)}.jsonblk .v{color:var(--cyan)}
 
 /* settings modal */
+/* Hermes error lightbox */
+.error-lightbox{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000;}
+.error-panel{background:#fff;color:#000;padding:20px;border-radius:8px;max-width:90%;}
+.error-panel .rhead{font-weight:bold;margin-bottom:10px;}
+.error-panel .error-body{margin-bottom:10px;}
+.error-panel .error-actions{text-align:right;}
+.error-lightbox[hidden]{display:none;}
+
 .settings-overlay{position:fixed;inset:0;z-index:60;background:rgba(var(--scrim-rgb),.7);display:grid;place-items:center;backdrop-filter:blur(4px);padding:20px}
 .settings-overlay[hidden]{display:none}
 .settings-panel{width:min(440px,100%);box-shadow:0 0 60px rgba(var(--shadow-rgb),.5)}
@@ -669,3 +677,47 @@ body.reading-focus .brain-note .md-read{font-size:calc(17px * var(--md-scale));m
 @keyframes brPing{0%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),.75)}100%{box-shadow:0 0 0 14px rgba(var(--accent-rgb),0)}}
 @media (max-width:900px){.br-mini{display:none}.br-timeline{right:12px}}
 @media (prefers-reduced-motion:reduce){#navBrain.brain-ping{animation:none}}
+
+/* ══════════ chat composer attachments (additive) ══════════
+   Pending-attachment chips above the message field, plus the attach button.
+   Vars only, so every theme (dark + light) inherits it. */
+.attachchips{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 10px;max-height:130px;overflow:auto}
+.attachchips[hidden]{display:none}
+.attachchip{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--ink);
+  border:1px solid var(--edge-2);background:rgba(var(--surf-rgb),.85);border-radius:999px;padding:5px 6px 5px 11px;max-width:100%}
+.attachchip .aico{color:var(--cyan);font-size:12px}
+.attachchip .aname{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attachchip .asize{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px}
+.attachchip .ax{cursor:pointer;border:0;width:20px;height:20px;border-radius:50%;background:rgba(var(--accent-rgb),.14);
+  color:var(--cyan);font-size:11px;line-height:1;padding:0;font-family:var(--disp)}
+.attachchip .ax:hover{background:rgba(var(--accent-rgb),.28)}
+.attachchip.busy{opacity:.65}
+.attachchip.err{border-color:var(--red);background:rgba(255,107,120,.1);color:var(--red)}
+.attachchip.err .aico,.attachchip.err .asize{color:var(--red)}
+.attachchip.err .ax{background:rgba(255,107,120,.18);color:var(--red)}
+.ctl.attach{color:var(--cyan)}
+.ctl.attach.on{border-color:var(--cyan);background:rgba(var(--accent-rgb),.12)}
+.composer.dragover,.chat.dragover{outline:2px solid rgba(var(--accent-rgb),.5);outline-offset:-2px}
+
+/* ── provider + model picker (additive) ── */
+.stmodel{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--dim);margin-top:6px;max-width:92%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stmodel .smo{color:var(--cyan)}
+.stmodel .smo-badge{color:var(--amber);font-size:9px;letter-spacing:.12em;margin-left:4px}
+.combo{position:relative;display:flex;flex-direction:column;gap:0}
+.combo input{width:100%;padding-right:34px}
+.combo-x{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;border:0;background:transparent;color:var(--dim);font-size:13px;line-height:1;padding:4px;border-radius:6px}
+.combo-x:hover{color:var(--ink);background:rgba(var(--accent-rgb),.1)}
+.combo-list{position:absolute;z-index:40;left:0;right:0;top:calc(100% + 5px);max-height:230px;overflow:auto;background:var(--card-solid);border:1px solid var(--edge);border-radius:12px;box-shadow:0 18px 40px rgba(var(--shadow-rgb),.55);padding:4px}
+.combo-list[hidden]{display:none}
+.combo-opt{padding:8px 10px;border-radius:8px;font-family:var(--mono);font-size:12px;letter-spacing:0;text-transform:none;color:var(--ink);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.combo-opt:hover,.combo-opt.sel{background:rgba(var(--accent-rgb),.12)}
+.combo-opt.disabled{color:var(--faint);cursor:not-allowed}
+.combo-opt.disabled:hover{background:transparent}
+.combo-opt .co-tag{float:right;font-size:9px;color:var(--dim);margin-left:8px}
+.combo-empty{padding:10px;font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:0;text-transform:none}
+.testrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.testrow .ctl{flex:0 0 auto;padding:8px 14px;font-size:12px}
+.testout{font-family:var(--mono);font-size:10px;color:var(--mut);letter-spacing:0;line-height:1.5}
+.testout.ok{color:var(--green)}
+.testout.err{color:var(--red)}
+#set-provider option{background:var(--card-solid);color:var(--ink)}

@@ -9,11 +9,14 @@ third-party integrations that your normal Hermes sessions have. Voice can use th
 local Parakeet (speech in) and Kokoro (speech out), with macOS `say` and browser
 speech as fallbacks.
 """
+import base64
+import binascii
 import json
 import logging
 import mimetypes
 import os
 import pathlib
+import re
 import secrets
 import sys
 import threading
@@ -69,6 +72,14 @@ RUN_LOCK = threading.Lock()
 MAX_JSON_BODY = 1024 * 1024
 MAX_INBOX_BODY = 14 * 1024 * 1024
 MAX_AUDIO_BODY = 12 * 1024 * 1024
+# Chat-composer attachments. The body cap is generous (a big photo or a PDF);
+# the decoded size is capped separately so base64 inflation can't smuggle in a
+# larger file than the transport limit allows.
+MAX_ATTACH_BODY = 32 * 1024 * 1024
+MAX_ATTACH_BYTES = 200 * 1024 * 1024
+# Where composer attachments land. Deliberately NOT ~/Atlas: this is the chat
+# drop area, it never touches the inbox or the Brain.
+ATTACH_ROOT = ROOT / "attachments"
 
 # Durable rotating error log. The UI action log is in-memory (capped) and
 # JARVIS_VERBOSE only prints access lines, so failures at rest need a file.
@@ -143,6 +154,132 @@ def build_greeting(now=None):
     head = f"{opener}, {name}." if name else f"{opener}."
     return {"text": f"{head} {random.choice(lines)}", "boot_id": BOOT_ID,
             "enabled": bool(st.get("greeting", True))}
+
+
+# ── chat-composer attachments ────────────────────────────────
+# Purely local: files land in <project>/attachments/<YYYY-MM-DD>/ and the UI passes
+# their absolute paths to the agent in the message text. Nothing here writes to
+# ~/Atlas, the inbox, or the Brain.
+
+def _attach_day_dir(day=None):
+    import datetime
+    return ATTACH_ROOT / (day or datetime.date.today().isoformat())
+
+
+def _attach_safe_name(raw):
+    """Keep the last path segment of an untrusted client name and strip everything
+    that could escape the directory, hide the file, or confuse a shell."""
+    text = str(raw or "").replace("\\", "/")          # a windows path is not a path here
+    text = text.split("/")[-1].replace("\x00", "").strip()
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+    text = text.strip("._-")
+    if not text:
+        return "file"
+    stem, dot, ext = text.rpartition(".")
+    if dot and stem and 0 < len(ext) <= 8:
+        return f"{stem[:80]}.{ext}"
+    return text[:80] or "file"
+
+
+def _attach_mime(name, kind=""):
+    guess = mimetypes.guess_type(name)[0]
+    if guess:
+        return guess
+    kind = str(kind or "").strip()
+    return kind if "/" in kind and len(kind) <= 100 else "application/octet-stream"
+
+
+def attach_save(raw_name, data_b64, kind=""):
+    """Decode one base64 payload and store it under ATTACH_ROOT. Returns (info, err)."""
+    name = str(raw_name or "").strip() or "file"
+    b64 = str(data_b64 or "")
+    if not b64:
+        return None, "data_base64 is required"
+    if b64.startswith("data:"):                       # a FileReader data: URL
+        comma = b64.find(",")
+        if comma == -1:
+            return None, "malformed data URL"
+        b64 = b64[comma + 1:]
+    b64 = "".join(b64.split())                        # tolerate wrapped/whitespaced base64
+    try:
+        data = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        return None, "data_base64 is not valid base64"
+    if not data:
+        return None, "file is empty"
+    if len(data) > MAX_ATTACH_BYTES:
+        return None, f"file is larger than {MAX_ATTACH_BYTES} bytes"
+
+    root = ATTACH_ROOT.resolve()
+    try:
+        target_dir = _attach_day_dir().resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return None, f"could not create the attachments directory: {e}"
+    if os.path.commonpath([target_dir, root]) != str(root):
+        return None, "refusing to write outside the attachments directory"
+
+    safe = _attach_safe_name(name)
+    stem, dot, ext = safe.rpartition(".")
+    if not dot:
+        stem, ext = safe, ""
+    path = None
+    for n in range(1, 201):
+        candidate = target_dir / (f"{stem}{'' if n == 1 else f'-{n}'}{('.' + ext) if ext else ''}")
+        # commonpath refusal, not a prefix test, so `..`-style names can never pass
+        if os.path.commonpath([str(candidate.parent), str(root)]) != str(root):
+            return None, "refusing to write outside the attachments directory"
+        try:
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue                                  # same name today: keep them all
+        except OSError as e:
+            return None, f"could not write the file: {e}"
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        except OSError as e:
+            return None, f"could not write the file: {e}"
+        path = candidate
+        break
+    if path is None:
+        return None, "could not find a free filename"
+    # final check on what actually exists on disk
+    if os.path.commonpath([str(path.resolve().parent), str(root)]) != str(root):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None, "refusing to write outside the attachments directory"
+    return {"path": str(path.resolve()), "name": path.name, "bytes": len(data),
+            "mime_guess": _attach_mime(path.name, kind)}, None
+
+
+def attachments_list(day=None):
+    """Read-only inventory of what the composer has stashed (newest first)."""
+    items, dirs = [], []
+    try:
+        day_dirs = [_attach_day_dir(day)] if day else sorted(
+            (d for d in ATTACH_ROOT.iterdir() if d.is_dir()), reverse=True)
+    except OSError:
+        day_dirs = []
+    for d in day_dirs:
+        if not d.is_dir():
+            continue
+        dirs.append(str(d))
+        for f in sorted(d.iterdir()):
+            try:
+                if not f.is_file():
+                    continue
+                st = f.stat()
+            except OSError:
+                continue
+            items.append({"name": f.name, "path": str(f.resolve()), "dir": str(d),
+                          "bytes": st.st_size, "mtime": int(st.st_mtime),
+                          "mime_guess": mimetypes.guess_type(f.name)[0] or "application/octet-stream"})
+    items.sort(key=lambda i: i["mtime"], reverse=True)
+    return {"ok": True, "root": str(ATTACH_ROOT), "dirs": dirs,
+            "count": len(items), "items": items[:500]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -240,6 +377,13 @@ class Handler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
             return self._json(_merged_settings())
+        if p == "/api/models":
+            # Models genuinely available for a provider (default: the active one),
+            # discovered from the Hermes runtime — never a hardcoded list.
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            want = (parse_qs(urlparse(self.path).query).get("provider") or [""])[0]
+            return self._json(runtime.models_catalog(want or None))
         if p == "/api/greeting":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -301,6 +445,16 @@ class Handler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
             return self._json(brain.inbox_list())
+        if p == "/api/attachments":
+            # read-only inventory of composer attachments; local loopback only
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            day = (parse_qs(urlparse(self.path).query).get("day") or [""])[0].strip()
+            if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                return self._json({"error": "day must be YYYY-MM-DD"}, 400)
+            return self._json(attachments_list(day or None))
         if p == "/api/activity":
             if self.client_address[0] not in ("127.0.0.1", "::1"):
                 return self._json({"error": "local only"}, 403)
@@ -356,15 +510,33 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "unauthorized"}, 401)
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
         if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval", "/api/inbox",
-                 "/api/brain/note", "/api/brain/link", "/api/agents/stop", "/api/brief"} and ctype != "application/json":
+                 "/api/attach", "/api/brain/note", "/api/brain/link", "/api/agents/stop", "/api/brief",
+                 "/api/models/test"} and ctype != "application/json":
             return self._json({"error": "application/json required"}, 415)
         if p == "/api/listen" and not ctype.startswith("audio/"):
             return self._json({"error": "audio content type required"}, 415)
         try:
-            limit = MAX_AUDIO_BODY if p == "/api/listen" else (MAX_INBOX_BODY if p == "/api/inbox" else MAX_JSON_BODY)
+            limit = (MAX_AUDIO_BODY if p == "/api/listen"
+                     else MAX_INBOX_BODY if p == "/api/inbox"
+                     else MAX_ATTACH_BODY if p == "/api/attach"
+                     else MAX_JSON_BODY)
             raw = self._read(limit)
         except (TypeError, ValueError):
             return self._json({"error": "request body too large"}, 413)
+
+        if p == "/api/attach":
+            # Chat composer drop area. Saves under <project>/attachments/<date>/ and
+            # returns the ABSOLUTE path for the UI to put in the message text.
+            # Deliberately separate from /api/inbox: no Brain note, no ~/Atlas write.
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            body = self._obj(raw)
+            if body is None:
+                return self._json({"error": "payload must be a JSON object"}, 400)
+            info, err = attach_save(body.get("name"), body.get("data_base64"), body.get("kind") or "")
+            if err:
+                return self._json({"ok": False, "error": err}, 400)
+            return self._json({"ok": True, **(info or {})})
 
         if p == "/api/inbox":
             if self.client_address[0] not in ("127.0.0.1", "::1"):
@@ -462,6 +634,16 @@ class Handler(BaseHTTPRequestHandler):
             runtime.apply_settings(cleaned)
             voice.apply_settings(cleaned)
             return self._json(_merged_settings())
+
+        if p == "/api/models/test":
+            # One trivial prompt through the chosen provider/model, to prove the
+            # round-trip before relying on it. Nothing is persisted.
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            body = self._obj(raw)
+            if body is None:
+                return self._json({"error": "payload must be a JSON object"}, 400)
+            return self._json(runtime.test_model(body.get("provider"), body.get("model")))
 
         if p == "/api/run":
             if not RUN_LOCK.acquire(blocking=False):
