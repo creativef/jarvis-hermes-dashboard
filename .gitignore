@@ -4,5 +4,6 @@ state.json
 __pycache__/
 *.pyc
 logs/
+attachments/
 .venv-voice/
 .DS_Store
