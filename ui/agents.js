@@ -50,17 +50,65 @@
     </article>`;
   }
 
+  // The 2s poll re-renders the panel; a blind innerHTML swap would destroy any text the
+  // reader has selected. So: rebuild only when the content really changed (elapsed
+  // counters are ignored — the 1s ticker keeps them live in place), never rebuild
+  // mid-drag, and carry the selection across a rebuild when one is needed.
+  let lastSig = null, dragging = false;
+  body.addEventListener('pointerdown', () => { dragging = true; });
+  document.addEventListener('pointerup', () => { dragging = false; });
+  document.addEventListener('pointercancel', () => { dragging = false; });   // never leave the swap blocked
+
+  const textNodes = () => {
+    const w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT), out = [];
+    let n; while ((n = w.nextNode())) out.push(n);
+    return out;
+  };
+  function saveSelection(){
+    const s = window.getSelection();
+    if (!s || !s.rangeCount || s.isCollapsed) return null;
+    const r = s.getRangeAt(0);
+    if (!body.contains(r.startContainer) || !body.contains(r.endContainer)) return null;
+    const nodes = textNodes();
+    const si = nodes.indexOf(r.startContainer), ei = nodes.indexOf(r.endContainer);
+    if (si < 0 || ei < 0) return null;
+    return {si, so: r.startOffset, ei, eo: r.endOffset};
+  }
+  function restoreSelection(sv){
+    if (!sv) return;
+    const nodes = textNodes(), a = nodes[sv.si], b = nodes[sv.ei];
+    if (!a || !b) return;
+    try {
+      const r = document.createRange();
+      r.setStart(a, Math.min(sv.so, a.length));
+      r.setEnd(b, Math.min(sv.eo, b.length));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+    } catch (_) {}
+  }
+  function swap(html){
+    // The elapsed counters drift on every poll; ignoring them means a steady panel
+    // isn't rebuilt at all (the 1s ticker keeps those numbers live in place).
+    const sig = html.replace(/data-base="[^"]*"/g, 'data-base=""')
+                    .replace(/(data-run="1"[^>]*>)[^<]*</g, '$1<');
+    if (sig === lastSig) return;              // nothing changed → leave the DOM (and selection) alone
+    if (dragging) return;                     // mid-drag → defer to the next poll rather than yank the DOM
+    lastSig = sig;
+    const sv = saveSelection();
+    const keep = body.scrollTop;
+    body.innerHTML = html;
+    body.scrollTop = keep;
+    restoreSelection(sv);
+  }
+
   function render(){
-    if (!data){ body.innerHTML = `<div class="ag-empty">${esc(lastErr || 'Loading…')}</div>`; return; }
+    if (!data){ swap(`<div class="ag-empty">${esc(lastErr || 'Loading…')}</div>`); return; }
     const list = data.agents;
     sum.textContent = `${data.running} running · ${list.length} total`;
-    if (!list.length){ body.innerHTML = '<div class="ag-empty">No sub-agents yet. Hand a long job to Atlas and it shows up here.</div>'; return; }
-    const keep = body.scrollTop;
+    if (!list.length){ swap('<div class="ag-empty">No sub-agents yet. Hand a long job to Atlas and it shows up here.</div>'); return; }
     const run = list.filter(a => a.status === 'running' || a.status === 'stalled');
     const rec = list.filter(a => !(a.status === 'running' || a.status === 'stalled'));
-    body.innerHTML = (run.length ? `<div class="ag-sec">Running</div><div class="ag-grid">${run.map(card).join('')}</div>` : '')
-      + (rec.length ? `<div class="ag-sec">Recent</div><div class="ag-grid">${rec.map(card).join('')}</div>` : '');
-    body.scrollTop = keep;
+    swap((run.length ? `<div class="ag-sec">Running</div><div class="ag-grid">${run.map(card).join('')}</div>` : '')
+      + (rec.length ? `<div class="ag-sec">Recent</div><div class="ag-grid">${rec.map(card).join('')}</div>` : ''));
   }
 
   // tick elapsed counters every second between polls
