@@ -118,14 +118,37 @@ class StreamKeepsSessionTests(unittest.TestCase):
         finally:
             server.SESSION["id"] = saved
 
-    def test_error_turn_drops_the_session(self):
-        saved = server.SESSION["id"]
-        server.SESSION["id"] = "20261020_120000_broken"
+    def test_one_error_keeps_the_conversation(self):
+        # A 429, a provider timeout or a 120s idle stop is not a broken conversation.
+        saved, streak = server.SESSION["id"], server.ERROR_STREAK["n"]
+        server.SESSION["id"] = "20261020_120000_flaky"
+        server.ERROR_STREAK["n"] = 0
         try:
-            self._stream([{"t": "error", "message": "boom"}])
-            self.assertIsNone(server.SESSION["id"])
+            set_session = self._stream([{"t": "error", "message": "429 from the provider"}])
+            self.assertEqual(server.SESSION["id"], "20261020_120000_flaky")
+            set_session.assert_not_called()
         finally:
-            server.SESSION["id"] = saved
+            server.SESSION["id"], server.ERROR_STREAK["n"] = saved, streak
+
+    def test_two_errors_in_a_row_drop_the_session(self):
+        saved, streak = server.SESSION["id"], server.ERROR_STREAK["n"]
+        server.SESSION["id"] = "20261020_120000_broken"
+        server.ERROR_STREAK["n"] = 1                 # the previous turn already failed
+        try:
+            set_session = self._stream([{"t": "error", "message": "boom"}])
+            self.assertIsNone(server.SESSION["id"])
+            set_session.assert_called_once_with(None)
+        finally:
+            server.SESSION["id"], server.ERROR_STREAK["n"] = saved, streak
+
+    def test_a_completed_turn_clears_the_error_streak(self):
+        saved, streak = server.SESSION["id"], server.ERROR_STREAK["n"]
+        server.ERROR_STREAK["n"] = 1
+        try:
+            self._stream([{"t": "complete", "session_id": "20261020_120000_ok"}])
+            self.assertEqual(server.ERROR_STREAK["n"], 0)
+        finally:
+            server.SESSION["id"], server.ERROR_STREAK["n"] = saved, streak
 
 
 if __name__ == "__main__":

@@ -104,15 +104,18 @@ def active_run_id():
         return _ACTIVE["run_id"]
 
 
+def stop_run(base, key, run_id):
+    """Best-effort stop of a run by id. Never raises."""
+    try:
+        _post(base, key, f"/v1/runs/{run_id}/stop", {}, timeout=5)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def cancel_active(base, key):
     rid = active_run_id()
-    if not rid:
-        return False
-    try:
-        _post(base, key, f"/v1/runs/{rid}/stop", {}, timeout=5)
-        return True
-    except Exception:
-        return False
+    return stop_run(base, key, rid) if rid else False
 
 
 def resolve_approval(base, key, run_id, request_id, choice):
@@ -260,3 +263,9 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
         with _LOCK:
             if _ACTIVE["run_id"] == run_id:
                 _ACTIVE["run_id"] = None
+        if not completed:
+            # The stream broke — a tab reload, a read timeout, a dropped socket — but the
+            # gateway run is still going: it burns tokens unseen, its approval prompts can
+            # never be answered, and the next turn can overlap on the same session. The CLI
+            # path dies with its process; this one has to be told.
+            stop_run(base, key, run_id)

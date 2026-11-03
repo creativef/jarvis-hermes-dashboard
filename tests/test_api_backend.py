@@ -166,6 +166,14 @@ class ApiBackendTests(unittest.TestCase):
     def test_stream_without_completion_is_an_error(self):
         Fake.events = [{"event": "message.delta", "delta": "x"}]
         self.assertEqual(self._run()[-1]["t"], "error")
+        # The gateway run is still going at this point: a tab reload or a read timeout used
+        # to leave it burning tokens unseen, with approvals nobody could answer and the next
+        # turn free to overlap on the same session. It has to be told to stop.
+        self.assertTrue(any(c.endswith("/v1/runs/run_abc123/stop") for c in Fake.stop_calls))
+
+    def test_a_completed_run_is_not_stopped(self):
+        self._run()
+        self.assertEqual(Fake.stop_calls, [])
 
     def test_risk_tiers(self):
         self.assertEqual(api_backend.classify("recursive delete", "rm -rf x"), "high")

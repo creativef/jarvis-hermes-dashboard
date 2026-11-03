@@ -194,8 +194,60 @@ def _handoff_jobs():
 
 
 def jobs_snapshot():
-    return [{k: v for k, v in j.items() if k != "_path"}
-            for j in _handoff_jobs() if j.get("status") == "running"]
+    return [{k: v for k, v in j.items() if k != "_path"} for j in running_jobs()]
+
+
+# A job file keeps saying "running" long after its worker is gone (reboot, kill, OOM).
+# Only the Agents tab used to notice, so /status, the job count and the morning brief all
+# counted a ghost forever. Liveness is decided in one place, from processes, not from the
+# job file's own claim.
+_PIDS_TTL = 5.0                      # `ps` is not free and these readers are polled
+_PIDS_CACHE = {"at": 0.0, "pids": {}}
+_WORKER_GRACE_S = 90                 # the gap between the job file appearing and its pid
+
+
+def _live_worker_pids():
+    """{job id: pid} of live `handoff.py --worker <id>` processes, cached briefly.
+
+    Matches the worker process itself, so a recycled pid belonging to some unrelated
+    process can never make a dead job look alive."""
+    now = time.time()
+    if now - _PIDS_CACHE["at"] >= _PIDS_TTL:
+        _PIDS_CACHE.update(at=now, pids=_worker_pids())
+    return _PIDS_CACHE["pids"]
+
+
+def _job_running(job, live):
+    """True while a job that claims to be running actually has a worker behind it."""
+    if job.get("status") != "running":
+        return False
+    if (job.get("id") or "") in live:
+        return True
+    pid = job.get("pid")
+    if live and pid:
+        # `ps` answered and this worker is not in it: the worker is gone. (A live worker
+        # is always in the map, so the fallback below is only reached when `ps` found
+        # nothing at all — including the case where `ps` itself failed.)
+        return False
+    if pid:
+        return _pid_alive(pid)
+    # No pid recorded yet: the worker may simply not have written it. Give it the grace
+    # window, after which a job with no live worker is dead no matter what it says.
+    return (time.time() - (job.get("started") or 0)) < _WORKER_GRACE_S
+
+
+def job_is_live(job, live=None):
+    return _job_running(job, _live_worker_pids() if live is None else live)
+
+
+def running_jobs():
+    """Genuinely running jobs; a dead worker is not counted as one."""
+    jobs = _handoff_jobs()
+    if not any(j.get("status") == "running" for j in jobs):
+        return []
+    live = _live_worker_pids()
+    return [j for j in jobs if _job_running(j, live)]
+
 
 
 def take_finished():
@@ -336,7 +388,7 @@ def agents_snapshot(limit=40):
         j.pop("_path", None)
         j["kind"] = "handoff"
         jobs.append(j)
-    pids = _worker_pids() if any(j.get("status") == "running" for j in jobs) else {}
+    live = _live_worker_pids() if any(j.get("status") == "running" for j in jobs) else {}
     out = []
     for j in jobs:
         jid = j.get("id") or ""
@@ -346,8 +398,7 @@ def agents_snapshot(limit=40):
         if j["kind"] == "handoff":
             step_at, step = _last_log_line(jid)
             if status == "running":
-                pid = pids.get(jid) or j.get("pid")
-                if not (pid and _pid_alive(pid)):
+                if not _job_running(j, live):
                     status = "stalled"
                     step = step or "worker process is no longer running"
                 elif not step:
@@ -472,7 +523,7 @@ def _status_reply():
     import runtime
     import voice
     profile = runtime.PROFILE
-    running = sum(1 for j in _handoff_jobs() if j.get("status") == "running")
+    running = len(running_jobs())
     speaks = {"kokoro": "Kokoro", "local": "the Mac voice"}.get(voice.tts_engine(), "the browser voice")
     hears = "Parakeet" if voice.stt_engine() == "parakeet" else "browser speech recognition"
     jobs = (f"{running} background job{'s' if running != 1 else ''} running" if running

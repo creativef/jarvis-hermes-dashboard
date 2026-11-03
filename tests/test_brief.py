@@ -83,6 +83,15 @@ class BriefTests(unittest.TestCase):
         brief.start(force=True)
         self.assertEqual(len(self.launched), 2)
 
+    def test_a_dead_helper_is_not_a_running_fetch(self):
+        # The brief used to read "running" all day when its helper died, with no way back:
+        # refresh did nothing and the card just span.
+        brief.start()
+        with mock.patch.object(commands, "job_is_live", return_value=False):
+            st = brief.state()
+        self.assertEqual(st["status"], "failed")
+        self.assertIn("helper stopped", st["error"])
+
     def test_no_auto_fetch_when_nothing_was_connected_last_time(self):
         self.bdir.mkdir()
         (self.bdir / "2000-01-01.json").write_text(json.dumps({"business": [], "calendar": [], "missing": ["all"]}))

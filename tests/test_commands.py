@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import tempfile
 import time
@@ -95,6 +96,42 @@ class BackgroundJobTests(unittest.TestCase):
             with mock.patch.object(commands, "HANDOFF_DIR", d):
                 commands.take_finished()
             self.assertEqual(sorted(p.name for p in d.iterdir()), ["new00002.json"])
+
+    def test_job_liveness_rules(self):
+        now = time.time()
+
+        def job(**kw):
+            return dict({"id": "j", "status": "running"}, **kw)
+
+        self.assertTrue(commands.job_is_live(job(pid=1), live={"j": 1}))          # ps lists our worker
+        self.assertFalse(commands.job_is_live(job(pid=1), live={"other": 9}))     # ps answered, not ours
+        self.assertFalse(commands.job_is_live(job(pid=999999), live={}))          # ps failed -> probe the pid
+        self.assertTrue(commands.job_is_live(job(pid=os.getpid()), live={}))
+        self.assertTrue(commands.job_is_live(job(started=now), live={}))          # worker still starting
+        self.assertFalse(commands.job_is_live(job(started=now - 3600), live={}))  # never wrote a pid
+        self.assertFalse(commands.job_is_live(job(status="done"), live={"j": 1}))
+
+    def test_a_dead_worker_is_not_a_running_job(self):
+        # A reboot or a kill leaves the job file saying "running" forever; /status, the job
+        # count and the morning brief all used to report that ghost as work in progress.
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "ghost001", status="running", finished=None, pid=999999,
+                      started=time.time() - 3600)
+            with mock.patch.object(commands, "HANDOFF_DIR", d), \
+                 mock.patch.object(commands, "_live_worker_pids", return_value={}):
+                self.assertEqual(commands.jobs_snapshot(), [])
+                self.assertEqual(commands.running_jobs(), [])
+
+    def test_a_live_worker_is_still_a_running_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "live0001", status="running", finished=None, started=time.time())
+            with mock.patch.object(commands, "HANDOFF_DIR", d), \
+                 mock.patch.object(commands, "_live_worker_pids", return_value={"live0001": os.getpid()}):
+                self.assertEqual([j["id"] for j in commands.jobs_snapshot()], ["live0001"])
+                # counted as running, not as a stalled worker
+                self.assertEqual(commands.agents_snapshot()["running"], 1)
 
 
 if __name__ == "__main__":

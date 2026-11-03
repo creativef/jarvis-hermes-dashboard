@@ -122,6 +122,9 @@ def persona():
 # One continuing Hermes conversation until the user hits /new. Persisted across
 # restarts so the assistant remembers the prior conversation.
 SESSION = {"id": commands.get_session()}
+# Consecutive failed turns. A single flaky turn (a 429, a provider timeout, a 120s idle
+# stop) must not cost you the thread; two in a row means the session itself is bad.
+ERROR_STREAK = {"n": 0}
 
 
 def _merged_settings():
@@ -708,6 +711,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Only remember a session that actually COMPLETED. Storing it from
                 # `status` (which fires at init) means one broken run poisons every
                 # run after it with --resume <half-born session>.
+                if ev.get("t") == "complete":
+                    ERROR_STREAK["n"] = 0
                 if ev.get("t") == "complete" and runtime.valid_session(sid):
                     SESSION["id"] = sid
                     commands.set_session(sid)
@@ -715,8 +720,10 @@ class Handler(BaseHTTPRequestHandler):
                     if text:
                         commands.record_turn(original_message, text)
                 if ev.get("t") == "error":
-                    SESSION["id"] = None       # drop a bad/stale session so the next run is fresh
-                    commands.set_session(None)
+                    ERROR_STREAK["n"] += 1
+                    if ERROR_STREAK["n"] >= 2:      # drop a bad/stale session so the next run is fresh
+                        SESSION["id"] = None
+                        commands.set_session(None)
                 emit(ev)
         except (BrokenPipeError, ConnectionResetError):
             pass                                          # client navigated away

@@ -104,11 +104,15 @@ def state():
     day = _today()
     data = _read(_paths(day)[0])
     job = _job(day)
-    running = bool(job and job.get("status") == "running")
+    import commands
+    # A brief whose helper died used to read "running" all day and never recover.
+    running = bool(job) and commands.job_is_live(job)
     status = "running" if running else "ready" if data else "failed" if job else "none"
     error = ""
-    if status == "failed":
-        error = _short(job.get("result") or "Hermes didn't write the brief.", 240)
+    if status == "failed" and job:
+        dead_helper = "The helper stopped before the brief was written."
+        error = _short(job.get("result") or (dead_helper if job.get("status") == "running"
+                                             else "Hermes didn't write the brief."), 240)
     return {"date": day, "status": status, "data": data, "error": error,
             "auto": status == "none" and not _nothing_connected_last_time(day)}
 
