@@ -37,8 +37,10 @@
     return `<article class="ag-card st-${esc(a.status)}${a.diagnostic ? ' diag' : ''}" data-id="${esc(a.id)}">
       <header><span class="ag-dot"></span><b class="ag-name">${esc(a.name)}</b>
         ${a.diagnostic ? '<span class="ag-tag">diagnostic</span>' : ''}
+        ${a.kind === 'delegation' ? '<span class="ag-tag">delegated</span>' : ''}
+        ${a.model ? `<span class="ag-tag">${esc(a.model)}</span>` : ''}
         <span class="ag-status">${esc(LABEL[a.status] || a.status)}</span>
-        ${running ? `<button type="button" class="ag-stop${armed.has(a.id) ? ' armed' : ''}" data-stop="${esc(a.id)}"
+        ${running && a.stoppable !== false ? `<button type="button" class="ag-stop${armed.has(a.id) ? ' armed' : ''}" data-stop="${esc(a.id)}"
           ${stopping.has(a.id) ? 'disabled' : ''}>${stopping.has(a.id) ? 'Stopping…' : armed.has(a.id) ? 'Confirm stop' : 'Stop'}</button>` : ''}</header>
       <div class="ag-brief${open ? ' open' : ''}">${esc(open || !long ? a.brief : a.brief.slice(0, 180) + '…')}</div>
       ${running ? `<div class="ag-step"><span class="ag-k">${a.status === 'stalled' ? 'Last seen' : 'Now'}</span><span class="ag-v">${esc(a.step || '—')}</span></div>` : ''}

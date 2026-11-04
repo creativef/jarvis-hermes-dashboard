@@ -41,9 +41,43 @@ _LOCK = threading.Lock()
 _ACTIVE = {"run_id": None}
 
 
-def classify(description="", command=""):
-    """'high' = needs a hands-on confirm (key/click); 'normal' = a spoken yes is fine."""
-    return "high" if _HIGH_RISK.search(f"{description} {command}") else "normal"
+def risk_from_tier(tier):
+    """The spoken-yes risk for an approval: 'high' needs a hands-on confirm (key/click),
+    anything else is fine by voice. Derived from the tier so the two can never drift."""
+    return "high" if tier == "high" else "normal"
+
+
+def fallback_note(provider, model, runtime_meta):
+    """A warning when the pair that actually served the run differs from the one asked for.
+
+    ``fallback_providers`` lets the gateway absorb a failed provider silently: you pick
+    provider X, the run is served (and billed) by Y, and nothing says so. The gateway puts
+    the REQUESTED pair on the ``run.completed`` event, and the served pair only when its
+    runtime metadata recorded one — checked live against the running gateway, where a local
+    run carried ``requested`` and an EMPTY served pair. So this reports only what the stream
+    actually says and stays silent otherwise: it can under-report a fallback, but it can
+    never cry wolf.
+    """
+    if not isinstance(runtime_meta, dict):
+        return ""
+    served_provider = str(runtime_meta.get("provider") or "").strip()
+    served_model = str(runtime_meta.get("model") or "").strip()
+    if not (served_provider or served_model):
+        return ""
+    asked = runtime_meta.get("requested")
+    asked = asked if isinstance(asked, dict) else {}
+    want_provider = str(asked.get("provider") or provider or "").strip()
+    want_model = str(asked.get("model") or model or "").strip()
+    if not (want_provider or want_model):
+        return ""                        # nothing was asked for, so nothing fell back
+    import runtime                        # lazy: runtime imports this module back
+    provider_switched = bool(want_provider and served_provider
+                             and not runtime._same_provider(want_provider, served_provider))
+    model_switched = bool(want_model and served_model and served_model != want_model)
+    if not (provider_switched or model_switched):
+        return ""
+    return (f"Fallback: {want_provider or 'the default provider'} · {want_model or 'default model'}"
+            f" was asked for, but this run was served by {served_provider or '?'} · {served_model or '?'}.")
 
 
 _LOW_RISK = re.compile(
@@ -172,7 +206,8 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
                 # carry on in a fresh thread rather than failing the turn.
                 body.pop("session_id")
                 session_id = None
-                yield dict(t="note", message="Started a fresh Hermes thread on the API server.")
+                yield dict(t="note", message="Started a fresh Hermes thread on the API server.",
+                           drop_session=True)
                 continue
             yield dict(t="error", message=f"Hermes API refused the run (HTTP {e.code}). Check JARVIS_API_KEY.")
             return
@@ -223,20 +258,24 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
                 elif name == "approval.request":
                     desc = str(ev.get("description") or "a flagged action")
                     cmd = str(ev.get("command") or "")
-                    if auto_approve:      # "bypass" permission mode: same trust level as --yolo, but logged
-                        resolve_approval(base, key, run_id, ev.get("request_id"), "once")
+                    # "bypass" permission mode: same trust level as --yolo, but logged. If the
+                    # answer does not reach Hermes, ask you instead of claiming it was approved.
+                    if auto_approve and resolve_approval(base, key, run_id, ev.get("request_id"), "once")[0]:
                         yield dict(t="note", message=f"Bypass mode: auto-approved {desc}"[:200])
                         continue
                     info = classify_tier(desc, cmd)
                     yield dict(t="approval", run_id=run_id, request_id=ev.get("request_id"),
                                description=desc, command=cmd[:400],
-                               risk=classify(desc, cmd), risk_tier=info["tier"],
+                               risk=risk_from_tier(info["tier"]), risk_tier=info["tier"],
                                reason=info["reason"], timeout=approval_timeout)
                 elif name == "approval.responded":
                     yield dict(t="approval_done", request_id=ev.get("request_id"),
                                choice=ev.get("choice"))
                 elif name == "run.completed":
                     completed = True
+                    note = fallback_note(provider, model, ev.get("runtime"))
+                    if note:
+                        yield dict(t="note", message=note)
                     u = ev.get("usage") or {}
                     if u:
                         yield dict(t="usage", input_tokens=u.get("input_tokens"),

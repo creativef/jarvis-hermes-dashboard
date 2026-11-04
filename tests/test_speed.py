@@ -231,7 +231,9 @@ class ProbePrewarmTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False), \
              mock.patch.object(runtime, "RUNTIME", "auto"):
             status = runtime.prewarm_probes(background=False)
-            for key in ("hermes_version", "tools_snapshot", "model_info", "user_name"):
+            # model_info is deliberately uncached (it only reads config.yaml), so it is not
+            # a probe that can be warm — the other three are.
+            for key in ("hermes_version", "tools_snapshot", "user_name"):
                 self.assertTrue(status[key]["warm"], f"probe {key} should be warm")
                 self.assertGreater(status[key]["ttl_remaining"], 0.0)
 

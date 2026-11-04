@@ -18,6 +18,7 @@ import time
 import uuid
 
 import brain
+import delegations
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
@@ -38,17 +39,25 @@ def load():
         return _load_unlocked()
 
 
-def _save_unlocked(d):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp = STATE_FILE.with_name(f".{STATE_FILE.name}.{uuid.uuid4().hex}.tmp")
+def write_atomic(path, text):
+    """Write text atomically (tmp + os.replace). A crash mid-write would otherwise leave
+    truncated JSON, and every reader silently skips unparseable files — so the job would
+    vanish from the announcement queue entirely."""
+    path = pathlib.Path(path)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        temp.write_text(json.dumps(d, indent=2) + "\n", encoding="utf-8")
-        os.replace(temp, STATE_FILE)
+        temp.write_text(text, encoding="utf-8")
+        os.replace(temp, path)
     finally:
         try:
             temp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _save_unlocked(d):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(STATE_FILE, json.dumps(d, indent=2) + "\n")
 
 
 def save(d):
@@ -203,11 +212,12 @@ def jobs_snapshot():
 # job file's own claim.
 _PIDS_TTL = 5.0                      # `ps` is not free and these readers are polled
 _PIDS_CACHE = {"at": 0.0, "pids": {}}
-_WORKER_GRACE_S = 90                 # the gap between the job file appearing and its pid
+_WORKER_GRACE_S = 15                 # a just-launched worker may predate the cached `ps` list
 
 
 def _live_worker_pids():
-    """{job id: pid} of live `handoff.py --worker <id>` processes, cached briefly.
+    """{job id: pid} of live `handoff.py --worker <id>` processes, cached briefly;
+    None when `ps` itself failed.
 
     Matches the worker process itself, so a recycled pid belonging to some unrelated
     process can never make a dead job look alive."""
@@ -221,19 +231,17 @@ def _job_running(job, live):
     """True while a job that claims to be running actually has a worker behind it."""
     if job.get("status") != "running":
         return False
-    if (job.get("id") or "") in live:
+    if (job.get("id") or "") in (live or {}):
         return True
-    pid = job.get("pid")
-    if live and pid:
-        # `ps` answered and this worker is not in it: the worker is gone. (A live worker
-        # is always in the map, so the fallback below is only reached when `ps` found
-        # nothing at all — including the case where `ps` itself failed.)
-        return False
-    if pid:
-        return _pid_alive(pid)
-    # No pid recorded yet: the worker may simply not have written it. Give it the grace
-    # window, after which a job with no live worker is dead no matter what it says.
-    return (time.time() - (job.get("started") or 0)) < _WORKER_GRACE_S
+    if time.time() - (job.get("started") or 0) < _WORKER_GRACE_S:
+        return True                  # just launched: the cached `ps` list may predate it
+    if live is None:
+        # `ps` failed, so the saved pid is all there is to go on.
+        pid = job.get("pid")
+        return bool(pid) and _pid_alive(pid)
+    # `ps` answered and this worker is not in it: gone. Never trust the saved pid here —
+    # after a reboot it often belongs to some unrelated process.
+    return False
 
 
 def job_is_live(job, live=None):
@@ -265,11 +273,15 @@ def take_finished():
                         except OSError:
                             pass
                 continue
+            if j.get("status") == "running" and not job_is_live(j):
+                # The worker died (reboot, kill) without recording an outcome: say so once,
+                # instead of leaving a "running" ghost that is never announced or pruned.
+                j.update(status="failed", result="The helper stopped unexpectedly.", finished=now)
             if j.get("status") not in ("done", "failed"):
                 continue
             j["reported"] = True
             try:
-                path.write_text(json.dumps(j), encoding="utf-8")
+                write_atomic(path, json.dumps(j))
             except OSError:
                 continue
             if not j.get("quiet"):                 # quiet = internal fetches, e.g. the brief
@@ -288,7 +300,7 @@ def _mark_stopped(path):
             return
         if job.get("status") == "running":
             job.update(status="stopped", result="Stopped by you.", finished=time.time(), reported=True)
-            path.write_text(json.dumps(job), encoding="utf-8")
+            write_atomic(path, json.dumps(job))
 
 
 def stop_job(jid):
@@ -304,7 +316,7 @@ def stop_job(jid):
         return None, "no such job"
     if job.get("status") != "running":
         return None, "that job is not running"
-    pid = _worker_pids().get(jid)
+    pid = (_worker_pids() or {}).get(jid)
     if pid:
         try:
             os.kill(pid, signal.SIGTERM)       # the worker stops Hermes and records "stopped"
@@ -318,7 +330,7 @@ def stop_job(jid):
 
     def _escalate():
         time.sleep(10)
-        if _worker_pids().get(jid) == pid:     # still the same worker: force it
+        if (_worker_pids() or {}).get(jid) == pid:     # still the same worker: force it
             try:
                 os.killpg(pid, signal.SIGKILL)  # worker + its Hermes child (own session)
             except OSError:
@@ -341,13 +353,14 @@ def _pid_alive(pid):
 
 def _worker_pids():
     """{job id: pid} of live `handoff.py --worker <id>` processes (covers jobs
-    that started before pids were recorded in the job file)."""
+    that started before pids were recorded in the job file). None when `ps` failed —
+    which must not read the same as "ps answered: no workers"."""
     found = {}
     try:
         out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
                              text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
-        return found
+        return None
     for line in out.splitlines():
         m = re.match(r"\s*(\d+)\s+.*handoff\.py --worker (\w+)", line)
         if m:
@@ -381,7 +394,8 @@ def _agent_name(mission):
 
 
 def agents_snapshot(limit=40):
-    """Running and recent handoff jobs, running first then newest first. Never mutates job files."""
+    """Running and recent agents — dashboard helper jobs plus the platform's own
+    delegated children, merged into one list the Agents tab renders. Never mutates job files."""
     now = time.time()
     jobs = []
     for j in _handoff_jobs():
@@ -410,7 +424,14 @@ def agents_snapshot(limit=40):
             elapsed=max(0, (finished or now) - started) if started else None,
             result=j.get("result") or "",
             quiet=bool(j.get("quiet")),
-            diagnostic="diagnostic" in mission.lower()))
+            diagnostic="diagnostic" in mission.lower(),
+            stoppable=True, model=""))
+    # Delegated children are not handoff jobs: they live in Hermes's own cache (read-only),
+    # so there is no pid to signal and the dashboard cannot stop them. The reader already
+    # shapes them like helper jobs, and the one shared namer labels both kinds.
+    for d in delegations.snapshot(limit=limit):
+        d["name"] = _agent_name(d["brief"])
+        out.append(d)
     out.sort(key=lambda a: (a["status"] not in ("running", "stalled"), -(a["started"] or 0)))
     return dict(now=now, agents=out[:limit],
                 running=sum(1 for a in out if a["status"] == "running"))
@@ -535,15 +556,8 @@ def _status_reply():
 
 
 def _fast_jobs_summary():
-    running, done_count = [], 0
-    for j in _handoff_jobs():
-        st = j.get("status")
-        if st == "running":
-            pid = j.get("pid")
-            if pid is None or _pid_alive(pid):
-                running.append(j)
-        elif st in ("done", "failed"):
-            done_count += 1
+    running = running_jobs()
+    done_count = sum(1 for j in _handoff_jobs() if j.get("status") in ("done", "failed"))
     d = load()
     open_tasks = [t["text"] for t in d.get("tasks", []) if not t.get("done")]
     parts = []
@@ -651,9 +665,9 @@ def find_job(query, running_only=False):
     words = {_stem(w) for w in re.sub(r"[^a-z0-9 ]+", " ", query.lower()).split() if w not in _JOB_FILLER}
     jobs = sorted(_handoff_jobs(), key=lambda j: -(j.get("started") or 0))
     if running_only:
-        jobs = [j for j in jobs if j.get("status") == "running"]
+        jobs = [j for j in jobs if job_is_live(j)]
     if not words:
-        running = [j for j in jobs if j.get("status") == "running"]
+        running = [j for j in jobs if job_is_live(j)]
         if len(running) == 1:
             return running[0]
         if not running and not running_only and jobs:
@@ -671,6 +685,8 @@ def find_job(query, running_only=False):
 def _job_reply(j):
     name = _agent_name(j.get("mission", ""))
     status = j.get("status")
+    if status == "running" and not job_is_live(j):
+        return f"{name} stopped unexpectedly."
     if status == "running":
         mins = int(max(0, time.time() - (j.get("started") or time.time())) // 60)
         _, step = _last_log_line(j.get("id") or "")
@@ -696,7 +712,7 @@ def _jobs_intent(q, message):
         return out("On it. I've handed that to a helper and I'll tell you when it lands.", "job_start",
                    f"helper {jid} started: {mission[:50]}")
     if _JOB_STOP_ALL.match(q):
-        running = [j for j in _handoff_jobs() if j.get("status") == "running"]
+        running = running_jobs()
         for j in running:
             stop_job(j.get("id"))
         n = len(running)

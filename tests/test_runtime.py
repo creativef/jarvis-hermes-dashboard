@@ -11,6 +11,67 @@ import runtime
 FAKE = pathlib.Path(__file__).resolve().parent / "fake_hermes"
 
 
+class AppendEnvTests(unittest.TestCase):
+    def test_a_real_value_is_never_rewritten(self):
+        # The first assignment wins when the file is loaded, so an existing real key
+        # stays authoritative.
+        with tempfile.TemporaryDirectory() as td:
+            env = pathlib.Path(td) / ".env"
+            env.write_text("JARVIS_API_KEY=mine\n", encoding="utf-8")
+            runtime._append_env(env, "JARVIS_API_KEY", "theirs")
+            text = env.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("JARVIS_API_KEY=mine\n"))
+            self.assertEqual(text.count("JARVIS_API_KEY="), 1)
+
+    def test_an_empty_assignment_is_filled_not_duplicated(self):
+        # `JARVIS_API_KEY=` counts as unset, so appending a duplicate after it would leave
+        # the empty one first — and the first wins — so the real key could never take hold.
+        with tempfile.TemporaryDirectory() as td:
+            env = pathlib.Path(td) / ".env"
+            env.write_text("JARVIS_API_KEY=\nOTHER=keep\n", encoding="utf-8")
+            runtime._append_env(env, "JARVIS_API_KEY", "sekret")
+            text = env.read_text(encoding="utf-8")
+            self.assertEqual(text.count("JARVIS_API_KEY="), 1)
+            self.assertIn("JARVIS_API_KEY=sekret", text)
+            self.assertIn("OTHER=keep", text)
+
+    def test_a_missing_key_is_appended(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = pathlib.Path(td) / ".env"
+            runtime._append_env(env, "JARVIS_API_KEY", "sekret")
+            text = env.read_text(encoding="utf-8")
+            self.assertEqual(text.count("JARVIS_API_KEY="), 1)
+            self.assertTrue(text.endswith("\n"))
+
+
+class ChildEnvTests(unittest.TestCase):
+    def test_the_child_env_is_the_documented_one(self):
+        # Chat, the model test and the gateway all share this builder, so PATH order and
+        # profile propagation are the contract — and duplicates must collapse.
+        env = runtime._child_env(HERMES_PROFILE="work")
+        parts = env["PATH"].split(":")
+        home = os.path.expanduser("~")
+        wants = ["/opt/homebrew/bin", "/usr/local/bin", os.path.join(home, ".local", "bin"),
+                 os.path.join(home, ".npm-global", "bin"), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        inherited = os.environ.get("PATH", "").split(":")
+        # The inherited PATH stays in front, then the documented dirs in exactly this
+        # order. Only repeats AMONG those appended collapse: the inherited PATH is one
+        # string in the list, so its own entries are never deduped — pre-existing behaviour.
+        self.assertEqual(parts[:len(inherited)], inherited)
+        self.assertEqual(parts[len(inherited):], wants)
+        self.assertEqual(env["HERMES_PROFILE"], "work")
+
+    def test_extra_env_rides_on_top(self):
+        env = runtime._child_env(API_SERVER_ENABLED="true")
+        self.assertEqual(env["API_SERVER_ENABLED"], "true")
+
+    def test_model_flags_follow_the_candidate(self):
+        self.assertEqual(runtime._model_flags("m", "p"), ["--model", "m", "--provider", "p"])
+        self.assertEqual(runtime._model_flags("m", ""), ["--model", "m"])
+        self.assertEqual(runtime._model_flags("", "p"), ["--provider", "p"])
+        self.assertEqual(runtime._model_flags("", ""), [])
+
+
 class BuildCommandTests(unittest.TestCase):
     def test_default_flags(self):
         with mock.patch.object(runtime, "PERMISSION", "normal"), \

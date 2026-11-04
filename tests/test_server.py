@@ -30,14 +30,37 @@ class DotenvTests(unittest.TestCase):
                 "export HERMES_PROFILE=work\n"
                 "# full line comment\n"
                 "BLANK=\n"
+                # an empty assignment means UNSET: it must not shadow a real value below,
+                # which is what let a stale empty key win and a fresh one be appended daily
+                "LATEKEY=\n"
+                "LATEKEY=real-value\n"
             )
-            keys = ("ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "HERMES_PROFILE", "BLANK")
+            keys = ("ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "HERMES_PROFILE", "BLANK", "LATEKEY")
             with _del_env(*keys):
                 server._load_dotenv(env)
                 self.assertEqual(os.environ["ELEVENLABS_API_KEY"], "abc123")
                 self.assertEqual(os.environ["ELEVENLABS_VOICE_ID"], "quoted")
                 self.assertEqual(os.environ["HERMES_PROFILE"], "work")
-                self.assertEqual(os.environ["BLANK"], "")
+                self.assertNotIn("BLANK", os.environ)
+                self.assertEqual(os.environ["LATEKEY"], "real-value")
+
+
+class AttachmentPruneTests(unittest.TestCase):
+    def test_old_day_folders_are_pruned_and_recent_ones_kept(self):
+        from unittest import mock
+        import datetime
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            today = datetime.date.today().isoformat()
+            old = (datetime.date.today() - datetime.timedelta(days=server.ATTACH_KEEP_DAYS + 5)).isoformat()
+            for name in (today, old):
+                d = root / name
+                d.mkdir(parents=True)
+                (d / "shot.png").write_text("x")
+            with mock.patch.object(server, "ATTACH_ROOT", root):
+                server._attach_prune()
+            self.assertTrue((root / today / "shot.png").is_file())
+            self.assertFalse((root / old).exists())
 
 
 class CancelKeepsSessionTests(unittest.TestCase):
@@ -141,12 +164,50 @@ class StreamKeepsSessionTests(unittest.TestCase):
         finally:
             server.SESSION["id"], server.ERROR_STREAK["n"] = saved, streak
 
+    def test_a_fresh_start_is_saved_not_just_held_in_memory(self):
+        # Clearing only the in-memory session meant a failed first turn plus a restart
+        # resumed the very thread you asked to leave.
+        import io
+        from unittest import mock
+        saved = server.SESSION["id"]
+        server.SESSION["id"] = "20261020_120000_oldone"
+        h = server.Handler.__new__(server.Handler)
+        h.request_version, h.requestline, h.command = "HTTP/1.1", "", "POST"
+        h.client_address = ("127.0.0.1", 0)
+        h.wfile = io.BytesIO()
+        try:
+            with mock.patch.object(server.runtime, "run", return_value=iter([{"t": "error", "message": "429"}])), \
+                 mock.patch.object(server.commands, "handle", return_value=None), \
+                 mock.patch.object(server.commands, "clear_history"), \
+                 mock.patch.object(server.commands, "set_session") as set_session:
+                h._stream_run(b'{"message": "hello", "fresh": true}')
+            set_session.assert_called_with(None)
+            self.assertIsNone(server.SESSION["id"])
+        finally:
+            server.SESSION["id"] = saved
+
     def test_a_completed_turn_clears_the_error_streak(self):
         saved, streak = server.SESSION["id"], server.ERROR_STREAK["n"]
         server.ERROR_STREAK["n"] = 1
         try:
             self._stream([{"t": "complete", "session_id": "20261020_120000_ok"}])
             self.assertEqual(server.ERROR_STREAK["n"], 0)
+        finally:
+            server.SESSION["id"], server.ERROR_STREAK["n"] = saved, streak
+
+
+    def test_a_refused_session_is_dropped_at_once(self):
+        # The gateway refusing the conversation (a 409 on resume) is PERMANENT, unlike a
+        # 429 or an idle stop: drop it now rather than resuming a refused thread every turn.
+        saved, streak = server.SESSION["id"], server.ERROR_STREAK["n"]
+        server.SESSION["id"] = "20261020_120000_refused"
+        server.ERROR_STREAK["n"] = 0
+        try:
+            set_session = self._stream([{"t": "note", "drop_session": True,
+                                         "message": "Started a fresh Hermes thread on the API server."}])
+            self.assertIsNone(server.SESSION["id"])
+            set_session.assert_called_once_with(None)
+            self.assertEqual(server.ERROR_STREAK["n"], 0)   # not counted as a strike
         finally:
             server.SESSION["id"], server.ERROR_STREAK["n"] = saved, streak
 

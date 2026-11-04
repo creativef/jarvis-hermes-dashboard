@@ -16,8 +16,13 @@ class JobVoiceTests(unittest.TestCase):
         self.d = pathlib.Path(self.tmp.name)
         self.p = mock.patch.object(commands, "HANDOFF_DIR", self.d)
         self.p.start()
+        # every job file here has a live worker behind it, as far as `ps` is concerned
+        self.live = mock.patch.object(commands, "_live_worker_pids",
+                                      side_effect=lambda: {p.stem: 1 for p in self.d.glob("*.json")})
+        self.live.start()
 
     def tearDown(self):
+        self.live.stop()
         self.p.stop()
         self.tmp.cleanup()
 

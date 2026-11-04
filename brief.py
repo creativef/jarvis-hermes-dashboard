@@ -137,8 +137,9 @@ def start(force=False):
         BRIEF_DIR.mkdir(parents=True, exist_ok=True)
         _prune()
         data_path, job_path = _paths(st["date"])
+        import commands                        # lazy: commands imports this module
         from tools import handoff
         jid = handoff.launch(PROMPT.format(path=data_path), quiet=True)
-        job_path.write_text(jid, encoding="utf-8")
+        commands.write_atomic(job_path, jid)      # atomic: a truncated id would read as "running"
         time.sleep(0.05)                     # let the job file land before we report on it
         return state()

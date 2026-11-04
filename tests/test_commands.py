@@ -81,7 +81,8 @@ class BackgroundJobTests(unittest.TestCase):
             self._job(d, "done0001")
             self._job(d, "fail0002", status="failed", result="boom")
             self._job(d, "run00003", status="running", finished=None)
-            with mock.patch.object(commands, "HANDOFF_DIR", d):
+            with mock.patch.object(commands, "HANDOFF_DIR", d), \
+                 mock.patch.object(commands, "_live_worker_pids", return_value={"run00003": 1}):
                 first = sorted(j["id"] for j in commands.take_finished())
                 second = commands.take_finished()
             self.assertEqual(first, ["done0001", "fail0002"])
@@ -105,8 +106,12 @@ class BackgroundJobTests(unittest.TestCase):
 
         self.assertTrue(commands.job_is_live(job(pid=1), live={"j": 1}))          # ps lists our worker
         self.assertFalse(commands.job_is_live(job(pid=1), live={"other": 9}))     # ps answered, not ours
-        self.assertFalse(commands.job_is_live(job(pid=999999), live={}))          # ps failed -> probe the pid
-        self.assertTrue(commands.job_is_live(job(pid=os.getpid()), live={}))
+        # ps answered with no workers at all: a saved pid that is alive belongs to some
+        # other process now (pids are recycled, e.g. after a reboot) — the job is dead.
+        self.assertFalse(commands.job_is_live(job(pid=os.getpid()), live={}))
+        with mock.patch.object(commands, "_live_worker_pids", return_value=None):  # ps failed -> probe the pid
+            self.assertFalse(commands.job_is_live(job(pid=999999)))
+            self.assertTrue(commands.job_is_live(job(pid=os.getpid())))
         self.assertTrue(commands.job_is_live(job(started=now), live={}))          # worker still starting
         self.assertFalse(commands.job_is_live(job(started=now - 3600), live={}))  # never wrote a pid
         self.assertFalse(commands.job_is_live(job(status="done"), live={"j": 1}))
@@ -132,6 +137,74 @@ class BackgroundJobTests(unittest.TestCase):
                 self.assertEqual([j["id"] for j in commands.jobs_snapshot()], ["live0001"])
                 # counted as running, not as a stalled worker
                 self.assertEqual(commands.agents_snapshot()["running"], 1)
+
+    def test_delegated_children_are_shown_alongside_helper_jobs(self):
+        # The Agents tab must show the platform's delegated children too, not just the
+        # dashboard's own helper jobs. Delegations are read-only: no Stop, but named and
+        # counted like the rest.
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "done0001")                     # a finished helper
+            delegated = [{"id": "deleg_x-0", "kind": "delegation", "brief": "fix the things",
+                          "status": "running", "step": "tool · ls", "step_at": time.time(),
+                          "started": time.time(), "finished": None, "elapsed": 1.0,
+                          "result": "", "quiet": False, "diagnostic": False,
+                          "stoppable": False, "model": "deepseek/deepseek-v4-pro"}]
+            with mock.patch.object(commands, "HANDOFF_DIR", d), \
+                 mock.patch.object(commands.delegations, "snapshot", return_value=delegated):
+                snap = commands.agents_snapshot()
+        agents = snap["agents"]
+        assert isinstance(agents, list)
+        self.assertIn("delegation", [a["kind"] for a in agents])
+        self.assertEqual(snap["running"], 1)             # the delegated child, running
+        dg = next(a for a in agents if a["kind"] == "delegation")
+        self.assertEqual((dg["stoppable"], dg["model"]), (False, "deepseek/deepseek-v4-pro"))
+        self.assertTrue(dg["name"])                      # named by the one shared namer
+
+
+    def test_a_dead_helper_is_announced_once_as_failed(self):
+        # Killed by a reboot, the worker never records an outcome. Without this the job is
+        # never announced (you wait forever) and never pruned.
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "ghost001", status="running", finished=None, pid=os.getpid(),
+                      started=time.time() - 3600)
+            with mock.patch.object(commands, "HANDOFF_DIR", d), \
+                 mock.patch.object(commands, "_live_worker_pids", return_value={}):
+                first = commands.take_finished()
+                again = commands.take_finished()
+            self.assertEqual([(j["id"], j["status"]) for j in first], [("ghost001", "failed")])
+            self.assertEqual(again, [])
+            saved = json.loads((d / "ghost001.json").read_text())
+            self.assertEqual((saved["status"], saved["reported"]), ("failed", True))
+
+    def test_a_live_helper_is_not_announced(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "live0001", status="running", finished=None, started=time.time() - 3600)
+            with mock.patch.object(commands, "HANDOFF_DIR", d), \
+                 mock.patch.object(commands, "_live_worker_pids", return_value={"live0001": 1}):
+                self.assertEqual(commands.take_finished(), [])
+            self.assertEqual(json.loads((d / "live0001.json").read_text())["status"], "running")
+
+    def test_write_atomic_leaves_no_temp_file_behind(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = pathlib.Path(td) / "x.json"
+            commands.write_atomic(p, '{"a": 1}')
+            commands.write_atomic(p, '{"a": 2}')
+            self.assertEqual(json.loads(p.read_text())["a"], 2)
+            self.assertEqual([f.name for f in pathlib.Path(td).iterdir()], ["x.json"])
+
+    def test_announcing_a_job_writes_it_atomically(self):
+        # A crash mid-write leaves truncated JSON, which the reader skips silently — so the
+        # job would never be announced at all. No temp file may survive either.
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            self._job(d, "done0001", status="done", finished=time.time())
+            with mock.patch.object(commands, "HANDOFF_DIR", d):
+                commands.take_finished()
+            self.assertTrue(json.loads((d / "done0001.json").read_text())["reported"])
+            self.assertEqual([f.name for f in d.iterdir() if f.name.startswith(".")], [])
 
 
 if __name__ == "__main__":

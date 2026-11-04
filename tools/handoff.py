@@ -98,7 +98,7 @@ def worker(jid, mission):
         with open(log_path, "a", encoding="utf-8") as log, open(err_path, "w") as err:
             proc = subprocess.Popen(runtime.build_command(mission, None), stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=err, text=True,
-                                    cwd=runtime.WORKDIR)
+                                    cwd=runtime.WORKDIR, env=runtime._child_env())
 
             def feed():
                 try:
@@ -136,12 +136,15 @@ def worker(jid, mission):
             proc.stdout.close()
             killer.cancel()
         text = (final or text).strip()
-        if proc.returncode != 0 and not text:
+        if proc.returncode != 0:
+            # A non-zero exit is a failure even when partial output came out first — and
+            # the 3600s kill path lands here too. Keep whatever it managed to produce.
             try:
-                tail = err_path.read_text(errors="replace")
+                tail = err_path.read_text(errors="replace").strip()
             except OSError:
                 tail = ""
-            status, text = "failed", (tail or "helper exited with an error")[-260:]
+            why = tail or f"helper exited with code {proc.returncode}"
+            status, text = "failed", (f"{text}\n\n{why}" if text else why)[-260:]
     except Exception as e:  # noqa: BLE001
         status, text = "failed", f"{e}"[:260]
     finally:

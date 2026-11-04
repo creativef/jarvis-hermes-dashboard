@@ -26,7 +26,8 @@ class AgentsSnapshotTests(unittest.TestCase):
             self._job(d, "done0003", status="done", result="All finished.",
                       finished=time.time() - 10)
             with mock.patch.object(commands, "HANDOFF_DIR", d), \
-                    mock.patch.object(commands, "_worker_pids", return_value={}):
+                    mock.patch.object(commands, "_live_worker_pids", return_value={"live0001": os.getpid()}), \
+                    mock.patch.object(commands.delegations, "snapshot", return_value=[]):
                 snap = commands.agents_snapshot()
             by = {a["id"]: a for a in snap["agents"]}
             self.assertEqual(by["live0001"]["status"], "running")
@@ -105,7 +106,7 @@ class HandoffWorkerTests(unittest.TestCase):
                 "print(json.dumps({'type':'result','text':'All good.'}),flush=True)\n")
         fake_runtime = types.SimpleNamespace(
             build_command=lambda m, s: [sys.executable, "-c", fake], WORKDIR=None,
-            apply_settings=lambda s: None, user_name=lambda: "Sam")
+            apply_settings=lambda s: None, _child_env=lambda **k: None, user_name=lambda: "Sam")
         with tempfile.TemporaryDirectory() as td:
             d = pathlib.Path(td)
             (d / "w0000001.json").write_text(json.dumps(
@@ -132,7 +133,7 @@ class HandoffWorkerTests(unittest.TestCase):
         applied = []
         fake_runtime = types.SimpleNamespace(
             build_command=lambda m, s: [sys.executable, "-c", fake], WORKDIR=None,
-            apply_settings=applied.append, user_name=lambda: "os-user")
+            apply_settings=applied.append, _child_env=lambda **k: None, user_name=lambda: "os-user")
         with tempfile.TemporaryDirectory() as td:
             d = pathlib.Path(td)
             state = d / "state.json"
@@ -147,6 +148,31 @@ class HandoffWorkerTests(unittest.TestCase):
             job = json.loads((d / "w0000002.json").read_text())
             self.assertEqual(applied, [{"permission": "normal", "user_name": "Dana"}])
             self.assertEqual(job["result"], "named")
+
+    def test_a_nonzero_exit_is_failed_even_with_partial_output(self):
+        # A helper that printed something and THEN died must not be reported as done —
+        # the user would be told a broken job finished cleanly.
+        import sys
+        import types
+        from tools import handoff
+        fake = ("import sys,json\nsys.stdin.read()\n"
+                "print(json.dumps({'type':'result','text':'Half a report.'}),flush=True)\n"
+                "sys.exit(3)\n")
+        fake_runtime = types.SimpleNamespace(
+            build_command=lambda m, s: [sys.executable, "-c", fake], WORKDIR=None,
+            apply_settings=lambda s: None, _child_env=lambda **k: None, user_name=lambda: "Sam")
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td)
+            (d / "f0000001.json").write_text(json.dumps(
+                {"id": "f0000001", "status": "running", "mission": "x", "result": "",
+                 "started": time.time(), "finished": None}))
+            with mock.patch.object(handoff, "HANDOFF_DIR", d), \
+                    mock.patch.object(handoff, "STATE_FILE", d / "missing.json"), \
+                    mock.patch.dict(sys.modules, {"runtime": fake_runtime}):
+                handoff.worker("f0000001", "x")
+            job = json.loads((d / "f0000001.json").read_text())
+            self.assertEqual(job["status"], "failed")
+            self.assertIn("Half a report.", job["result"])
 
     def test_sigterm_stops_hermes_and_records_stopped(self):
         # a real detached worker process: SIGTERM must end Hermes and leave "stopped"
@@ -168,7 +194,7 @@ class HandoffWorkerTests(unittest.TestCase):
                 f"handoff.STATE_FILE=pathlib.Path({td!r})/'none.json'\n"
                 "slow=[sys.executable,'-c','import time,sys;sys.stdin.read();print(\"{}\",flush=True);time.sleep(60)']\n"
                 "sys.modules['runtime']=types.SimpleNamespace(build_command=lambda m,s: slow, WORKDIR=None,"
-                " apply_settings=lambda s: None, user_name=lambda: 'x')\n"
+                " apply_settings=lambda s: None, _child_env=lambda **k: None, user_name=lambda: 'x')\n"
                 f"handoff.worker({jid!r},'x')\n")
             proc = subprocess.Popen([sys.executable, "-c", code])
             for _ in range(100):                          # wait for the worker to record its pid

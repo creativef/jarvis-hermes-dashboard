@@ -48,6 +48,8 @@ def _load_dotenv(path):
             value = value[:hash_idx].rstrip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        if not value:
+            continue              # `KEY=` means unset — it must never shadow a real value
         os.environ.setdefault(key, value)
 
 
@@ -72,11 +74,12 @@ RUN_LOCK = threading.Lock()
 MAX_JSON_BODY = 1024 * 1024
 MAX_INBOX_BODY = 14 * 1024 * 1024
 MAX_AUDIO_BODY = 12 * 1024 * 1024
-# Chat-composer attachments. The body cap is generous (a big photo or a PDF);
-# the decoded size is capped separately so base64 inflation can't smuggle in a
-# larger file than the transport limit allows.
+# Chat-composer attachments. MAX_ATTACH_BODY is the only real cap: it bounds the base64
+# body, so it bounds the decoded file too — a separate decoded-size limit could never be
+# reached and was dead code.
 MAX_ATTACH_BODY = 32 * 1024 * 1024
-MAX_ATTACH_BYTES = 200 * 1024 * 1024
+# Day folders older than this are pruned: nothing else ever deletes from the drop area.
+ATTACH_KEEP_DAYS = 30
 # Where composer attachments land. Deliberately NOT ~/Atlas: this is the chat
 # drop area, it never touches the inbox or the Brain.
 ATTACH_ROOT = ROOT / "attachments"
@@ -127,6 +130,14 @@ SESSION = {"id": commands.get_session()}
 ERROR_STREAK = {"n": 0}
 
 
+def _drop_session():
+    """Forget the Hermes conversation everywhere: in memory, in state.json (or a restart
+    would resume it), and the error streak that counted towards dropping it."""
+    SESSION["id"] = None
+    commands.set_session(None)
+    ERROR_STREAK["n"] = 0
+
+
 def _merged_settings():
     """Runtime settings plus the UI-only prefs (greeting name / toggle)."""
     out = dict(runtime.current_settings())
@@ -167,6 +178,27 @@ def build_greeting(now=None):
 def _attach_day_dir(day=None):
     import datetime
     return ATTACH_ROOT / (day or datetime.date.today().isoformat())
+
+
+def _attach_prune():
+    """Drop day folders older than ATTACH_KEEP_DAYS. Nothing else ever deletes from the
+    composer's drop area, so without this it grows without bound."""
+    import datetime
+    cutoff = (datetime.date.today() - datetime.timedelta(days=ATTACH_KEEP_DAYS)).isoformat()
+    try:
+        days = [d for d in ATTACH_ROOT.iterdir() if d.is_dir()]
+    except OSError:
+        return
+    for d in days:
+        if d.name >= cutoff:
+            continue
+        try:
+            for f in d.iterdir():
+                if f.is_file():
+                    f.unlink(missing_ok=True)
+            d.rmdir()
+        except OSError:
+            pass
 
 
 def _attach_safe_name(raw):
@@ -210,8 +242,6 @@ def attach_save(raw_name, data_b64, kind=""):
         return None, "data_base64 is not valid base64"
     if not data:
         return None, "file is empty"
-    if len(data) > MAX_ATTACH_BYTES:
-        return None, f"file is larger than {MAX_ATTACH_BYTES} bytes"
 
     root = ATTACH_ROOT.resolve()
     try:
@@ -254,6 +284,7 @@ def attach_save(raw_name, data_b64, kind=""):
         except OSError:
             pass
         return None, "refusing to write outside the attachments directory"
+    _attach_prune()                            # one iterdir per upload keeps the drop area bounded
     return {"path": str(path.resolve()), "name": path.name, "bytes": len(data),
             "mime_guess": _attach_mime(path.name, kind)}, None
 
@@ -617,8 +648,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/new":
             runtime.cancel_active()
-            SESSION["id"] = None
-            commands.set_session(None)
+            _drop_session()
             return self._json({"ok": True})
 
         if p == "/api/cancel":
@@ -671,7 +701,7 @@ class Handler(BaseHTTPRequestHandler):
         if not message:
             return self._json({"error": "empty message"}, 400)
         if fresh:
-            SESSION["id"] = None
+            _drop_session()
             commands.clear_history()
 
         self.send_response(200)
@@ -694,7 +724,7 @@ class Handler(BaseHTTPRequestHandler):
             if cmd.get("ui"):
                 emit(dict(t="ui", ui=cmd["ui"]))       # e.g. voice "show me pricing in my brain"
             if cmd.get("fresh"):
-                SESSION["id"] = None
+                _drop_session()
                 commands.clear_history()
             if cmd.get("message") is None:
                 # answered locally — no model call needed
@@ -722,8 +752,12 @@ class Handler(BaseHTTPRequestHandler):
                 if ev.get("t") == "error":
                     ERROR_STREAK["n"] += 1
                     if ERROR_STREAK["n"] >= 2:      # drop a bad/stale session so the next run is fresh
-                        SESSION["id"] = None
-                        commands.set_session(None)
+                        _drop_session()
+                if ev.get("drop_session"):
+                    # The gateway refused this conversation (a 409 on resume) — permanent,
+                    # unlike a 429 or an idle stop. Drop it now rather than resuming a
+                    # thread it has already refused on every turn that follows.
+                    _drop_session()
                 emit(ev)
         except (BrokenPipeError, ConnectionResetError):
             pass                                          # client navigated away

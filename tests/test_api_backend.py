@@ -129,9 +129,17 @@ class ApiBackendTests(unittest.TestCase):
         evs = self._run(session_id="20261015_171425_cfb3ae")
         self.assertEqual(len(Fake.run_bodies), 2)
         self.assertNotIn("session_id", Fake.run_bodies[1])
-        self.assertTrue(any(e["t"] == "note" and "fresh" in e["message"] for e in evs))
+        note = next(e for e in evs if e["t"] == "note" and "fresh" in e["message"])
+        self.assertTrue(note.get("drop_session"))      # and the refused thread is forgotten
         self.assertEqual(evs[-1]["t"], "complete")
         self.assertEqual(evs[-1]["session_id"], "run_abc123")
+
+    def test_bypass_falls_back_to_asking_when_the_auto_approve_fails(self):
+        from unittest import mock
+        with mock.patch.object(api_backend, "resolve_approval", return_value=(False, "HTTP 409")):
+            evs = self._run(auto_approve=True)
+        self.assertIn("approval", [e["t"] for e in evs])
+        self.assertFalse(any(e["t"] == "note" and "auto-approved" in e["message"] for e in evs))
 
     def test_bypass_auto_approves_and_logs(self):
         evs = self._run(auto_approve=True)
@@ -176,9 +184,45 @@ class ApiBackendTests(unittest.TestCase):
         self.assertEqual(Fake.stop_calls, [])
 
     def test_risk_tiers(self):
-        self.assertEqual(api_backend.classify("recursive delete", "rm -rf x"), "high")
-        self.assertEqual(api_backend.classify("send an email", ""), "high")
-        self.assertEqual(api_backend.classify("install package", "pip install requests"), "normal")
+        # One matcher, not two: the spoken-yes risk is derived from the tier, so the risk
+        # badge and the voice rule can never drift apart.
+        tier = api_backend.classify_tier
+        self.assertEqual(api_backend.risk_from_tier(tier("recursive delete", "rm -rf x")["tier"]), "high")
+        self.assertEqual(api_backend.risk_from_tier(tier("send an email", "")["tier"]), "high")
+        self.assertEqual(api_backend.risk_from_tier(tier("install package", "pip install requests")["tier"]), "normal")
+        self.assertEqual(api_backend.risk_from_tier("medium"), "normal")
+        self.assertEqual(api_backend.risk_from_tier("low"), "normal")
+
+
+    def test_a_provider_fallback_is_surfaced(self):
+        # You ask for provider X; `fallback_providers` lets the gateway serve (and bill) Y
+        # and say nothing. The run.completed event carries both pairs, so say so.
+        Fake.events = [{"event": "run.completed", "output": "hi", "usage": {},
+                        "runtime": {"provider": "llamacpp", "model": "gpt-oss-20b",
+                                    "route_source": "raw_request",
+                                    "requested": {"provider": "openrouter", "model": "deepseek/x"}}}]
+        evs = self._run(provider="openrouter", model="deepseek/x")
+        note = next(e for e in evs if e["t"] == "note")
+        self.assertIn("served by llamacpp · gpt-oss-20b", note["message"])
+
+    def test_no_note_when_the_pair_you_asked_for_served_it(self):
+        Fake.events = [{"event": "run.completed", "output": "hi", "usage": {},
+                        "runtime": {"provider": "openrouter", "model": "deepseek/x",
+                                    "requested": {"provider": "openrouter", "model": "deepseek/x"}}}]
+        self.assertNotIn("note", [e["t"] for e in self._run(provider="openrouter", model="deepseek/x")])
+
+    def test_no_note_when_nothing_was_asked_for(self):
+        # A fallback on the gateway's OWN default is not the dashboard's to shout about.
+        Fake.events = [{"event": "run.completed", "output": "hi", "usage": {},
+                        "runtime": {"provider": "llamacpp", "model": "gpt-oss-20b"}}]
+        self.assertNotIn("note", [e["t"] for e in self._run()])
+
+    def test_the_local_alias_is_not_a_fallback(self):
+        # `local` and `llamacpp` are the same provider: that must not read as a switch.
+        Fake.events = [{"event": "run.completed", "output": "hi", "usage": {},
+                        "runtime": {"provider": "llamacpp", "model": "gpt-oss-20b",
+                                    "requested": {"provider": "local", "model": "gpt-oss-20b"}}}]
+        self.assertNotIn("note", [e["t"] for e in self._run(provider="local", model="gpt-oss-20b")])
 
 
 if __name__ == "__main__":

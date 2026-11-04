@@ -99,7 +99,9 @@ def apply_settings(settings):
     if "model_provider" in settings:
         chosen = str(settings.get("model_provider") or "").strip()
         PROVIDER = chosen if chosen and not _same_provider(chosen, native_provider) else ""
-    clear_cache()      # model_info() keys off MODEL/PROVIDER; drop stale probe entries
+    # Nothing to invalidate here: model_info() reads config.yaml directly, and the
+    # version/tools probes do not depend on these settings. Clearing the cache made the
+    # turn right after every settings save pay for both probes again.
 
 
 def current_settings():
@@ -120,16 +122,14 @@ def model_info():
     Read-only and dependency-free: scans only the top-level `model:` block.
     JARVIS_MODEL (the --model override) wins over the configured default.
     """
-    key = ("model_info", str(_profile_home()), MODEL)
-    return _ttl_cached(key, _PROBE_TTL, _model_info_raw)
+    # Deliberately uncached: it only reads config.yaml, and the orb's "live" model line
+    # must show a Hermes-side change at once rather than an hour later.
+    return _model_info_raw()
 
 
 def _same_provider(a, b):
     """Compare provider ids, treating the local alias ``local`` as ``llamacpp``."""
-    norm = {"local": "llamacpp", "llama.cpp": "llamacpp", "llama-cpp": "llamacpp"}
-    a = norm.get(str(a or "").strip().lower(), str(a or "").strip().lower())
-    b = norm.get(str(b or "").strip().lower(), str(b or "").strip().lower())
-    return a == b
+    return _canonical_provider(a).lower() == _canonical_provider(b).lower()
 
 
 def _native_model_config():
@@ -369,7 +369,6 @@ def probe_cache_status():
     keys = {
         "hermes_version": "hermes_version",
         "tools_snapshot": "tools_snapshot",
-        "model_info": ("model_info", str(_profile_home()), MODEL),
         "user_name": ("user_name", str(_profile_home())),
     }
     out = {}
@@ -384,11 +383,10 @@ def probe_cache_status():
 
 
 def prewarm_probes(background=False):
-    """Pre-warm `hermes --version`, `hermes tools list`, model_info, and user_name caches."""
+    """Pre-warm `hermes --version`, `hermes tools list`, and user_name caches."""
     def _warm():
         runtime_kind()
         hermes_tools_snapshot()
-        model_info()
         user_name()
         return probe_cache_status()
 
@@ -420,11 +418,38 @@ _GATEWAY_LOG = pathlib.Path(__file__).resolve().parent / "logs" / "gateway.log"
 
 
 def _append_env(path, key, value):
-    """Add KEY=value to the dashboard's private .env (created 0600 if missing)."""
+    """Set KEY=value in the dashboard's private .env (created 0600 if missing).
+
+    An existing EMPTY assignment is replaced rather than joined by a duplicate: the
+    loader treats `KEY=` as unset, and a duplicate would leave the empty assignment
+    first in the file, so the real value could never win.
+    """
     path = pathlib.Path(path)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as f:
-        f.write(f"\n# Hermes API server key (created by the dashboard)\n{key}={value}\n")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    out, replaced, present = [], False, False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
+            if not replaced and stripped in (f"{key}=", f"export {key}="):
+                out.append(f"{key}={value}")          # an empty assignment is "unset": fill it
+                replaced = True
+            else:
+                present = True                        # a real value already wins the load
+                out.append(line)
+        else:
+            out.append(line)
+    if not replaced and not present:
+        out += ["", "# Hermes API server key (created by the dashboard)", f"{key}={value}"]
+    # Write a private temp file and swap it in: truncating .env in place would lose every
+    # key in it if the write were cut short.
+    tmp = path.with_name(f".{path.name}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.replace(tmp, path)
     os.chmod(path, 0o600)
 
 
@@ -460,11 +485,9 @@ def start_gateway(env_file):
         if api_backend.healthy(API_URL):
             _GATEWAY.update(state="external", note=f"an API server is already running at {API_URL}")
             return
-        env = dict(os.environ, HERMES_PROFILE=PROFILE, API_SERVER_ENABLED="true",
-                   API_SERVER_KEY=API_KEY, API_SERVER_HOST="127.0.0.1",
-                   API_SERVER_PORT=str(url.port or 8642))
-        env["PATH"] = ":".join(dict.fromkeys([env.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin",
-                                              os.path.expanduser("~/.local/bin")]))
+        env = _child_env(API_SERVER_ENABLED="true", API_SERVER_KEY=API_KEY,
+                         API_SERVER_HOST="127.0.0.1",
+                         API_SERVER_PORT=str(url.port or 8642))
         try:
             _GATEWAY_LOG.parent.mkdir(parents=True, exist_ok=True)
             log = open(_GATEWAY_LOG, "ab")
@@ -601,6 +624,33 @@ def build_instructions(system=None):
     return f"{system}\n\n{_ANSWER_RULE}" if system else None
 
 
+def _child_env(**extra):
+    """The environment every Hermes child inherits: our own environment, the profile
+    propagated (profile selection is env-based), and the common Homebrew/user bin dirs on
+    PATH so a GUI-started shell can still find `hermes`. One builder, so the chat, the
+    model test and the gateway can never drift apart."""
+    env = dict(os.environ)
+    env["HERMES_PROFILE"] = PROFILE
+    home = os.path.expanduser("~")
+    env["PATH"] = ":".join(dict.fromkeys([
+        env.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin",
+        os.path.join(home, ".local", "bin"), os.path.join(home, ".npm-global", "bin"),
+        "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+    ]))
+    env.update(extra)
+    return env
+
+
+def _model_flags(model, provider):
+    """`--model`/`--provider` for a chat invocation, each only when actually set."""
+    flags = []
+    if model:
+        flags += ["--model", model]
+    if provider:
+        flags += ["--provider", provider]
+    return flags
+
+
 def build_command(message, session_id=None):
     # --format stream-json = structured NDJSON on stdout (implies --quiet).
     # --query-file - reads the prompt from stdin, the documented-safe way to pass
@@ -609,10 +659,7 @@ def build_command(message, session_id=None):
                             "--source", SOURCE]
     if valid_session(session_id):
         cmd += ["--resume", str(session_id)]
-    if MODEL:
-        cmd += ["--model", MODEL]
-    if PROVIDER:
-        cmd += ["--provider", PROVIDER]
+    cmd += _model_flags(MODEL, PROVIDER)
     if TOOLSETS:
         cmd += ["--toolsets", TOOLSETS]
     # JARVIS_PERMISSION=bypass maps to Hermes --yolo (skip dangerous-command
@@ -928,20 +975,10 @@ def test_model(provider=None, model=None):
     provider = str(provider or "").strip()
     model = str(model or "").strip()
     cmd = _hermes_base() + ["chat", "--format", "stream-json", "--query-file", "-", "--source", SOURCE]
-    if model:
-        cmd += ["--model", model]
-    if provider:
-        cmd += ["--provider", provider]
+    cmd += _model_flags(model, provider)     # the one place model/provider flags are built
     if PERMISSION == "bypass":
         cmd += ["--yolo"]
-    child_env = dict(os.environ)
-    child_env["HERMES_PROFILE"] = PROFILE
-    home = os.path.expanduser("~")
-    child_env["PATH"] = ":".join(dict.fromkeys([
-        child_env.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin",
-        os.path.join(home, ".local", "bin"), os.path.join(home, ".npm-global", "bin"),
-        "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-    ]))
+    child_env = _child_env()
     started = time.monotonic()
     try:
         proc = subprocess.run(cmd, cwd=WORKDIR, input="Reply with the single word: pong",
@@ -990,19 +1027,7 @@ def run_hermes(message, session_id=None, system=None):
                mcp=[], permission=PERMISSION, profile=PROFILE, runtime="hermes",
                session_id=session_id)
 
-    child_env = dict(os.environ)
-    # Profile selection is env-based; the dashboard's own JARVIS_PROFILE override
-    # must be propagated to the child.
-    child_env["HERMES_PROFILE"] = PROFILE
-    # Ensure GUI-started shells can still find common Homebrew/user installs.
-    home = os.path.expanduser("~")
-    child_env["PATH"] = ":".join(dict.fromkeys([
-        child_env.get("PATH", ""),
-        "/opt/homebrew/bin", "/usr/local/bin",
-        os.path.join(home, ".local", "bin"),
-        os.path.join(home, ".npm-global", "bin"),
-        "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-    ]))
+    child_env = _child_env()
 
     try:
         proc = subprocess.Popen(cmd, cwd=WORKDIR, text=True, bufsize=1,
@@ -1083,14 +1108,17 @@ def run_hermes(message, session_id=None, system=None):
             if line is None:
                 if proc.poll() is not None and done.is_set():
                     break
-                if time.monotonic() - last > IDLE_TIMEOUT and not in_tool:
+                # A tool may legitimately run silent for a while, but a hung one must not
+                # hold the turn (and every message after it) forever.
+                limit = IDLE_TIMEOUT * (10 if in_tool else 1)
+                if time.monotonic() - last > limit:
                     proc.kill()
                     try:
                         proc.wait(timeout=5)
                     except Exception:
                         pass
                     err = " | ".join(list(errbuf)[-3:])
-                    yield dict(t="error", message=(f"Hermes went quiet for {IDLE_TIMEOUT}s and was stopped. " + err)[:400])
+                    yield dict(t="error", message=(f"Hermes went quiet for {limit}s and was stopped. " + err)[:400])
                     return
                 time.sleep(0.05)
                 continue
