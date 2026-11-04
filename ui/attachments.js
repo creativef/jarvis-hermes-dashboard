@@ -17,9 +17,9 @@
     : n < 1048576 ? (n / 1024).toFixed(1) + ' KB'
     : (n / 1048576).toFixed(1) + ' MB';
   const HEADER = 'Attached files (read these):';
-  // The server caps the upload body at 32 MB and base64 adds a third, so ~23 MB is the
-  // real limit. Say so before reading and uploading the whole file only to be refused.
-  const MAX_BYTES = 23 * 1024 * 1024;
+  // Same cap as the server (MAX_ATTACH_BYTES): say so before uploading the whole file
+  // only to be refused.
+  const MAX_BYTES = 200 * 1024 * 1024;
 
   let pending = [];          // {name, bytes, path, mime, error, uploading, el}
 
@@ -59,15 +59,6 @@
     input.focus();
   }
 
-  function readDataURL(file){
-    return new Promise((res, rej) => {
-      const fr = new FileReader();
-      fr.onload = () => res(String(fr.result || ''));
-      fr.onerror = () => rej(new Error('could not read the file'));
-      fr.readAsDataURL(file);
-    });
-  }
-
   async function attachFile(file){
     if (!file) return null;
     const name = file.name || 'file';
@@ -78,25 +69,20 @@
       return bad;
     }
     if (file.size > MAX_BYTES){
-      const bad = {name, bytes: file.size, error: 'too large (max 23 MB)'};
+      const bad = {name, bytes: file.size, error: 'too large (max 200 MB)'};
       pending.push(bad); renderChips();
-      note('error', 'ATTACH', `${name}: ${fmtSize(file.size)} is over the 23 MB limit — nothing was saved`);
+      note('error', 'ATTACH', `${name}: ${fmtSize(file.size)} is over the 200 MB limit — nothing was saved`);
       return bad;
     }
     const entry = {name, bytes: file.size, uploading: true};
     pending.push(entry); renderChips();
-    let data;
-    try { data = await readDataURL(file); }
-    catch (e){
-      entry.uploading = false; entry.error = 'read failed'; renderChips();
-      note('error', 'ATTACH', `${name}: ${e.message || 'could not read the file'}`);
-      return entry;
-    }
     try {
-      const r = await fetch('/api/attach', {
+      // the file itself is the body (streamed by the browser, no base64 copy in memory)
+      const q = `name=${encodeURIComponent(name)}&kind=${encodeURIComponent(file.type || '')}`;
+      const r = await fetch('/api/attach?' + q, {
         method: 'POST',
-        headers: apiHeaders({'content-type': 'application/json'}),
-        body: JSON.stringify({name, data_base64: data, kind: file.type || ''}),
+        headers: apiHeaders({'content-type': 'application/octet-stream'}),
+        body: file,
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok || !j.path) throw new Error(j.error || ('HTTP ' + r.status));

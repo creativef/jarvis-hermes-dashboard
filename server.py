@@ -9,8 +9,6 @@ third-party integrations that your normal Hermes sessions have. Voice can use th
 local Parakeet (speech in) and Kokoro (speech out), with macOS `say` and browser
 speech as fallbacks.
 """
-import base64
-import binascii
 import json
 import logging
 import mimetypes
@@ -20,6 +18,7 @@ import re
 import secrets
 import sys
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
@@ -68,16 +67,19 @@ runtime.apply_settings(commands.get_settings())
 voice.apply_settings(commands.get_settings())
 
 PORT = int(os.environ.get("JARVIS_PORT", "8730"))
-API_TOKEN = secrets.token_urlsafe(32)
-BOOT_ID = secrets.token_hex(4)   # changes every server launch; drives "greet once per launch"
+# A self-restart (see _maybe_restart) hands its token and boot id to the new process, so the
+# open tab keeps working: no 401 -> reload, no wiped screen, no second "good evening".
+# Popped so they never leak into the environment of Hermes or helper children.
+API_TOKEN = os.environ.pop("JARVIS_TOKEN", "") or secrets.token_urlsafe(32)
+BOOT_ID = os.environ.pop("JARVIS_BOOT_ID", "") or secrets.token_hex(4)   # drives "greet once per launch"
 RUN_LOCK = threading.Lock()
 MAX_JSON_BODY = 1024 * 1024
 MAX_INBOX_BODY = 14 * 1024 * 1024
 MAX_AUDIO_BODY = 12 * 1024 * 1024
-# Chat-composer attachments. MAX_ATTACH_BODY is the only real cap: it bounds the base64
-# body, so it bounds the decoded file too — a separate decoded-size limit could never be
-# reached and was dead code.
-MAX_ATTACH_BODY = 32 * 1024 * 1024
+# Chat-composer attachments arrive as raw bytes and are streamed straight to disk in
+# chunks, so a big file never sits in memory (base64-in-JSON would have cost ~2.5x).
+MAX_ATTACH_BYTES = 200 * 1024 * 1024
+_ATTACH_CHUNK = 1024 * 1024
 # Day folders older than this are pruned: nothing else ever deletes from the drop area.
 ATTACH_KEEP_DAYS = 30
 # Where composer attachments land. Deliberately NOT ~/Atlas: this is the chat
@@ -105,6 +107,43 @@ def _setup_error_log():
         _ERR_LOG = logger
     except OSError:
         _ERR_LOG = None
+
+# ── safe restart ─────────────────────────────────────────────
+# Atlas edits this dashboard's own code. Killing the server to reload it cut Atlas off
+# mid-reply, the tab reloaded into a blank screen and a fresh greeting, and the killed voice
+# worker meant the next words came in the fallback voice. tools/restart-dashboard.sh only
+# drops this flag; the server restarts itself between turns, once it has stopped talking.
+RESTART_FLAG = LOG_DIR / "restart-requested"
+RESTART_QUIET_S = 5                    # no speech/listen request for this long first
+_VOICE_AT = [0.0]                      # monotonic time of the last /api/speak or /api/listen
+
+
+def _maybe_restart():
+    """Re-exec this server when a restart was requested and nothing is in flight.
+    Same token and boot id, so the open tab carries on. Returns False when not yet."""
+    if not RESTART_FLAG.exists() or time.monotonic() - _VOICE_AT[0] < RESTART_QUIET_S:
+        return False
+    if not RUN_LOCK.acquire(blocking=False):           # a turn is still streaming
+        return False
+    try:
+        RESTART_FLAG.unlink(missing_ok=True)
+    except OSError:
+        pass
+    print("  restarting (requested)…", flush=True)
+    env = dict(os.environ, JARVIS_TOKEN=API_TOKEN, JARVIS_BOOT_ID=BOOT_ID, JARVIS_OPEN="0")
+    os.execve(sys.executable, [sys.executable, str(ROOT / "server.py")], env)
+    return True                                        # only reached when execve is mocked
+
+
+def _restart_watcher():
+    while True:
+        time.sleep(1)
+        try:
+            _maybe_restart()
+        except OSError as e:
+            if _ERR_LOG:
+                _ERR_LOG.error("restart failed: %s", e)
+
 
 # The Jarvis persona, appended to every run. Without it, the model answers as a
 # coding agent and narrates its own tooling — which is not what you want spoken
@@ -224,24 +263,14 @@ def _attach_mime(name, kind=""):
     return kind if "/" in kind and len(kind) <= 100 else "application/octet-stream"
 
 
-def attach_save(raw_name, data_b64, kind=""):
-    """Decode one base64 payload and store it under ATTACH_ROOT. Returns (info, err)."""
+def attach_save(raw_name, stream, length, kind=""):
+    """Stream `length` raw bytes from `stream` into a new file under ATTACH_ROOT.
+    Returns (info, err). A short read (the upload broke off) leaves no partial file."""
     name = str(raw_name or "").strip() or "file"
-    b64 = str(data_b64 or "")
-    if not b64:
-        return None, "data_base64 is required"
-    if b64.startswith("data:"):                       # a FileReader data: URL
-        comma = b64.find(",")
-        if comma == -1:
-            return None, "malformed data URL"
-        b64 = b64[comma + 1:]
-    b64 = "".join(b64.split())                        # tolerate wrapped/whitespaced base64
-    try:
-        data = base64.b64decode(b64, validate=True)
-    except (binascii.Error, ValueError):
-        return None, "data_base64 is not valid base64"
-    if not data:
+    if length <= 0:
         return None, "file is empty"
+    if length > MAX_ATTACH_BYTES:
+        return None, f"file is larger than {MAX_ATTACH_BYTES // (1024 * 1024)} MB"
 
     root = ATTACH_ROOT.resolve()
     try:
@@ -268,11 +297,23 @@ def attach_save(raw_name, data_b64, kind=""):
             continue                                  # same name today: keep them all
         except OSError as e:
             return None, f"could not write the file: {e}"
+        left = length
         try:
             with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
+                while left:
+                    chunk = stream.read(min(_ATTACH_CHUNK, left))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    left -= len(chunk)
         except OSError as e:
-            return None, f"could not write the file: {e}"
+            left = left or -1
+            err = f"could not write the file: {e}"
+        else:
+            err = "the upload was cut off before the whole file arrived"
+        if left:
+            candidate.unlink(missing_ok=True)
+            return None, err
         path = candidate
         break
     if path is None:
@@ -285,7 +326,7 @@ def attach_save(raw_name, data_b64, kind=""):
             pass
         return None, "refusing to write outside the attachments directory"
     _attach_prune()                            # one iterdir per upload keeps the drop area bounded
-    return {"path": str(path.resolve()), "name": path.name, "bytes": len(data),
+    return {"path": str(path.resolve()), "name": path.name, "bytes": length,
             "mime_guess": _attach_mime(path.name, kind)}, None
 
 
@@ -542,35 +583,43 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "request origin rejected"}, 403)
         if not self._token_ok():
             return self._json({"error": "unauthorized"}, 401)
+        if p in ("/api/speak", "/api/listen"):
+            _VOICE_AT[0] = time.monotonic()            # Atlas is talking: not the moment to restart
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
         if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/settings", "/api/approval", "/api/inbox",
-                 "/api/attach", "/api/brain/note", "/api/brain/link", "/api/agents/stop", "/api/brief",
+                 "/api/brain/note", "/api/brain/link", "/api/agents/stop", "/api/brief",
                  "/api/models/test"} and ctype != "application/json":
             return self._json({"error": "application/json required"}, 415)
         if p == "/api/listen" and not ctype.startswith("audio/"):
             return self._json({"error": "audio content type required"}, 415)
+
+        if p == "/api/attach":
+            # Chat composer drop area: raw file bytes in the body, ?name=&kind= in the URL.
+            # Saves under <project>/attachments/<date>/ and returns the ABSOLUTE path for
+            # the UI to put in the message text. Streamed to disk, never read into memory.
+            # Deliberately separate from /api/inbox: no Brain note, no ~/Atlas write.
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "local only"}, 403)
+            if ctype != "application/octet-stream":
+                return self._json({"error": "application/octet-stream required"}, 415)
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                return self._json({"error": "bad Content-Length"}, 400)
+            q = parse_qs(urlparse(self.path).query)
+            info, err = attach_save((q.get("name") or [""])[0], self.rfile, length,
+                                    (q.get("kind") or [""])[0])
+            if err:
+                return self._json({"ok": False, "error": err}, 413 if "larger" in err else 400)
+            return self._json({"ok": True, **(info or {})})
+
         try:
             limit = (MAX_AUDIO_BODY if p == "/api/listen"
                      else MAX_INBOX_BODY if p == "/api/inbox"
-                     else MAX_ATTACH_BODY if p == "/api/attach"
                      else MAX_JSON_BODY)
             raw = self._read(limit)
         except (TypeError, ValueError):
             return self._json({"error": "request body too large"}, 413)
-
-        if p == "/api/attach":
-            # Chat composer drop area. Saves under <project>/attachments/<date>/ and
-            # returns the ABSOLUTE path for the UI to put in the message text.
-            # Deliberately separate from /api/inbox: no Brain note, no ~/Atlas write.
-            if self.client_address[0] not in ("127.0.0.1", "::1"):
-                return self._json({"error": "local only"}, 403)
-            body = self._obj(raw)
-            if body is None:
-                return self._json({"error": "payload must be a JSON object"}, 400)
-            info, err = attach_save(body.get("name"), body.get("data_base64"), body.get("kind") or "")
-            if err:
-                return self._json({"ok": False, "error": err}, 400)
-            return self._json({"ok": True, **(info or {})})
 
         if p == "/api/inbox":
             if self.client_address[0] not in ("127.0.0.1", "::1"):
@@ -801,6 +850,8 @@ def main():
 """, flush=True)
 
     _setup_error_log()
+    RESTART_FLAG.unlink(missing_ok=True)       # a request left over from before this launch is done
+    threading.Thread(target=_restart_watcher, daemon=True).start()
     runtime.start_gateway(_env)                # keep Hermes warm (no-op for JARVIS_BACKEND=cli)
     # launchd stops us with SIGTERM: turn it into a normal shutdown so our gateway stops too
     import signal

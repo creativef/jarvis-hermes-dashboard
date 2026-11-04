@@ -214,3 +214,76 @@ class StreamKeepsSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttachTests(unittest.TestCase):
+    """Composer uploads: raw bytes streamed to disk, up to MAX_ATTACH_BYTES."""
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.p = mock.patch.object(server, "ATTACH_ROOT", pathlib.Path(self.tmp.name))
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.tmp.cleanup()
+
+    def test_streams_the_file_to_disk(self):
+        import io
+        data = b"x" * (3 * 1024 * 1024 + 7)               # several chunks
+        info, err = server.attach_save("../../etc/big file.pdf", io.BytesIO(data), len(data))
+        self.assertIsNone(err)
+        self.assertEqual(pathlib.Path(info["path"]).read_bytes(), data)
+        self.assertEqual(info["name"], "big_file.pdf")
+        self.assertTrue(info["path"].startswith(str(pathlib.Path(self.tmp.name).resolve())))
+
+    def test_refuses_over_the_cap_before_reading(self):
+        import io
+        info, err = server.attach_save("a.bin", io.BytesIO(b""), server.MAX_ATTACH_BYTES + 1)
+        self.assertIsNone(info)
+        self.assertIn("200 MB", err)
+
+    def test_a_cut_off_upload_leaves_no_partial_file(self):
+        import io
+        info, err = server.attach_save("a.bin", io.BytesIO(b"only half"), 100)
+        self.assertIsNone(info)
+        self.assertIn("cut off", err)
+        self.assertEqual(list(pathlib.Path(self.tmp.name).rglob("*.bin")), [])
+
+
+class SafeRestartTests(unittest.TestCase):
+    """A requested restart waits for the turn and the speech, then keeps the tab's token."""
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flag = pathlib.Path(self.tmp.name) / "restart-requested"
+        self.p = mock.patch.object(server, "RESTART_FLAG", self.flag)
+        self.p.start()
+        self.saved_voice = server._VOICE_AT[0]
+        server._VOICE_AT[0] = 0.0
+
+    def tearDown(self):
+        server._VOICE_AT[0] = self.saved_voice
+        if server.RUN_LOCK.locked():
+            server.RUN_LOCK.release()
+        self.p.stop()
+        self.tmp.cleanup()
+
+    def test_waits_for_the_turn_and_the_voice_then_keeps_the_token(self):
+        import time
+        from unittest import mock
+        with mock.patch.object(server.os, "execve") as execve:
+            self.assertFalse(server._maybe_restart())        # nothing requested
+            self.flag.touch()
+            server.RUN_LOCK.acquire()                        # a reply is streaming
+            self.assertFalse(server._maybe_restart())
+            server.RUN_LOCK.release()
+            server._VOICE_AT[0] = time.monotonic()           # Atlas is still speaking
+            self.assertFalse(server._maybe_restart())
+            server._VOICE_AT[0] = 0.0
+            self.assertTrue(server._maybe_restart())
+        env = execve.call_args.args[2]
+        self.assertEqual((env["JARVIS_TOKEN"], env["JARVIS_BOOT_ID"]), (server.API_TOKEN, server.BOOT_ID))
+        self.assertFalse(self.flag.exists())                 # one request, one restart

@@ -68,6 +68,12 @@ you've drafted something, say it's drafted and wait.
   not hunt for a workaround. Say what you need in one short line and stop.
 - Before a task with several steps, name the plan in one line, then do it and
   report the result, not the process.
+- Never stop, kill or restart this dashboard (port 8730) or its voice_worker.py
+  yourself: it cuts you off mid-reply, blanks his screen and swaps your voice.
+  When dashboard code changes need a restart, run
+  `~/jarvis-hermes-dashboard/tools/restart-dashboard.sh` — it restarts after your
+  reply has been spoken. To test a change live, start a separate copy on another
+  port with its own JARVIS_STATE.
 
 ## Your departments
 

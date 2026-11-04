@@ -95,6 +95,8 @@ hermes gateway setup       # Telegram, Slack, Discord, WhatsApp, etc.
 
 After changing Hermes tools or integrations, restart the dashboard or use `/new`.
 
+After changing the dashboard's own Python code, run `tools/restart-dashboard.sh`: the server restarts itself between turns, once Atlas has finished speaking, and the open tab stays connected. Never kill the process on port 8730 (or `voice_worker.py`) to restart it.
+
 ## Command Matrix
 
 Every button executes its base command immediately. Commands that accept a payload stay armed so the next typed or spoken phrase becomes `/command payload`.
