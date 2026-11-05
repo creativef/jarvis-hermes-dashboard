@@ -9,6 +9,7 @@ from unittest import mock
 
 import brain
 import commands
+import phrases
 import runtime
 import voice
 
@@ -86,10 +87,12 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
         voice.clear_audio_cache()
 
     def test_ack_is_neutral(self):
-        # "explain" used to match "plan" and announce a brief; acks no longer guess intent
-        ev = next(runtime.run("explain photosynthesis", None, None))
+        # "explain" used to match "plan" and announce a brief; it gets a general holding line
+        with mock.patch.object(phrases, "SILENCE", 0):
+            ev = next(runtime.run("explain photosynthesis", None, None))
         self.assertEqual(ev["t"], "ack")
-        self.assertIn(ev["text"], runtime.ACKS)
+        self.assertIn(ev["text"], phrases.lines("ack"))
+        self.assertEqual([ms for ms, _ in ev["later"]], list(phrases.LONG_WAIT_MS))
 
     def test_sentence_buffer_streams_sentences_and_preserves_abbreviations(self):
         sb = runtime.SentenceBuffer()
@@ -139,7 +142,7 @@ class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(events), 5)
         self.assertEqual(events[0]["t"], "ack")
-        self.assertTrue(events[0]["text"])
+        self.assertIn("text", events[0])          # "" on the turns Atlas says nothing first
 
         sentences = [e for e in events if e.get("t") == "sentence"]
         self.assertEqual(

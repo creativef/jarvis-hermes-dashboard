@@ -1,0 +1,128 @@
+{
+  "_readme": "Atlas's stock spoken lines. Edit freely: the dashboard re-reads this file on the next turn. Lines are dealt like a shuffled deck, so none repeats until the rest of its group has played. Put a line in 'retired' to stop it being said without deleting it. Keep lines short and plain: no *, _, # or backticks.",
+
+  "ack": [
+    "Right then.",
+    "Leave it with me.",
+    "Bear with me.",
+    "Give me a tick.",
+    "Two ticks.",
+    "Hang on a tick.",
+    "Just a jiffy.",
+    "On the case.",
+    "Thinking cap's on.",
+    "Allow me.",
+    "Righto.",
+    "Hmm, let's see."
+  ],
+  "ack_question": [
+    "Let me have a look.",
+    "Ooh, let me see.",
+    "Let's find out.",
+    "Let me have a gander.",
+    "Hmm, let's have a look.",
+    "Now there's a thing. Let me see.",
+    "Let me consult the oracle.",
+    "Bear with me, I'll find out.",
+    "Let me have a proper look.",
+    "Good question. Annoyingly.",
+    "Checking."
+  ],
+  "ack_task": [
+    "On it.",
+    "Leave it with me.",
+    "Cracking on.",
+    "Consider it in hand.",
+    "Rolling up my sleeves.",
+    "Coming right up.",
+    "Doing it now.",
+    "Right you are.",
+    "As good as done. Nearly.",
+    "Sorting it now.",
+    "Your wish, my command. Within reason."
+  ],
+  "ack_lookup": [
+    "Digging in.",
+    "Having a rummage.",
+    "Off I go.",
+    "Let me have a dig.",
+    "Rummaging now.",
+    "Searching high and low.",
+    "Let me go and find out.",
+    "Off to the archives."
+  ],
+  "long_wait": [
+    "Still at it.",
+    "Bear with me, this one's chewy.",
+    "Nearly there, I promise.",
+    "Still going. It's thinking quite hard.",
+    "Haven't forgotten you.",
+    "Bit of a faff, this one. Nearly there.",
+    "Still rummaging.",
+    "Just a little longer."
+  ],
+  "longer_wait": [
+    "This one's taking its sweet time.",
+    "Still working. Might be time to put the kettle on.",
+    "Taking longer than I'd like. Hang in there.",
+    "I've not wandered off, promise.",
+    "Bigger job than it looked. Still on it.",
+    "Still going. Worth the wait, hopefully."
+  ],
+  "handoff": [
+    "On it. I've handed that to a helper and I'll tell you when it lands.",
+    "That's with a helper now. I'll shout when it lands.",
+    "Delegated. Carry on, I'll flag it when it's done.",
+    "Passed to a helper. You'll hear from me when it's sorted.",
+    "Right, a helper's on that. I'll let you know when it's in.",
+    "Handed off. Kettle on, I'll report back."
+  ],
+  "job_done": [
+    "Mission complete.",
+    "That's done.",
+    "Good news, that's landed.",
+    "Sorted.",
+    "Job done.",
+    "That one's in.",
+    "Right, that's finished."
+  ],
+  "job_failed": [
+    "That job failed, I'm afraid.",
+    "Bad news, that one didn't make it.",
+    "That job fell over.",
+    "No luck with that one, I'm afraid."
+  ],
+  "didnt_catch": [
+    "Sorry, yes or no?",
+    "Didn't catch that. Yes or no?",
+    "Once more, yes or no?",
+    "Sorry, was that a yes or a no?"
+  ],
+  "greet_late": [
+    "Burning the midnight oil, I see.",
+    "Standing by.",
+    "I'm here if you need me.",
+    "Shouldn't you be asleep? Anyway, I'm here."
+  ],
+  "greet_morning": [
+    "What are we working on today?",
+    "Ready when you are.",
+    "Right, what's the plan?",
+    "Fresh day, fresh chaos. Where do we start?",
+    "Kettle on? Good. What's first?"
+  ],
+  "greet_afternoon": [
+    "What are we working on?",
+    "Ready when you are.",
+    "Afternoon shift reporting. What's next?",
+    "Right, where were we?"
+  ],
+  "greet_evening": [
+    "What are we working on?",
+    "Ready when you are.",
+    "Evening shift, then. What's up?",
+    "Still at it? Admirable. What's next?"
+  ],
+
+  "retired": []
+}

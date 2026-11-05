@@ -30,7 +30,6 @@ import getpass
 import json
 import os
 import pathlib
-import random
 import re
 import shlex
 import shutil
@@ -40,6 +39,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+import phrases
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
 
@@ -216,8 +217,8 @@ _FILE_STEMS = {
     "app", "index", "styles", "themes", "config", "state", "www", "http", "https",
 }
 
-# Said only if the answer is slow to start (the UI waits ~1.2s before speaking it).
-ACKS = ("On it.", "One moment.", "Give me a second.")
+# Holding lines live in phrases.json (see phrases.py). The UI says the ack only if the
+# answer is slow to start (~1.2s), and the long-wait lines only if it still hasn't.
 
 
 _MD_LINK = re.compile(r"\[([^\]]+)\]\((?:[^)\s]+)\)")
@@ -1253,7 +1254,7 @@ def run(message, session_id=None, system=None):
 
 def _run(message, session_id=None, system=None):
     # Acknowledgement first; the UI only speaks it if no sentence arrives quickly.
-    yield dict(t="ack", text=random.choice(ACKS), ms=0)
+    yield dict(t="ack", text=phrases.ack(message), later=phrases.long_waits(), ms=0)
 
     if runtime_kind() != "hermes":
         yield from run_mock(message, session_id, system)

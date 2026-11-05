@@ -824,6 +824,27 @@ function sys(id, val, cls){
 // live clock in the system panel
 setInterval(() => sys('clock', now()), 1000);
 
+// Stock lines from phrases.json (job news, approval re-asks), never the same twice running.
+// The fallback is used until the list has loaded.
+const phrase = (() => {
+  let lines = {}, loadedAt = 0, recent = [];
+  const load = () => {
+    loadedAt = Date.now();
+    fetch('/api/phrases', {headers: apiHeaders()}).then(r => r.ok ? r.json() : null)
+      .then(j => { if (j && j.lines) lines = j.lines; }).catch(() => {});
+  };
+  setTimeout(load, 2000);
+  return (group, fallback) => {
+    if (Date.now() - loadedAt > 5 * 60 * 1000) load();       // picks up edits to the file
+    const all = lines[group] || [], fresh = all.filter(l => !recent.includes(l));
+    const pool = fresh.length ? fresh : all;
+    if (!pool.length) return fallback;
+    const line = pool[Math.floor(Math.random() * pool.length)];
+    recent = [...recent.slice(-5), line];
+    return line;
+  };
+})();
+
 // poll for finished /background missions and report them when they land
 setInterval(async () => {
   try {
@@ -833,7 +854,7 @@ setInterval(async () => {
     for (const d of (j.done || [])){
       const failed = d.status === 'failed';
       log(failed ? 'error' : 'complete', 'MISSION', `${d.mission} → ${failed ? 'failed: ' : ''}${(d.result||'').slice(0,200)}`);
-      say(`${failed ? 'That job failed.' : 'Mission complete.'} ${(d.result||'').slice(0,300)}`);
+      say(`${failed ? phrase('job_failed', 'That job failed.') : phrase('job_done', 'Mission complete.')} ${(d.result||'').slice(0,300)}`);
     }
   } catch(_){}
 }, 4000);
@@ -1182,7 +1203,7 @@ setInterval(async () => {
         if (ev.risk === 'high'){ await say('That one needs the keyboard. Press Enter to approve.'); return; }
         return answer('once', 'voice');
       }
-      if (attempt === 0) await say("Sorry, yes or no?");
+      if (attempt === 0) await say(phrase('didnt_catch', 'Sorry, yes or no?'));
     }
   }
 
@@ -2029,27 +2050,32 @@ setInterval(async () => {
   }
 
   // The acknowledgement is only spoken if the answer is slow: a quick reply shouldn't
-  // start with "On it."
+  // start with "On it." If it is slower still, the `later` lines ("Still at it.") follow.
+  // These are asides: they don't count as the answer having been streamed.
   const ACK_DELAY_MS = 1200;
-  let ackTimer = null;
-  const cancelAck = () => { clearTimeout(ackTimer); ackTimer = null; };
+  let ackTimers = [];
+  const cancelAck = () => { ackTimers.forEach(clearTimeout); ackTimers = []; };
+  function aside(msg, ep){
+    if (ep !== speechEpoch || !running || window.__approvalOpen) return;   // stopped, over, or asking
+    const clean = cleanForSpeech(msg);
+    if (!clean || muted || !speakThisRun) return;
+    log('voice', 'ACK', clean);
+    if (window.AtlasOrb) AtlasOrb.setCaption(clean, false, 'ACK');
+    speakDone = say(clean);
+  }
 
   const prevHandle = handle;
   handle = ev => {
     if (ev.t === 'ack'){
-      const msg = (ev.text || '').trim();
       cancelAck();
       const ep = speechEpoch;
-      if (msg) ackTimer = setTimeout(() => {
-        ackTimer = null;
-        if (ep !== speechEpoch || !running) return;      // stopped (Esc) or already over
-        log('voice', 'ACK', msg);
-        if (window.AtlasOrb) AtlasOrb.setCaption(msg, false, 'ACK');
-        enqueueSpeech(msg);
-      }, ACK_DELAY_MS);
+      const lines = [[ACK_DELAY_MS, (ev.text || '').trim()], ...(ev.later || [])];
+      for (const [ms, msg] of lines){
+        if (msg) ackTimers.push(setTimeout(() => aside(msg, ep), ms));
+      }
       return;
     }
-    if (ev.t === 'sentence' || ev.t === 'complete' || ev.t === 'error' || ev.t === 'cancelled') cancelAck();
+    if (['sentence', 'complete', 'error', 'cancelled', 'approval'].includes(ev.t)) cancelAck();
     if (ev.t === 'sentence'){
       const s = (ev.text || '').trim();
       if (s) enqueueSpeech(s);

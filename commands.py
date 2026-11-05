@@ -709,7 +709,9 @@ def _jobs_intent(q, message):
         from tools import handoff
         mission = " ".join(m.group(1).split())
         jid = handoff.launch(mission[:1].upper() + mission[1:])
-        return out("On it. I've handed that to a helper and I'll tell you when it lands.", "job_start",
+        import phrases
+        return out(phrases.pick("handoff", "On it. I've handed that to a helper and I'll tell you when it lands."),
+                   "job_start",
                    f"helper {jid} started: {mission[:50]}")
     if _JOB_STOP_ALL.match(q):
         running = running_jobs()

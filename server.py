@@ -61,6 +61,7 @@ import brain            # noqa: E402
 import brief            # noqa: E402
 import runtime          # noqa: E402
 import voice            # noqa: E402
+import phrases          # noqa: E402
 
 # Apply any UI-persisted settings (stored in state.json) over the env defaults.
 runtime.apply_settings(commands.get_settings())
@@ -191,21 +192,16 @@ def _merged_settings():
 
 def build_greeting(now=None):
     """Short spoken hello. Templated on purpose: no model call, so it is instant and free."""
-    import datetime, random
+    import datetime
     now = now or datetime.datetime.now()
     st = commands.get_settings()
     name = st.get("user_name", "").strip()
     h = now.hour
-    if h < 4:
-        opener, lines = "Still up", ["Standing by.", "I'm here if you need me."]
-    elif h < 12:
-        opener, lines = "Good morning", ["What are we working on today?", "Standing by.", "Ready when you are."]
-    elif h < 18:
-        opener, lines = "Good afternoon", ["What are we working on?", "Standing by.", "Ready when you are."]
-    else:
-        opener, lines = "Good evening", ["What are we working on?", "Standing by.", "Ready when you are."]
+    opener, part = ("Still up", "late") if h < 4 else ("Good morning", "morning") if h < 12 \
+        else ("Good afternoon", "afternoon") if h < 18 else ("Good evening", "evening")
     head = f"{opener}, {name}." if name else f"{opener}."
-    return {"text": f"{head} {random.choice(lines)}", "boot_id": BOOT_ID,
+    line = phrases.pick(f"greet_{part}", "Ready when you are.")
+    return {"text": f"{head} {line}", "boot_id": BOOT_ID,
             "enabled": bool(st.get("greeting", True))}
 
 
@@ -463,6 +459,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
             return self._json(build_greeting())
+        if p == "/api/phrases":
+            # stock lines the UI says itself (job news, approval re-asks); see phrases.json
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json({"lines": phrases.all_lines()})
         if p == "/api/status":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -715,6 +716,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": err}, 400)
             runtime.apply_settings(cleaned)
             voice.apply_settings(cleaned)
+            voice.prewarm(phrases.prewarm_lines())      # a new voice or speed: re-record stock lines
             return self._json(_merged_settings())
 
         if p == "/api/models/test":
@@ -860,6 +862,8 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _on_term)
     voice.start_async()
+    voice.prewarm(phrases.prewarm_lines())     # stock lines play instantly once recorded
+    phrases.on_change = lambda: voice.prewarm(phrases.prewarm_lines())   # lines added while running
     runtime.prewarm_probes(background=True)   # first turn must not pay for `hermes --version` / `tools list`
     srv = JarvisServer(("127.0.0.1", PORT), Handler)
     if os.environ.get("JARVIS_OPEN", "1") != "0":

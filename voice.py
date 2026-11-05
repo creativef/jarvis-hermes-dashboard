@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 VENV_PY = HERE / ".venv-voice" / "bin" / "python"
@@ -40,7 +41,7 @@ _start_lock = threading.Lock()
 # Short phrases (acknowledgements, greetings, status) are cached once synthesised.
 _AUDIO_CACHE = {}
 _AUDIO_CACHE_LOCK = threading.Lock()
-_AUDIO_CACHE_MAX = 64
+_AUDIO_CACHE_MAX = 256          # room for every stock line in phrases.json plus recent ones
 SHORT_CACHE_MAX_CHARS = 180
 
 def apply_settings(settings):
@@ -219,6 +220,35 @@ def speak(text):
                 _AUDIO_CACHE.pop(next(iter(_AUDIO_CACHE)), None)
             _AUDIO_CACHE[cache_key] = result
     return result
+
+
+_prewarm_gen = [0]
+
+
+def prewarm(lines, wait=WARM_TIMEOUT):
+    """Record short stock lines in the Kokoro voice in the background, once the worker is
+    ready, so they play instantly. A newer call supersedes an older one (voice changed)."""
+    lines = [s for s in dict.fromkeys(lines) if s and len(s) <= SHORT_CACHE_MAX_CHARS]
+    if not lines or not worker_installed():
+        return
+    _prewarm_gen[0] += 1
+    gen = _prewarm_gen[0]
+
+    def run():
+        deadline = time.monotonic() + wait
+        while not _state["ready"]:
+            if time.monotonic() > deadline or gen != _prewarm_gen[0]:
+                return
+            time.sleep(1)
+        for line in lines:
+            # stop if superseded, or if Kokoro went away (say audio isn't worth caching ahead)
+            if gen != _prewarm_gen[0] or not _state["ready"]:
+                return
+            try:
+                speak(line)
+            except Exception:                                # noqa: BLE001
+                return
+    threading.Thread(target=run, daemon=True).start()
 
 
 def transcribe(audio, mime="audio/webm"):
