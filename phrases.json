@@ -1,5 +1,5 @@
 {
-  "_readme": "Atlas's stock spoken lines. Edit freely: the dashboard re-reads this file on the next turn. Lines are dealt like a shuffled deck, so none repeats until the rest of its group has played. Put a line in 'retired' to stop it being said without deleting it. Keep lines short and plain: no *, _, # or backticks.",
+  "_readme": "Atlas's stock spoken lines. Edit freely: the dashboard re-reads this file on the next turn. Lines are dealt like a shuffled deck, so none repeats until the rest of its group has played. Put a line in 'retired' to stop it being said without deleting it. 'never_say' is what the model itself must not say: it is told so every turn, and a spoken sentence that opens with one has it trimmed off. Keep lines short and plain: no *, _, # or backticks.",
 
   "ack": [
     "Right then.",
@@ -122,6 +122,20 @@
     "Ready when you are.",
     "Evening shift, then. What's up?",
     "Still at it? Admirable. What's next?"
+  ],
+
+  "never_say": [
+    "Absolutely",
+    "Great question",
+    "I'd be happy to",
+    "Certainly",
+    "Let me help you with that",
+    "As an AI",
+    "Based on my analysis",
+    "One moment",
+    "One sec",
+    "No problem",
+    "Happy to help"
   ],
 
   "retired": []

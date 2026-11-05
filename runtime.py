@@ -264,7 +264,7 @@ class SentenceBuffer:
             return None
         if self.in_fence:
             return None
-        spoken = speakable(raw)
+        spoken = phrases.tidy(speakable(raw))
         if not spoken:
             return None
         self.index += 1

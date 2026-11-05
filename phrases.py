@@ -102,6 +102,45 @@ def long_waits():
     return [[ms, line] for ms, line in zip(LONG_WAIT_MS, (pick("long_wait"), pick("longer_wait"))) if line]
 
 
+_SIR_TAIL = re.compile(r"(?:,\s*|\s+)sir(?=\s*[.!?,;]|\s*$)", re.I)    # "Done, sir." / "Yes sir!"
+_SIR_HEAD = re.compile(r"^\s*sir[,!]\s*", re.I)                         # "Sir, the build passed."
+
+
+def tidy(sentence):
+    """A spoken sentence minus what Atlas must never say: being called "sir", and a
+    never_say phrase used as an opener ("Certainly, here it is." -> "Here it is.").
+    "" if nothing is left. Only openers are trimmed: "Absolutely not." stays as it is."""
+    s = _SIR_HEAD.sub("", _SIR_TAIL.sub("", sentence or ""))
+    for phrase in lines("never_say"):
+        m = re.match(r"\s*" + re.escape(phrase.rstrip(".!?")) + r"(?:\s*[,.!:;\u2014\u2013-]+\s*|\s*$)", s, re.I)
+        if m:
+            s = s[m.end():]
+            break
+    if s == sentence:
+        return s
+    s = s.strip()
+    return s[:1].upper() + s[1:]
+
+
+def freshness(history):
+    """Per-turn prompt block: the never-say list, and how recent replies opened so this
+    one opens differently. `history` is commands.get_history() (newest last)."""
+    parts = []
+    banned = lines("never_say")
+    if banned:
+        parts.append("Never say: " + ", ".join(f'"{b}"' for b in banned) + ". Never call him sir.")
+    openers = []
+    for turn in history[-4:]:
+        reply = re.sub(r"^\s*ATLAS:\s*", "", str(turn.get("assistant") or "")).split("\n---", 1)[0]
+        words = reply.split()[:5]
+        if words:
+            openers.append(" ".join(words).rstrip(".,!?;:\u2014- "))
+    if openers:
+        parts.append("Your last replies opened with: " + "; ".join(f'"{o}..."' for o in openers)
+                     + ". Open this one differently, and don't reuse those quips.")
+    return "## Keep it fresh\n" + "\n".join(parts) if parts else ""
+
+
 def prewarm_lines():
     """Lines worth recording in advance so they play instantly."""
     groups = ("ack", "ack_question", "ack_task", "ack_lookup", "long_wait", "longer_wait",

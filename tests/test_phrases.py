@@ -96,5 +96,41 @@ class AckChoiceTests(unittest.TestCase):
             self.assertEqual(phrases.ack("What time is it?"), "")
 
 
+class ModelSpeechTests(unittest.TestCase):
+    """Step 7: what the model itself says is checked, not just requested."""
+
+    def test_tidy_drops_sir_and_banned_openers_only(self):
+        cases = {
+            "Yes, sir.": "Yes.",
+            "Sir, the build passed.": "The build passed.",
+            "Done sir!": "Done!",
+            "Certainly, here it is.": "Here it is.",
+            "Great question!": "",
+            "One moment, sir.": "",
+            "Happy to help — the file is saved.": "The file is saved.",
+            "Absolutely not.": "Absolutely not.",               # not an opener: meaning kept
+            "Sir Isaac Newton was right.": "Sir Isaac Newton was right.",
+            "It is certainly fine.": "It is certainly fine.",
+        }
+        for said, heard in cases.items():
+            self.assertEqual(phrases.tidy(said), heard, said)
+
+    def test_spoken_sentences_are_tidied(self):
+        import runtime
+        sb = runtime.SentenceBuffer()
+        out = sb.feed("Certainly, sir. The report is ready, sir. ") + sb.flush()
+        self.assertEqual([t for _, t in out], ["The report is ready."])
+        self.assertEqual([i for i, _ in out], [0])               # an emptied sentence takes no index
+
+    def test_freshness_lists_bans_and_recent_openers(self):
+        history = [{"assistant": "ATLAS: Sorted. The invoice went out."},
+                   {"assistant": "Right then, three calls today.\n---\n- a\n- b"}]
+        block = phrases.freshness(history)
+        self.assertIn('"Great question"', block)
+        self.assertIn('"Sorted. The invoice went out..."', block)
+        self.assertIn('"Right then, three calls today..."', block)
+        self.assertNotIn("ATLAS:", block)
+
+
 if __name__ == "__main__":
     unittest.main()
