@@ -11,8 +11,8 @@
     const h = document.querySelector('.welcome h3'); if (h) h.textContent = text;   // visible even if never spoken
     if (!g.enabled) return;
 
-    // once per server launch, and at most once per calendar day
-    const mark = g.boot_id + ':' + new Date().toDateString();
+    // once per calendar day — a server restart must never re-trigger it
+    const mark = new Date().toDateString();
     if (localStorage.getItem(GKEY) === mark) return;
 
     const speakIt = () => {
@@ -23,9 +23,9 @@
       return say(text);                         // honours mute / call mode (speak() no-ops when muted)
     };
     armed = speakIt;
-    // Browsers block audio until the page has been touched, so wait for the first gesture.
+    // Browsers block audio until the page has been touched, and speaking on load lands on top of
+    // a live reply — so the greeting always waits for a real gesture.
     window.__greetNow = speakIt;
-    if (navigator.userActivation?.hasBeenActive) { speakIt(); return; }
     const first = e => {
       if (e.type === 'keydown' && (e.metaKey || e.ctrlKey || e.key === 'Shift' || e.key === 'Meta' || e.key === 'Control' || e.key === 'Alt')) return;
       document.removeEventListener('keydown', first, true);
