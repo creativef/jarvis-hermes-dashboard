@@ -126,13 +126,22 @@ def _maybe_restart():
         return False
     if not RUN_LOCK.acquire(blocking=False):           # a turn is still streaming
         return False
+    handover = voice.handover_env()                    # keep the loaded voice: no second voice
+    if handover is None:                               # a line is being synthesised right now
+        RUN_LOCK.release()
+        return False
     try:
         RESTART_FLAG.unlink(missing_ok=True)
     except OSError:
         pass
     print("  restarting (requested)…", flush=True)
-    env = dict(os.environ, JARVIS_TOKEN=API_TOKEN, JARVIS_BOOT_ID=BOOT_ID, JARVIS_OPEN="0")
-    os.execve(sys.executable, [sys.executable, str(ROOT / "server.py")], env)
+    env = dict(os.environ, JARVIS_TOKEN=API_TOKEN, JARVIS_BOOT_ID=BOOT_ID, JARVIS_OPEN="0", **handover)
+    try:
+        os.execve(sys.executable, [sys.executable, str(ROOT / "server.py")], env)
+    except OSError:
+        voice.handover_cancelled()
+        RUN_LOCK.release()
+        raise
     return True                                        # only reached when execve is mocked
 
 

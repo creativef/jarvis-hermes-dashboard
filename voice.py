@@ -94,6 +94,90 @@ def _spawn():
     _state["error"] = msg.get("error", "")
 
 
+# ── keeping the worker across a dashboard self-restart ─────────────────────────
+# server.py restarts itself with execve (same pid). A fresh worker needs seconds to load its
+# models, and every line in that gap came out in the macOS `say` voice: it sounded like a
+# second assistant. Instead the running worker and its pipes are handed to the new server.
+_HANDOVER_ENV = "JARVIS_VOICE_WORKER"
+
+
+class _Adopted:
+    """The worker handed over by a self-restart: still our child (execve keeps the pid),
+    same pipes, models already loaded. Just enough of Popen for this module."""
+
+    def __init__(self, pid, fd_in, fd_out):
+        self.pid, self.returncode = pid, None
+        self.stdin = os.fdopen(fd_in, "w", buffering=1)
+        self.stdout = os.fdopen(fd_out, "r")
+
+    def poll(self):
+        if self.returncode is None:
+            try:
+                done, status = os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError:
+                done, status = self.pid, -1
+            if done:
+                self.returncode = status
+        return self.returncode
+
+    def kill(self):
+        try:
+            os.kill(self.pid, 9)
+        except OSError:
+            pass
+
+    def wait(self, timeout=None):
+        deadline = time.monotonic() + (timeout or 0)
+        while self.poll() is None:
+            if timeout is not None and time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired("voice_worker", timeout)
+            time.sleep(0.05)
+        return self.returncode
+
+
+def handover_env(timeout=10):
+    """Called just before the server execs itself. Returns env entries that let the new
+    process adopt the worker, or {} if there is no healthy worker to hand over. Returns
+    None if a request is still in flight (try again shortly): a reply arriving after the
+    exec would be read as the answer to the next question. Holds the request lock on
+    success, which the exec releases."""
+    proc = _proc
+    if proc is None or proc.poll() is not None or not _state["ready"]:
+        return {}
+    if not _lock.acquire(timeout=timeout):
+        return None
+    fds = (proc.stdin.fileno(), proc.stdout.fileno())
+    for fd in fds:
+        os.set_inheritable(fd, True)
+    return {_HANDOVER_ENV: f"{proc.pid},{fds[0]},{fds[1]}"}
+
+
+def handover_cancelled():
+    """The exec didn't happen after handover_env(): let requests through again."""
+    try:
+        _lock.release()
+    except RuntimeError:
+        pass
+
+
+def _adopt():
+    global _proc
+    raw = os.environ.pop(_HANDOVER_ENV, "")
+    try:
+        pid, fd_in, fd_out = (int(x) for x in raw.split(","))
+    except ValueError:
+        return
+    try:
+        proc = _Adopted(pid, fd_in, fd_out)
+    except OSError:
+        return
+    for fd in (fd_in, fd_out):
+        os.set_inheritable(fd, False)            # later children (hermes, say) don't get them
+    if proc.poll() is None:
+        _proc = proc
+        _state.update(ready=True, error="")
+
+
 def start_async():
     """Start (or restart) the worker in the background. Never blocks the caller."""
     if not worker_installed():
@@ -181,8 +265,24 @@ def _speak_say(text):
         pathlib.Path(path).unlink(missing_ok=True)
 
 
-def speak(text):
+_FOREGROUND = [0]                # lines someone is waiting to hear: prewarm steps aside for them
+_FG_LOCK = threading.Lock()
+
+
+def speak(text, background=False):
     """Returns (audio_bytes, mime_type). Raises if no engine is available."""
+    if background:
+        return _speak(text)
+    with _FG_LOCK:
+        _FOREGROUND[0] += 1
+    try:
+        return _speak(text)
+    finally:
+        with _FG_LOCK:
+            _FOREGROUND[0] -= 1
+
+
+def _speak(text):
     text = (text or "").strip()
     if not text:
         raise ValueError("empty text")
@@ -244,8 +344,10 @@ def prewarm(lines, wait=WARM_TIMEOUT):
             # stop if superseded, or if Kokoro went away (say audio isn't worth caching ahead)
             if gen != _prewarm_gen[0] or not _state["ready"]:
                 return
+            while _FOREGROUND[0]:                    # a real line is waiting: let it go first
+                time.sleep(0.1)
             try:
-                speak(line)
+                speak(line, background=True)
             except Exception:                                # noqa: BLE001
                 return
     threading.Thread(target=run, daemon=True).start()
@@ -264,3 +366,6 @@ def transcribe(audio, mime="audio/webm"):
         return _call({"op": "stt", "path": path})["text"]
     finally:
         pathlib.Path(path).unlink(missing_ok=True)
+
+
+_adopt()                 # a self-restarted server keeps the worker it already had

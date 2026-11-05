@@ -287,3 +287,15 @@ class SafeRestartTests(unittest.TestCase):
         env = execve.call_args.args[2]
         self.assertEqual((env["JARVIS_TOKEN"], env["JARVIS_BOOT_ID"]), (server.API_TOKEN, server.BOOT_ID))
         self.assertFalse(self.flag.exists())                 # one request, one restart
+
+    def test_hands_the_voice_worker_over_and_waits_for_a_line_in_flight(self):
+        from unittest import mock
+        self.flag.touch()
+        with mock.patch.object(server.os, "execve") as execve:
+            with mock.patch.object(server.voice, "handover_env", return_value=None):
+                self.assertFalse(server._maybe_restart())    # a line is being synthesised
+            self.assertTrue(self.flag.exists())
+            self.assertFalse(server.RUN_LOCK.locked())
+            with mock.patch.object(server.voice, "handover_env", return_value={"JARVIS_VOICE_WORKER": "1,2,3"}):
+                self.assertTrue(server._maybe_restart())
+        self.assertEqual(execve.call_args.args[2]["JARVIS_VOICE_WORKER"], "1,2,3")

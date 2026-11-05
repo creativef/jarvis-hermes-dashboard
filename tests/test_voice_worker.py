@@ -50,5 +50,66 @@ class VoiceWorkerTests(unittest.TestCase):
                 voice._proc.wait(timeout=2)            # it was killed, not left running
 
 
+REPO = pathlib.Path(__file__).resolve().parent.parent
+FAKE_WORKER = """
+import json, os, sys
+print(json.dumps({"ready": True}), flush=True)
+for line in sys.stdin:
+    print(json.dumps({"ok": True, "pid": os.getpid()}), flush=True)
+"""
+SETUP = """
+import json, os, pathlib, sys
+sys.path.insert(0, {repo!r})
+import voice
+voice.HERE, voice.VENV_PY, voice.WORKER = pathlib.Path({td!r}), pathlib.Path(sys.executable), pathlib.Path({worker!r})
+"""
+BEFORE_EXEC = SETUP + """
+voice._spawn()
+pid = voice._call({{"op": "tts"}})["pid"]
+os.execve(sys.executable, [sys.executable, {after!r}, str(pid)], dict(os.environ, **voice.handover_env()))
+"""
+AFTER_EXEC = SETUP + """
+pid = voice._call({{"op": "tts"}})["pid"]
+print(json.dumps({{"before": int(sys.argv[1]), "after": pid, "ready": voice.ready(),
+                  "env_cleared": "JARVIS_VOICE_WORKER" not in os.environ}}), flush=True)
+voice._proc.kill()
+"""
+
+
+class SelfRestartHandoverTests(unittest.TestCase):
+    """A dashboard self-restart (execve) keeps the loaded worker, so there is no warm-up
+    window in which lines come out in the macOS fallback voice."""
+
+    def test_the_same_worker_answers_after_the_exec(self):
+        import json
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            worker = pathlib.Path(td) / "worker.py"
+            worker.write_text(FAKE_WORKER)
+            fmt = dict(repo=str(REPO), td=td, worker=str(worker))
+            after = pathlib.Path(td) / "after.py"
+            after.write_text(AFTER_EXEC.format(**fmt))
+            before = pathlib.Path(td) / "before.py"
+            before.write_text(BEFORE_EXEC.format(after=str(after), **fmt))
+            out = subprocess.run([sys.executable, str(before)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertEqual(res["before"], res["after"])          # no new worker, no reload
+        self.assertTrue(res["ready"])
+        self.assertTrue(res["env_cleared"])
+
+    def test_no_handover_mid_request_or_without_a_worker(self):
+        with mock.patch.object(voice, "_proc", None):
+            self.assertEqual(voice.handover_env(), {})         # nothing to hand over: plain restart
+        fake = mock.Mock()
+        fake.poll.return_value = None
+        with mock.patch.object(voice, "_proc", fake), mock.patch.dict(voice._state, {"ready": True}):
+            voice._lock.acquire()                              # a line is being synthesised
+            try:
+                self.assertIsNone(voice.handover_env(timeout=0.1))
+            finally:
+                voice._lock.release()
+
+
 if __name__ == "__main__":
     unittest.main()
