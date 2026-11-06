@@ -91,6 +91,9 @@ function logTiming(){
 // ── the run ──
 let running = false, answer = '', firstDelta = false, speakThisRun = true;
 let inTransmit = 0, pendingTurn = null;   // a turn said while paused waits for the current answer to finish
+// Is Atlas mid-something? (The greeting asks before speaking.)
+window.atlasBusy = () => running || inTransmit > 0 || !!window.__approvalOpen
+  || document.body.classList.contains('speaking');
 let speakDone = Promise.resolve(), activeController = null;
 let history = [], currentUser = '';
 
@@ -983,7 +986,7 @@ setInterval(async () => {
     // mid-sentence: Space means "I'm done" — send now instead of waiting for silence
     if (convo && spoke && !suppress && recorder && recorder.state === 'recording'){ endTurn('sent with Space'); return; }
     pending = true;
-    if (window.__greetNow) { try { await window.__greetNow(); } catch(_){} }
+    if (!convo && window.__greetNow) { try { await window.__greetNow(); } catch(_){} }   // only when opening the mic
     try {
       if (convo){ stopConvo(); chime(false); }
       else { lastActive = Date.now(); await micToggle(); if (convo) chime(true); }

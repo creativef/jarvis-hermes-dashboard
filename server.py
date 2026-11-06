@@ -215,6 +215,30 @@ def build_greeting(now=None):
             "enabled": bool(st.get("greeting", True))}
 
 
+def claim_greeting(busy=False, now=None):
+    """The day's one chance to greet out loud, decided here so every tab, address and restart
+    agrees. True only for the first ask of the day, and only if nothing has happened yet: no
+    conversation today, no reply streaming, no helper job running. Any ask uses the day up,
+    so a greeting never turns up later, in the middle of the day's work."""
+    import datetime
+    now = now or datetime.datetime.now()
+    if not commands.get_settings().get("greeting", True):
+        return False
+    today = now.date().isoformat()
+    midnight = datetime.datetime.combine(now.date(), datetime.time()).timestamp()
+    busy = busy or RUN_LOCK.locked() or bool(commands.running_jobs())
+
+    def claim(d):
+        if d.get("greeted_on") == today:
+            return False
+        d["greeted_on"] = today
+        talked = any(float(t.get("ts") or 0) >= midnight for t in d.get("history", [])[-50:])
+        return not (busy or talked)
+    return commands.update_state(claim)
+
+
+
+
 # ── chat-composer attachments ────────────────────────────────
 # Purely local: files land in <project>/attachments/<YYYY-MM-DD>/ and the UI passes
 # their absolute paths to the agent in the message text. Nothing here writes to
@@ -468,7 +492,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/greeting":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
-            return self._json(build_greeting())
+            out = build_greeting()
+            q = parse_qs(urlparse(self.path).query)
+            if (q.get("claim") or [""])[0] == "1":     # the first gesture of the day asks to speak it
+                out["speak"] = claim_greeting(busy=(q.get("busy") or [""])[0] == "1")
+            return self._json(out)
         if p == "/api/phrases":
             # stock lines the UI says itself (job news, approval re-asks); see phrases.json
             if not self._token_ok():

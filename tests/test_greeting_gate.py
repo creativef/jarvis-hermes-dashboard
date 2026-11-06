@@ -1,6 +1,6 @@
 """Runs the shipped greeting from ui/greeting.js under Node with fakes: it must never
-speak on load, only ever on a deliberate gesture, and at most once per calendar day —
-a server restart on the same day must stay silent. Skips if Node is not installed.
+speak on load, only on a deliberate gesture, only when the server says so, and never
+while Atlas is busy. Skips if Node is not installed.
 """
 import pathlib
 import shutil
@@ -19,7 +19,7 @@ class GreetingGateTests(unittest.TestCase):
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertNotIn("FAIL", proc.stdout)
-        self.assertGreaterEqual(proc.stdout.count("PASS"), 14, proc.stdout)
+        self.assertGreaterEqual(proc.stdout.count("PASS"), 16, proc.stdout)
 
 
 if __name__ == "__main__":

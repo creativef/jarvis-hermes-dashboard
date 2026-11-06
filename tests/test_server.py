@@ -299,3 +299,57 @@ class SafeRestartTests(unittest.TestCase):
             with mock.patch.object(server.voice, "handover_env", return_value={"JARVIS_VOICE_WORKER": "1,2,3"}):
                 self.assertTrue(server._maybe_restart())
         self.assertEqual(execve.call_args.args[2]["JARVIS_VOICE_WORKER"], "1,2,3")
+
+
+class GreetingClaimTests(unittest.TestCase):
+    """The spoken greeting is the opening line of the day, once, for every tab, and never
+    turns up in the middle of work."""
+
+    def setUp(self):
+        import datetime
+        import json
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = pathlib.Path(self.tmp.name) / "state.json"
+        self.state.write_text(json.dumps({"settings": {"greeting": True}, "history": []}))
+        self.now = datetime.datetime(2026, 11, 6, 9, 0)
+        for p in (mock.patch.object(server.commands, "STATE_FILE", self.state),
+                  mock.patch.object(server.commands, "running_jobs", return_value=[])):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def claim(self, **kw):
+        return server.claim_greeting(now=kw.pop("now", self.now), **kw)
+
+    def test_once_a_day_for_whoever_asks_first(self):
+        import datetime
+        self.assertTrue(self.claim())
+        self.assertFalse(self.claim())                       # a second tab, a restart, 127.0.0.1
+        self.assertTrue(self.claim(now=self.now + datetime.timedelta(days=1)))
+
+    def test_not_once_the_day_has_started(self):
+        import json
+        d = json.loads(self.state.read_text())
+        d["history"] = [{"user": "hi", "assistant": "Morning.", "ts": self.now.timestamp() - 600}]
+        self.state.write_text(json.dumps(d))
+        self.assertFalse(self.claim())
+
+    def test_not_while_working_and_the_day_is_used_up(self):
+        from unittest import mock
+        self.assertFalse(self.claim(busy=True))              # the tab saw a reply or speech live
+        self.assertFalse(self.claim())                       # ...and it doesn't turn up later
+        with mock.patch.object(server.commands, "running_jobs", return_value=[{"id": "j"}]):
+            import datetime
+            self.assertFalse(self.claim(now=self.now + datetime.timedelta(days=1)))   # a helper is working
+        server.RUN_LOCK.acquire()                            # a reply is streaming
+        try:
+            import datetime
+            self.assertFalse(self.claim(now=self.now + datetime.timedelta(days=2)))
+        finally:
+            server.RUN_LOCK.release()
+
+    def test_switched_off(self):
+        import json
+        self.state.write_text(json.dumps({"settings": {"greeting": False}, "history": []}))
+        self.assertFalse(self.claim())
