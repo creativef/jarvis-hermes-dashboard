@@ -215,6 +215,12 @@ def build_greeting(now=None):
             "enabled": bool(st.get("greeting", True))}
 
 
+def _opens_tab():
+    """Only the real dashboard opens a browser tab by itself. A test copy on another port
+    that did brought its own greeting and voice worker into the browser: a second assistant."""
+    return os.environ.get("JARVIS_OPEN", "1" if PORT == 8730 else "0") != "0"
+
+
 def claim_greeting(busy=False, now=None):
     """The day's one chance to greet out loud, decided here so every tab, address and restart
     agrees. True only for the first ask of the day, and only if nothing has happened yet: no
@@ -235,8 +241,6 @@ def claim_greeting(busy=False, now=None):
         talked = any(float(t.get("ts") or 0) >= midnight for t in d.get("history", [])[-50:])
         return not (busy or talked)
     return commands.update_state(claim)
-
-
 
 
 # ── chat-composer attachments ────────────────────────────────
@@ -904,7 +908,7 @@ def main():
     phrases.on_change = lambda: voice.prewarm(phrases.prewarm_lines())   # lines added while running
     runtime.prewarm_probes(background=True)   # first turn must not pay for `hermes --version` / `tools list`
     srv = JarvisServer(("127.0.0.1", PORT), Handler)
-    if os.environ.get("JARVIS_OPEN", "1") != "0":
+    if _opens_tab():
         webbrowser.open(f"http://localhost:{PORT}")
     try:
         srv.serve_forever()

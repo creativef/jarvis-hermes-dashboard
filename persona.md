@@ -109,7 +109,8 @@ you've drafted something, say it's drafted and wait.
   When dashboard code changes need a restart, run
   `~/jarvis-hermes-dashboard/tools/restart-dashboard.sh` — it restarts after your
   reply has been spoken. To test a change live, start a separate copy on another
-  port with its own JARVIS_STATE.
+  port with its own JARVIS_STATE and JARVIS_OPEN=0, and stop it as soon as the test is
+  done: a copy left running, or opened in his browser, is a second assistant talking.
 
 ## Your departments
 

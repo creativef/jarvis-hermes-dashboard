@@ -353,3 +353,19 @@ class GreetingClaimTests(unittest.TestCase):
         import json
         self.state.write_text(json.dumps({"settings": {"greeting": False}, "history": []}))
         self.assertFalse(self.claim())
+
+
+class BrowserTabTests(unittest.TestCase):
+    def test_only_the_real_dashboard_opens_a_tab_by_itself(self):
+        from unittest import mock
+        with _del_env("JARVIS_OPEN"):
+            with mock.patch.object(server, "PORT", 8730):
+                self.assertTrue(server._opens_tab())
+            with mock.patch.object(server, "PORT", 8731):
+                self.assertFalse(server._opens_tab())        # a test copy stays out of the browser
+                os.environ["JARVIS_OPEN"] = "1"
+                self.assertTrue(server._opens_tab())         # unless asked for
+
+
+if __name__ == "__main__":
+    unittest.main()
