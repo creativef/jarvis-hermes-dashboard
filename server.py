@@ -170,8 +170,8 @@ def persona():
     who = (f"## Who you serve\nYou serve {name}. "
            "Address them by name, naturally.")
     extra = commands.context_block()      # profile / goal / personality / queue
-    fresh = phrases.freshness(commands.get_history())   # never-say list + recent openers
-    return "\n\n".join(x for x in (base, who, extra, fresh) if x)
+    never = phrases.never_say_block()   # stable unless phrases.json changes: keeps the prompt cache
+    return "\n\n".join(x for x in (base, who, extra, never) if x)
 # One continuing Hermes conversation until the user hits /new. Persisted across
 # restarts so the assistant remembers the prior conversation.
 SESSION = {"id": commands.get_session()}

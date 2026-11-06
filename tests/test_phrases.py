@@ -122,15 +122,13 @@ class ModelSpeechTests(unittest.TestCase):
         self.assertEqual([t for _, t in out], ["The report is ready."])
         self.assertEqual([i for i, _ in out], [0])               # an emptied sentence takes no index
 
-    def test_freshness_lists_bans_and_recent_openers(self):
-        history = [{"assistant": "ATLAS: Sorted. The invoice went out."},
-                   {"assistant": "Right then, three calls today.\n---\n- a\n- b"}]
-        block = phrases.freshness(history)
+    def test_never_say_block_is_stable_from_turn_to_turn(self):
+        # It sits in the persona near the top of the prompt: if it changed every turn the
+        # provider would re-read the whole conversation uncached (it did: 99% -> 11%).
+        block = phrases.never_say_block()
         self.assertIn('"Great question"', block)
-        self.assertIn('"Sorted. The invoice went out..."', block)
-        self.assertIn('"Right then, three calls today..."', block)
-        self.assertNotIn("ATLAS:", block)
-
+        self.assertIn("sir", block)
+        self.assertEqual(block, phrases.never_say_block())
 
 if __name__ == "__main__":
     unittest.main()

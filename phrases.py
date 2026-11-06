@@ -122,23 +122,15 @@ def tidy(sentence):
     return s[:1].upper() + s[1:]
 
 
-def freshness(history):
-    """Per-turn prompt block: the never-say list, and how recent replies opened so this
-    one opens differently. `history` is commands.get_history() (newest last)."""
-    parts = []
+def never_say_block():
+    """Prompt block with the never-say list. It must not change from turn to turn: the
+    persona sits early in the prompt, and any change there makes the provider re-read the
+    whole conversation uncached (slower first word, higher cost)."""
     banned = lines("never_say")
-    if banned:
-        parts.append("Never say: " + ", ".join(f'"{b}"' for b in banned) + ". Never call him sir.")
-    openers = []
-    for turn in history[-4:]:
-        reply = re.sub(r"^\s*ATLAS:\s*", "", str(turn.get("assistant") or "")).split("\n---", 1)[0]
-        words = reply.split()[:5]
-        if words:
-            openers.append(" ".join(words).rstrip(".,!?;:\u2014- "))
-    if openers:
-        parts.append("Your last replies opened with: " + "; ".join(f'"{o}..."' for o in openers)
-                     + ". Open this one differently, and don't reuse those quips.")
-    return "## Keep it fresh\n" + "\n".join(parts) if parts else ""
+    if not banned:
+        return ""
+    return ("## Never say\n" + ", ".join(f'"{b}"' for b in banned)
+            + ". Never call him sir. Never open two replies in a row the same way.")
 
 
 def prewarm_lines():
