@@ -415,6 +415,68 @@ def api_backend_ready():
 
 # ── keep Hermes warm: our own gateway child when none is running ────────────────
 _GATEWAY = {"proc": None, "state": "off", "note": ""}
+# server.py restarts itself with execve (same pid), so a gateway we started is still our
+# child afterwards, but the new process has no Popen for it. Without this handover it found
+# the gateway answering, called it "external" and never stopped it on exit: Hermes' cron
+# jobs and messaging bots carried on with the dashboard gone. Popped so no child inherits it.
+_GATEWAY_HANDOVER_ENV = "JARVIS_GATEWAY_PID"
+_HANDOVER_GATEWAY = os.environ.pop(_GATEWAY_HANDOVER_ENV, "")
+
+
+class _AdoptedGateway:
+    """The gateway handed over by a self-restart: just enough of Popen for stop_gateway."""
+
+    def __init__(self, pid):
+        self.pid, self.returncode = pid, None
+
+    def poll(self):
+        if self.returncode is None:
+            try:
+                done, status = os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError:                  # not our child (any more): gone
+                done, status = self.pid, -1
+            if done:
+                self.returncode = status
+        return self.returncode
+
+    def _signal(self, sig):
+        try:
+            os.kill(self.pid, sig)
+        except OSError:
+            pass
+
+    def terminate(self):
+        self._signal(15)
+
+    def kill(self):
+        self._signal(9)
+
+    def wait(self, timeout=None):
+        deadline = time.monotonic() + (timeout or 0)
+        while self.poll() is None:
+            if timeout is not None and time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired("hermes gateway", timeout)
+            time.sleep(0.05)
+        return self.returncode
+
+
+def gateway_handover_env():
+    """Env entry that lets a self-restarted server keep owning the gateway we started."""
+    proc = _GATEWAY["proc"]
+    if proc is None or proc.poll() is not None:
+        return {}
+    return {_GATEWAY_HANDOVER_ENV: str(proc.pid)}
+
+
+def _adopt_gateway():
+    """The still-running gateway a previous server process handed over, or None."""
+    global _HANDOVER_GATEWAY
+    raw, _HANDOVER_GATEWAY = _HANDOVER_GATEWAY, ""
+    try:
+        proc = _AdoptedGateway(int(raw))
+    except ValueError:
+        return None
+    return proc if proc.pid > 0 and proc.poll() is None else None
 _GATEWAY_LOG = pathlib.Path(__file__).resolve().parent / "logs" / "gateway.log"
 
 
@@ -483,21 +545,23 @@ def start_gateway(env_file):
 
     def work():
         import api_backend
-        if api_backend.healthy(API_URL):
-            _GATEWAY.update(state="external", note=f"an API server is already running at {API_URL}")
-            return
-        env = _child_env(API_SERVER_ENABLED="true", API_SERVER_KEY=API_KEY,
-                         API_SERVER_HOST="127.0.0.1",
-                         API_SERVER_PORT=str(url.port or 8642))
-        try:
-            _GATEWAY_LOG.parent.mkdir(parents=True, exist_ok=True)
-            log = open(_GATEWAY_LOG, "ab")
-            proc = subprocess.Popen(_hermes_base() + ["gateway", "run"], cwd=WORKDIR, env=env,
-                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-            log.close()                            # the child keeps its own handle
-        except OSError as e:
-            _GATEWAY.update(state="failed", note=f"could not start the Hermes gateway: {e}")
-            return
+        proc = _adopt_gateway()                    # ours from before a self-restart
+        if proc is None:
+            if api_backend.healthy(API_URL):
+                _GATEWAY.update(state="external", note=f"an API server is already running at {API_URL}")
+                return
+            env = _child_env(API_SERVER_ENABLED="true", API_SERVER_KEY=API_KEY,
+                             API_SERVER_HOST="127.0.0.1",
+                             API_SERVER_PORT=str(url.port or 8642))
+            try:
+                _GATEWAY_LOG.parent.mkdir(parents=True, exist_ok=True)
+                log = open(_GATEWAY_LOG, "ab")
+                proc = subprocess.Popen(_hermes_base() + ["gateway", "run"], cwd=WORKDIR, env=env,
+                                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+                log.close()                        # the child keeps its own handle
+            except OSError as e:
+                _GATEWAY.update(state="failed", note=f"could not start the Hermes gateway: {e}")
+                return
         _GATEWAY.update(proc=proc, state="starting", note="Hermes gateway starting")
         deadline = time.monotonic() + 90           # MCP servers and tools load first
         while time.monotonic() < deadline:

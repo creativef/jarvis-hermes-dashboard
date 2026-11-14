@@ -189,11 +189,6 @@ class ServerInboxAndActivityEndpointTests(unittest.TestCase):
         self.assertEqual(len(listing["items"]), 1)
         self.assertEqual(listing["items"][0]["id"], item["id"])
 
-        with mock.patch.object(commands, "HANDOFF_DIR", pathlib.Path(self.tmp.name)):
-            code, act = self._req("/api/activity")
-        self.assertEqual(code, 200)
-        self.assertEqual(len(act["inbox"]), 1)
-        self.assertTrue(any(p["id"] == "pod-idea-queue" for p in act["pod"]))
 
     def test_themes_css_keeps_orb_words_hidden_and_bound_ids_exist(self):
         themes_css = (server.UI / "themes.css").read_text(encoding="utf-8")
@@ -204,7 +199,7 @@ class ServerInboxAndActivityEndpointTests(unittest.TestCase):
             "response", "rtag", "stword", "strun", "tip", "toolsList",
             "sy-gw", "sy-brain", "sy-voice", "sy-profile", "sy-runtime", "sy-clock",
             "top-gw", "top-profile", "top-voice", "showCommands", "missionBtn", "live",
-            "navInbox", "navJobs", "inboxOverlay", "jobsOverlay", "brSearch", "brOutline",
+            "navInbox", "navAgents", "inboxOverlay", "brSearch", "brOutline",
             "apTier", "apReason", "apRing",
         ):
             self.assertIn(f'id="{req_id}"', html, f"missing bound id {req_id}")

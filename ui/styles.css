@@ -81,6 +81,8 @@ body.listening .stword{color:var(--cyan)}
 .cur{display:inline-block;width:8px;height:16px;background:var(--cyan);vertical-align:-3px;margin-left:1px;box-shadow:0 0 10px var(--cyan);animation:blink 1s steps(1) infinite}
 .turn{margin-bottom:22px;border-left:2px solid var(--faint);padding-left:14px}
 .turn.current{border-color:var(--cyan2)}
+/* past turns off screen are not laid out: with 200 saved turns every streamed token cost ~10ms of layout */
+#response>.turn:not(.current){content-visibility:auto;contain-intrinsic-size:auto 160px}
 .tuser,.tjarvis{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;margin:6px 0 3px}
 .tuser{color:var(--amber)}.tjarvis{color:var(--cyan)}
 .ttext{color:var(--ink);font-size:14.5px;line-height:1.65;white-space:pre-wrap;word-break:break-word}
@@ -504,12 +506,12 @@ body.callmode .reactor{opacity:.78;filter:saturate(.5)}
 .bo-btn:hover,.bo-btn.match{border-color:var(--cyan);color:var(--cyan)}
 
 /* Inbox overlay & full-window drop target */
-.inbox-overlay,.jobs-overlay{position:fixed;inset:0;z-index:58;background:rgba(var(--scrim-rgb),.72);display:grid;place-items:center;backdrop-filter:blur(4px);padding:18px}
-.inbox-overlay[hidden],.jobs-overlay[hidden],.window-drop-overlay[hidden]{display:none}
-.inbox-panel,.jobs-panel{width:min(1180px,100%);height:min(820px,100%);display:flex;flex-direction:column;background:var(--card-solid);box-shadow:0 0 60px rgba(var(--shadow-rgb),.5);transform-origin:50% 12%;animation:ovIn .2s ease-out}
+.inbox-overlay{position:fixed;inset:0;z-index:58;background:rgba(var(--scrim-rgb),.72);display:grid;place-items:center;backdrop-filter:blur(4px);padding:18px}
+.inbox-overlay[hidden],.window-drop-overlay[hidden]{display:none}
+.inbox-panel{width:min(1180px,100%);height:min(820px,100%);display:flex;flex-direction:column;background:var(--card-solid);box-shadow:0 0 60px rgba(var(--shadow-rgb),.5);transform-origin:50% 12%;animation:ovIn .2s ease-out}
 .inb-path{font-family:var(--mono);font-size:11px;color:var(--dim);margin-left:12px}
 .inb-head-tools{margin-left:auto;display:flex;align-items:center;gap:14px}
-.inbox-body,.jobs-body{flex:1;min-height:0;overflow:auto;padding:22px;display:flex;flex-direction:column;gap:18px}
+.inbox-body{flex:1;min-height:0;overflow:auto;padding:22px;display:flex;flex-direction:column;gap:18px}
 .inb-composer{display:grid;grid-template-columns:minmax(240px,1fr) minmax(320px,1.3fr);gap:16px;align-items:stretch}
 .inb-dropzone{cursor:pointer;border:1.5px dashed var(--edge-2);border-radius:var(--r2,14px);background:rgba(var(--accent-rgb),.04);padding:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:8px;transition:.15s}
 .inb-dropzone:hover,.inb-dropzone.dragover{border-color:var(--cyan);background:rgba(var(--accent-rgb),.1)}
@@ -543,7 +545,7 @@ body.callmode .reactor{opacity:.78;filter:saturate(.5)}
 .wdo-ico{font-size:42px;color:var(--cyan);margin-bottom:10px}
 .wdo-title{font-size:22px;font-weight:700;color:var(--ink-strong)}
 .wdo-sub{margin-top:6px;font-family:var(--mono);font-size:12px;color:var(--mut)}
-#navInbox[data-count]:not([data-count=""])::after,#navJobs[data-count]:not([data-count=""])::after{content:attr(data-count);margin-left:7px;padding:1px 7px;border-radius:999px;font-family:var(--mono);font-size:10px;color:var(--bg);background:var(--cyan)}
+#navInbox[data-count]:not([data-count=""])::after{content:attr(data-count);margin-left:7px;padding:1px 7px;border-radius:999px;font-family:var(--mono);font-size:10px;color:var(--bg);background:var(--cyan)}
 @media (max-width:860px){.inb-composer{grid-template-columns:1fr}.inb-list{grid-template-columns:1fr}}
 
 /* ═══════════ markdown reading surface (Brain notes · Departments · Inbox) ═══════════

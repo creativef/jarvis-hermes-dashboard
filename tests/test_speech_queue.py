@@ -18,6 +18,13 @@ class SpeechQueueTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertNotIn("FAIL", proc.stdout)
 
+    def test_job_news_waits_for_you_to_finish_your_sentence(self):
+        proc = subprocess.run([NODE, str(HERE / "job_news_harness.js"), str(HERE.parent / "ui" / "app.js")],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("FAIL", proc.stdout)
+        self.assertEqual(proc.stdout.count("PASS"), 4, proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,8 +22,7 @@
     <button class="navbtn" id="navInbox" aria-expanded="false" title="Drop files, CSVs &amp; quick notes (G then I)">Inbox</button>
     <button class="navbtn" id="navDepts" aria-expanded="false">Departments</button>
     <button class="navbtn" id="navBrain" aria-expanded="false">Brain</button>
-    <button class="navbtn" id="navJobs" aria-expanded="false" title="Jobs, sub-agents &amp; POD/inbox activity (G then J)">Jobs &amp; Activity</button>
-    <button class="navbtn" id="navAgents" aria-expanded="false" title="Live sub-agent activity">Agents</button>
+    <button class="navbtn" id="navAgents" aria-expanded="false" title="Helper jobs and sub-agents, live (G then J or A)">Agents</button>
     <button class="navbtn" id="navLogs" aria-expanded="false">Action Logs</button>
     <button class="navbtn" id="settingsBtn">Settings</button>
   </nav>
@@ -387,26 +386,6 @@
   </div>
 </div>
 
-<!-- Jobs & Activity overlay -->
-<div id="jobsOverlay" class="jobs-overlay" hidden role="dialog" aria-modal="true" aria-label="Jobs and Activity">
-  <div class="jobs-panel glass">
-    <div class="rhead">
-      <span>Jobs &amp; Activity</span>
-      <div class="view-tabs" id="jaTabs" role="tablist" aria-label="Activity sections">
-        <button type="button" role="tab" data-jatab="all" aria-selected="true">All Activity</button>
-        <button type="button" role="tab" data-jatab="jobs" aria-selected="false">Handoff &amp; Jobs</button>
-        <button type="button" role="tab" data-jatab="pod" aria-selected="false">POD &amp; Inbox</button>
-      </div>
-      <span class="ag-sum" id="jaSum">—</span>
-      <button id="jaRefresh" class="ctl aux">Refresh</button>
-      <button id="jaClose" class="ctl aux" aria-label="Close jobs and activity">✕</button>
-    </div>
-    <div class="jobs-body" id="jaBody">
-      <div class="ag-empty">Loading activity…</div>
-    </div>
-  </div>
-</div>
-
 <script src="atlas-data.js"></script>
 <script src="markdown.js"></script>
 <script src="app.js"></script>
@@ -419,7 +398,6 @@
 <script src="morning-brief.js"></script>
 <script src="ambient.js"></script>
 <script src="inbox.js"></script>
-<script src="jobs.js"></script>
 <script src="attachments.js"></script>
 <script src="brain.js"></script>
 <script src="departments.js"></script>

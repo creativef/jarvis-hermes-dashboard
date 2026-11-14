@@ -26,12 +26,34 @@ _LOCK = threading.Lock()
 _DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "session": None, "history": [], "settings": {}}
 
 
-def _load_unlocked():
+def _load_unlocked(for_update=False):
+    """The saved state, or defaults when there is none yet.
+
+    Defaults are only safe to SAVE when the file really is absent. A file that exists but
+    could not be read (permissions, too many open files) or parsed (a hand edit with a typo)
+    used to load as defaults too, and the next save wrote those over it: history, settings
+    and the Hermes thread gone without a word. Now an unreadable file stops the update, and
+    an unparseable one is set aside as state.json.bad before anything is written."""
     try:
-        d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        return {**copy.deepcopy(_DEFAULT), **d}
-    except (OSError, json.JSONDecodeError):
+        text = STATE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return copy.deepcopy(_DEFAULT)      # never hand out the shared default lists
+    except OSError:
+        if for_update:
+            raise
+        return copy.deepcopy(_DEFAULT)
+    try:
+        d = json.loads(text)
+        if not isinstance(d, dict):
+            raise ValueError("state is not a JSON object")
+    except ValueError:
+        try:
+            os.replace(STATE_FILE, STATE_FILE.with_name(STATE_FILE.name + ".bad"))
+        except OSError:
+            if for_update:
+                raise
+        return copy.deepcopy(_DEFAULT)
+    return {**copy.deepcopy(_DEFAULT), **d}
 
 
 def load():
@@ -60,15 +82,10 @@ def _save_unlocked(d):
     write_atomic(STATE_FILE, json.dumps(d, indent=2) + "\n")
 
 
-def save(d):
-    with _LOCK:
-        _save_unlocked(d)
-
-
 def update_state(mutator):
     """Apply one read-modify-write transaction without losing concurrent updates."""
     with _LOCK:
-        d = _load_unlocked()
+        d = _load_unlocked(for_update=True)
         result = mutator(d)
         _save_unlocked(d)
         return result
@@ -822,8 +839,10 @@ def _commands_reply():
 /new — reset the Hermes thread
 /goal <text|status|clear> — set/read/clear standing objective
 /profile <fact> — add a local profile note injected into Hermes prompts
+/profile forget <words> — remove the profile notes containing those words
 /personality <tone> — set Atlas tone overlay
 /kanban [task] — read/add mission queue item
+/mission done <words> — take the missions containing those words off the queue
 /mission [task] — alias for /kanban
 /background <mission> — run a Hermes mission asynchronously
 /tools — show Hermes tool status from `hermes tools list`
@@ -836,6 +855,22 @@ def _commands_reply():
 /help or /commands — show this list
 
 You can also type normal Hermes prompts. Unknown slash commands are forwarded to Hermes."""
+
+
+def _drop_matching(key, needle, text_of):
+    """Remove the entries of state[key] whose text contains `needle`; returns their texts.
+    Missions and profile notes ride in every prompt, and there was no way to take one out."""
+    needle = " ".join(needle.lower().split())
+    gone = []
+
+    def drop(state):
+        keep = []
+        for item in state.get(key, []):
+            text = str(text_of(item))
+            (gone if needle and needle in " ".join(text.lower().split()) else keep).append(item)
+        state[key] = keep
+    update_state(drop)
+    return [str(text_of(x)) for x in gone]
 
 
 def handle(message):
@@ -888,6 +923,12 @@ def handle(message):
         if not arg:
             facts = d["profile"]
             return dict(message=None, reply=("\n".join(f"- {x}" for x in facts[-20:]) if facts else "I don't know anything about you yet."), note="profile read")
+        forget = re.match(r"(?:forget|remove)\s+(.+)$", arg, re.I | re.S)
+        if forget:
+            gone = _drop_matching("profile", forget.group(1), lambda x: x)
+            return dict(message=None, note=f"profile -= {len(gone)}",
+                        reply=("Forgotten: " + "; ".join(gone) + "." if gone
+                               else f"No profile note matches \"{forget.group(1).strip()}\"."))
         update_state(lambda state: state["profile"].append(arg))
         return dict(message=f'The user saved this dashboard profile note: "{arg}". Acknowledge in one short line.', note=f"profile += {arg[:50]}")
 
@@ -907,6 +948,12 @@ def handle(message):
         return dict(message=f'Tone overlay changed to: "{arg}". Reply in one short line using that tone.', note=f"persona: {arg[:50]}")
 
     if cmd in ("kanban", "mission", "missions"):
+        done = re.match(r"(?:done|finished|complete|remove)\s+(.+)$", arg, re.I | re.S)
+        if done:
+            gone = _drop_matching("tasks", done.group(1), lambda t: t.get("text", ""))
+            return dict(message=None, note=f"mission -= {len(gone)}",
+                        reply=("Off the queue: " + "; ".join(gone) + "." if gone
+                               else f"No mission matches \"{done.group(1).strip()}\"."))
         if arg:
             update_state(lambda state: state["tasks"].append(
                 {"text": arg, "done": False, "at": time.time()}))

@@ -249,6 +249,28 @@ class KeepHermesWarmTests(unittest.TestCase):
             self.assertIsNotNone(proc.poll())                         # our gateway was stopped
             self.assertEqual(runtime.gateway_status()[0], "off")
 
+    def test_a_gateway_handed_over_by_a_self_restart_is_still_ours_to_stop(self):
+        import subprocess
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            with mock.patch.object(runtime, "RUNTIME", "hermes"), \
+                 mock.patch.object(runtime, "BACKEND", "auto"), \
+                 mock.patch.object(runtime, "START_GATEWAY", True), \
+                 mock.patch.object(runtime, "API_KEY", "k"), \
+                 mock.patch.object(runtime, "_HANDOVER_GATEWAY", str(child.pid)), \
+                 mock.patch("api_backend.healthy", return_value=True):
+                runtime.start_gateway(pathlib.Path("unused.env"))
+                self.assertEqual(self._wait("ours"), "ours")       # not "external"
+                self.assertEqual(runtime.gateway_handover_env(), {"JARVIS_GATEWAY_PID": str(child.pid)})
+                runtime.stop_gateway()
+            self.assertEqual(runtime.gateway_status()[0], "off")
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child.pid, 0)                              # stopped and reaped
+        finally:
+            if child.poll() is None:
+                child.kill()
+            runtime._GATEWAY.update(proc=None, state="off", note="")
+
     def test_uses_a_gateway_that_is_already_running(self):
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer

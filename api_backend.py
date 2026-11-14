@@ -28,12 +28,17 @@ import urllib.request
 ALLOWED_CHOICES = {"once", "deny"}
 
 # Descriptions/commands that deserve a deliberate keypress rather than a spoken "yes".
+# Whole words only (word stems take any ending): "skills" is not "kill", "terraform " is
+# not "rm ". The list sets the badge and the wording; it can never be complete, which is
+# why a spoken yes is allowed for the read-only tier alone (see risk_from_tier).
 _HIGH_RISK = re.compile(
-    r"(delet|remove|rm\s|rmdir|wipe|erase|format|overwrit|truncate|force|--hard|reset|"
-    r"sudo|chmod|chown|kill|pkill|shutdown|reboot|drop\s|"
-    r"send|email|mail|message|post|publish|push|deploy|"
-    r"purchase|buy|pay|transfer|charge|"
-    r"curl[^|]*\|\s*(ba)?sh|pipe to shell|credential|secret|password|token|ssh|\.env)",
+    r"(\b(?:delet\w*|remov\w*|rm|rmdir|wip(?:e|es|ed|ing)|eras\w*|format\w*|overwrit\w*|truncat\w*|"
+    r"forc\w*|reset\w*|destroy\w*|terminat\w*|purg\w*|prun\w*|shred|mkfs\w*|dd|crontab|"
+    r"sudo|chmod|chown|kill\w*|pkill|shutdown|reboot|drop\w*|"
+    r"send\w*|e?mail\w*|messag\w*|post\w*|publish\w*|push\w*|deploy\w*|upload\w*|scp|"
+    r"purchas\w*|buy\w*|pay\w*|transfer\w*|charg\w*|refund\w*|"
+    r"credential\w*|secret\w*|password\w*|token\w*|ssh)\b|"
+    r"--hard|git\s+clean|curl[^|]*\|\s*(?:ba)?sh|pipe to shell|\.env\b)",
     re.I,
 )
 
@@ -42,9 +47,11 @@ _ACTIVE = {"run_id": None}
 
 
 def risk_from_tier(tier):
-    """The spoken-yes risk for an approval: 'high' needs a hands-on confirm (key/click),
-    anything else is fine by voice. Derived from the tier so the two can never drift."""
-    return "high" if tier == "high" else "normal"
+    """The spoken-yes risk for an approval: 'high' needs a hands-on confirm (key/click).
+    Only the read-only tier is fine by voice: the high-risk word list can never name every
+    destructive command (`git clean -fdx`, `dd of=/dev/disk4`), so "not on the list" must
+    not mean "a spoken yes will do". Derived from the tier so the two can never drift."""
+    return "normal" if tier == "low" else "high"
 
 
 def fallback_note(provider, model, runtime_meta):
@@ -98,9 +105,9 @@ def classify_tier(description="", command=""):
     m = _HIGH_RISK.search(blob)
     if m:
         tok = m.group(0).strip()
-        if re.search(r"send|email|mail|message|post|publish|push|deploy", tok, re.I):
+        if re.search(r"send|mail|messag|post|publish|push|deploy|upload|scp", tok, re.I):
             why = "Sends, publishes, or deploys externally — requires keyboard or tap confirmation."
-        elif re.search(r"purchase|buy|pay|transfer|charge", tok, re.I):
+        elif re.search(r"purchas|buy|pay|transfer|charg|refund", tok, re.I):
             why = "Spends or moves money — requires deliberate keyboard or tap confirmation."
         elif re.search(r"credential|secret|password|token|ssh|\.env", tok, re.I):
             why = "Touches credentials or secrets — requires deliberate keyboard or tap confirmation."
@@ -109,7 +116,7 @@ def classify_tier(description="", command=""):
         return {"tier": "high", "reason": why}
     if _LOW_RISK.search(command or "") and not _MED_RISK.search(blob):
         return {"tier": "low", "reason": "Read-only inspection — does not modify files, send messages, or spend money."}
-    return {"tier": "medium", "reason": "Modifies local files, packages, or workspace state — safe to approve by voice or tap."}
+    return {"tier": "medium", "reason": "Modifies local files, packages, or workspace state — confirm with keyboard or tap."}
 
 
 def _headers(key):

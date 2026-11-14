@@ -1,5 +1,6 @@
 .env
 state.json
+state.json.bad
 .no-mcp.json
 __pycache__/
 *.pyc

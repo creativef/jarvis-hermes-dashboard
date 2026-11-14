@@ -18,8 +18,7 @@
     ['Inbox', 'Drop files, CSVs & quick notes', () => AtlasNav ? AtlasNav.go('inbox') : $('#navInbox')?.click(), '⌘', 'I'],
     ['Departments', 'Browse departments & teams', () => AtlasNav ? AtlasNav.go('departments') : $('#navDepts')?.click(), '⌘', 'D'],
     ['Brain', 'Second-brain graph', () => AtlasNav ? AtlasNav.go('brain') : $('#navBrain')?.click(), '⌘', 'B'],
-    ['Jobs & Activity', 'Running & completed handoff missions + POD/inbox', () => AtlasNav ? AtlasNav.go('jobs') : $('#navJobs')?.click(), '⌘', 'J'],
-    ['Agents', 'Live sub-agents', () => AtlasNav ? AtlasNav.go('agents') : $('#navAgents')?.click(), '⌘', 'A'],
+    ['Agents', 'Helper jobs & sub-agents, live', () => AtlasNav ? AtlasNav.go('agents') : $('#navAgents')?.click(), '⌘', 'A'],
     ['Action Logs', 'Telemetry stream', () => $('#navLogs')?.click(), '⌘', ''],
     ['Command Matrix', 'Browse all commands', () => $('#navCmds')?.click(), '⌘', ''],
     ['Settings', 'Theme, voice, profile', () => $('#settingsBtn')?.click(), '⌘', 'S'],
@@ -229,7 +228,7 @@
         d: () => AtlasNav ? AtlasNav.go('departments') : $('#navDepts')?.click(),
         b: () => AtlasNav ? AtlasNav.go('brain') : $('#navBrain')?.click(),
         a: () => AtlasNav ? AtlasNav.go('agents') : $('#navAgents')?.click(),
-        j: () => AtlasNav ? AtlasNav.go('jobs') : $('#navJobs')?.click(),
+        j: () => AtlasNav ? AtlasNav.go('agents') : $('#navAgents')?.click(),   // "jobs" live in Agents
         i: () => AtlasNav ? AtlasNav.go('inbox') : $('#navInbox')?.click(),
         s: () => $('#settingsBtn')?.click(),
         w: () => window.AtlasAmbient && AtlasAmbient.toggle(),

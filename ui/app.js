@@ -244,18 +244,37 @@ function answerHtml(text){
     + (detail ? `<div class="tdetail md-read md-compact">${body}</div>` : '');
 }
 
+// Past turns are drawn once and kept. Rebuilding all of them (up to 200, markdown included)
+// for every streamed token made the page crawl as the history filled up; now a token only
+// redraws the turn in progress.
+const turnHtml = t => `<div class="turn"><div class="tuser">You</div><div class="ttext">${esc(t.user)}</div>`
+  + `<div class="tjarvis">ATLAS</div><div class="ttext">${answerHtml(t.assistant)}</div></div>`;
+let drawn = {list: null, n: 0};
 function renderConversation(finaldone){
   const el = $('#response');
-  let html = '';
-  for (const t of history){
-    html += `<div class="turn"><div class="tuser">You</div><div class="ttext">${esc(t.user)}</div>`
-          + `<div class="tjarvis">ATLAS</div><div class="ttext">${answerHtml(t.assistant)}</div></div>`;
+  const live = currentUser || answer;
+  if (!history.length && !live){
+    el.innerHTML = '<span class="rplaceholder">Standing by. Transmit an instruction.</span>';
+    drawn = {list: null, n: 0};
+    return;
   }
-  if (currentUser || answer){
-    html += `<div class="turn current"><div class="tuser">You</div><div class="ttext">${esc(currentUser)}</div>`
-          + `<div class="tjarvis">ATLAS</div><div class="ttext">${answerHtml(answer)}${finaldone ? '' : '<span class="cur"></span>'}</div></div>`;
+  // Start over when the list was replaced or cleared, or when something else (an error,
+  // the welcome card) wrote into the panel; otherwise only add the turns that are new.
+  const kept = el.querySelectorAll(':scope > .turn:not(.current)').length;
+  if (drawn.list !== history || drawn.n > history.length || kept !== drawn.n
+      || el.querySelector(':scope > :not(.turn)')){
+    el.innerHTML = history.map(turnHtml).join('');
+  } else if (history.length > drawn.n){
+    el.querySelector(':scope > .turn.current')?.remove();
+    el.insertAdjacentHTML('beforeend', history.slice(drawn.n).map(turnHtml).join(''));
   }
-  el.innerHTML = html || '<span class="rplaceholder">Standing by. Transmit an instruction.</span>';
+  drawn = {list: history, n: history.length};
+  let cur = el.querySelector(':scope > .turn.current');
+  if (live){
+    if (!cur){ cur = document.createElement('div'); cur.className = 'turn current'; el.appendChild(cur); }
+    cur.innerHTML = `<div class="tuser">You</div><div class="ttext">${esc(currentUser)}</div>`
+      + `<div class="tjarvis">ATLAS</div><div class="ttext">${answerHtml(answer)}${finaldone ? '' : '<span class="cur"></span>'}</div>`;
+  } else if (cur) cur.remove();
   el.scrollTop = el.scrollHeight;
 }
 
@@ -848,6 +867,16 @@ const phrase = (() => {
   };
 })();
 
+// ── job news ──
+// Speaking closes the mic and throws away the recording in progress, so news that landed
+// while you were mid-sentence used to cost you the sentence. It now waits until you stop.
+const jobNews = [];
+const userTalking = () => !!(convo && spoke && !suppress && recorder && recorder.state === 'recording');
+function tellJobNews(){
+  if (userTalking()) return;
+  while (jobNews.length) say(jobNews.shift());
+}
+
 // poll for finished /background missions and report them when they land
 setInterval(async () => {
   try {
@@ -857,9 +886,10 @@ setInterval(async () => {
     for (const d of (j.done || [])){
       const failed = d.status === 'failed';
       log(failed ? 'error' : 'complete', 'MISSION', `${d.mission} → ${failed ? 'failed: ' : ''}${(d.result||'').slice(0,200)}`);
-      say(`${failed ? phrase('job_failed', 'That job failed.') : phrase('job_done', 'Mission complete.')} ${(d.result||'').slice(0,300)}`);
+      jobNews.push(`${failed ? phrase('job_failed', 'That job failed.') : phrase('job_done', 'Mission complete.')} ${(d.result||'').slice(0,300)}`);
     }
   } catch(_){}
+  tellJobNews();                                      // also retries news held back earlier
 }, 4000);
 
 // ══════════ boot ══════════
@@ -1063,18 +1093,27 @@ setInterval(async () => {
 })();
 
 
+// ── spoken approval answers ──
+// The whole answer has to BE a yes: "yes", "okay, go ahead", "sure, do it". A yes word
+// inside some other sentence ("I'm not sure, hold on", "okay what does that do") used to
+// approve the command. Any "no" still wins, and anything else is asked again.
+const APPROVAL_YES = /^(?:(?:oh|um|uh|well|right|so)[\s,]+)*(?:yes|yeah|yep|yup|sure|okay|ok|approve|approved|go ahead|do it|proceed|confirm|confirmed|affirmative)(?:[\s,.!]+(?:yes|yeah|yep|please|do it|go ahead|go on|approve it|approve|that'?s fine|thanks|thank you|atlas))*[\s.!]*$/i;
+const APPROVAL_NO  = /\b(no|nope|nah|don'?t|do not|deny|denied|stop|cancel|negative|abort|never)\b/i;
+function parseApproval(heard){
+  const t = String(heard || '').trim();
+  return APPROVAL_NO.test(t) ? 'deny' : (APPROVAL_YES.test(t) ? 'once' : null);
+}
+
 // ══════════ approvals: ask out loud, answer by voice or key ══════════
 (() => {
   const card = $('#approval');
   const TTL = 45;                       // seconds of silence before it counts as "no"
-  const YES = /\b(yes|yeah|yep|yup|sure|okay|ok|approve|approved|go ahead|do it|proceed|confirm|affirmative)\b/i;
-  const NO  = /\b(no|nope|nah|don'?t|do not|deny|denied|stop|cancel|negative|abort|never)\b/i;
   let cur = null, shownAt = 0, tick = null, listening = null;
   const queue = [];
   const callOn = () => $('#callBtn').getAttribute('aria-pressed') === 'true';
   const voiceOK = () => !callOn() && !muted;
 
-  const parse = t => NO.test(t) ? 'deny' : (YES.test(t) ? 'once' : null);   // any "no" wins
+  const parse = parseApproval;
   // read by the brief's "Needs your decision" card
   const changed = () => window.dispatchEvent(new Event('atlas-approval'));
   window.AtlasApprovals = {
@@ -1093,7 +1132,7 @@ setInterval(async () => {
     if (!reason){
       if (tier === 'high') reason = 'Destructive, external, or financial operation — spoken "yes" is disabled; confirm with keyboard or tap.';
       else if (tier === 'low') reason = 'Read-only inspection — does not modify files, send messages, or spend money.';
-      else reason = 'Modifies local files or workspace state — safe to approve by voice or tap.';
+      else reason = 'Changes files or workspace state — confirm with keyboard or tap.';
     }
     return {tier, reason};
   }
@@ -1121,7 +1160,7 @@ setInterval(async () => {
     if (reasonEl) reasonEl.textContent = reason;
     $('#apCmd').textContent = ev.command || '(no command text)';
     $('#apHint').textContent = high
-      ? 'High-risk tier: spoken "yes" is disabled. Press Enter or click Approve once, or say "no" / press Esc to deny.'
+      ? 'Spoken "yes" is disabled for this one. Press Enter or click Approve once, or say "no" / press Esc to deny.'
       : (voiceOK() ? 'Say "yes" or "no", or use the buttons below.' : 'Use the buttons or the keyboard.');
     card.hidden = false;
     changed();

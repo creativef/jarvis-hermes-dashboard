@@ -135,7 +135,8 @@ def _maybe_restart():
     except OSError:
         pass
     print("  restarting (requested)…", flush=True)
-    env = dict(os.environ, JARVIS_TOKEN=API_TOKEN, JARVIS_BOOT_ID=BOOT_ID, JARVIS_OPEN="0", **handover)
+    env = dict(os.environ, JARVIS_TOKEN=API_TOKEN, JARVIS_BOOT_ID=BOOT_ID, JARVIS_OPEN="0", **handover,
+               **runtime.gateway_handover_env())   # ...and the gateway we started stays ours to stop
     try:
         os.execve(sys.executable, [sys.executable, str(ROOT / "server.py")], env)
     except OSError:
@@ -573,27 +574,6 @@ class Handler(BaseHTTPRequestHandler):
             if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
                 return self._json({"error": "day must be YYYY-MM-DD"}, 400)
             return self._json(attachments_list(day or None))
-        if p == "/api/activity":
-            if self.client_address[0] not in ("127.0.0.1", "::1"):
-                return self._json({"error": "local only"}, 403)
-            if not self._token_ok():
-                return self._json({"error": "unauthorized"}, 401)
-            snap = commands.agents_snapshot()
-            inb = brain.inbox_list()
-            pod_items = []
-            for n in ("pod-idea-queue", "concept-engine-review", "weekly-review-template"):
-                found = brain.note(n)
-                if found:
-                    pod_items.append({"id": found["id"], "path": found["path"],
-                                      "preview": (found["text"] or "")[:360]})
-            return self._json(dict(
-                now=snap["now"],
-                running=snap["running"],
-                agents=snap["agents"],
-                inbox=inb.get("items", [])[:30],
-                inbox_root=inb.get("root", ""),
-                pod=pod_items,
-            ))
         if p == "/api/brief":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)

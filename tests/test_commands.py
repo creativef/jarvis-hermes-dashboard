@@ -18,6 +18,46 @@ class StateTests(unittest.TestCase):
                 d = commands.load()
             self.assertEqual(d["profile"], ["likes tea"])
 
+    def test_a_broken_state_file_is_set_aside_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = pathlib.Path(td) / "state.json"
+            with mock.patch.object(commands, "STATE_FILE", state):
+                commands.record_turn("hello", "hi there")
+                good = state.read_text()
+                state.write_text(good[:-20])                 # a hand edit gone wrong
+                commands.set_session("20260808_031038_0ecb14")
+                self.assertEqual((pathlib.Path(td) / "state.json.bad").read_text(), good[:-20])
+                self.assertEqual(commands.get_session(), "20260808_031038_0ecb14")
+
+    def test_an_unreadable_state_file_stops_the_save(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = pathlib.Path(td) / "state.json"
+            with mock.patch.object(commands, "STATE_FILE", state):
+                commands.record_turn("hello", "hi there")
+                good = state.read_text()
+                with mock.patch.object(pathlib.Path, "read_text", side_effect=PermissionError("nope")):
+                    self.assertEqual(commands.get_history(), [])         # reads fall back
+                    with self.assertRaises(OSError):
+                        commands.set_session("20260808_031038_0ecb14")   # writes do not
+                self.assertEqual(state.read_text(), good)
+
+    def test_missions_and_profile_notes_can_be_taken_out_again(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = pathlib.Path(td) / "state.json"
+            with mock.patch.object(commands, "STATE_FILE", state):
+                commands.handle("/mission Ship the hoodie listing")
+                commands.handle("/mission Call the supplier")
+                commands.handle("/profile prefers metric units")
+                self.assertIn("hoodie", commands.context_block())
+                out = commands.handle("/mission done hoodie")
+                self.assertIsNone(out["message"])                       # answered locally
+                self.assertIn("Ship the hoodie listing", out["reply"])
+                self.assertEqual([t["text"] for t in commands.load()["tasks"]], ["Call the supplier"])
+                self.assertIn("No mission matches", commands.handle("/mission done hoodie")["reply"])
+                commands.handle("/profile forget metric")
+                self.assertEqual(commands.load()["profile"], [])
+                self.assertNotIn("hoodie", commands.context_block())
+
     def test_session_persistence(self):
         with tempfile.TemporaryDirectory() as td:
             state = pathlib.Path(td) / "state.json"

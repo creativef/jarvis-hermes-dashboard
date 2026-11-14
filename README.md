@@ -109,6 +109,8 @@ Every button executes its base command immediately. Commands that accept a paylo
 | `/browser <task>` | Ask Hermes to use its browser/Chrome tools |
 | `/background <mission>` | Run a background Hermes mission |
 | `/mission [task]` | Read or add to the local mission queue |
+| `/mission done <words>` | Take matching missions off the queue |
+| `/profile <fact>` / `/profile forget <words>` | Add or remove a profile note sent with every prompt |
 | `/personality <tone>` | Read or change the JARVIS tone overlay |
 | `/commands` | Show all dashboard commands |
 | `/toolsets` | Summarize enabled Hermes toolsets |
@@ -125,7 +127,7 @@ Normal text and voice requests go directly to Hermes Agent.
 - **Hermes kept warm (default, `JARVIS_BACKEND=auto`):** on launch the dashboard starts `hermes gateway run` with its API server on (port 8642, a private key it saves in `.env`), unless one is already running, and stops it when you stop the dashboard. Turns no longer pay for starting a Hermes process, and the persona travels as Hermes `instructions` so your saved conversation holds only what you said. Until the gateway answers (tools and MCP servers load first), turns use the one-shot CLI. Compare the **TIMING** lines before and after. `JARVIS_BACKEND=cli` turns this off.
   - If you already run a Hermes gateway as a service, Hermes refuses a second one; enable the API server in that one instead (`API_SERVER_ENABLED=true` and `API_SERVER_KEY=<your JARVIS_API_KEY>` in `~/.hermes/.env`, then `hermes gateway restart`). The dashboard's `/status` says which backend is live; details go to `logs/gateway.log`.
 - **Approvals (with the API backend):** Hermes' one-shot CLI mode never *asks* about a risky command; it blocks it (or, in Bypass, allows everything). With the API backend Hermes pauses on each flagged command, the dashboard shows the exact command, and Jarvis asks out loud. Answer by voice ("yes" / "no"), or **Enter** / **Esc**.
-  - Risky categories (deletes, sending, spending, credentials, force/reset, sudo…) are *keyboard-only*: a spoken "yes" is ignored, though "no" always works.
+  - A spoken "yes" only counts for read-only commands (listing, reading, searching), and only when the whole answer is a yes ("yes", "okay, go ahead"): a yes word inside another sentence is asked again. Anything that changes, deletes, sends, spends or touches credentials is *keyboard-only* (**Enter** or click), though a spoken "no" always works.
   - The dashboard can only ever send **once** or **deny**. It never sends "always"/"session", so a spoken yes can't become a standing rule. No answer in 45s means **deny**.
   - Manual alternative: `./start-gateway.sh` runs the same gateway in its own terminal (creates the key in `.env`, binds `127.0.0.1` only); the dashboard then finds it and leaves it alone on exit.
   - Heads-up: `hermes gateway run` also runs Hermes' cron scheduler and any messaging platforms you've configured. Don't start a second one if you already run a gateway; point `JARVIS_API_URL` at it.

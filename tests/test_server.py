@@ -300,6 +300,21 @@ class SafeRestartTests(unittest.TestCase):
                 self.assertTrue(server._maybe_restart())
         self.assertEqual(execve.call_args.args[2]["JARVIS_VOICE_WORKER"], "1,2,3")
 
+    def test_hands_over_the_gateway_it_started(self):
+        # Without this the restarted server found "an external gateway" and never stopped it.
+        from unittest import mock
+
+        class Live:
+            pid = 4242
+
+            def poll(self):
+                return None
+        self.flag.touch()
+        with mock.patch.object(server.os, "execve") as execve, \
+             mock.patch.dict(server.runtime._GATEWAY, {"proc": Live()}):
+            self.assertTrue(server._maybe_restart())
+        self.assertEqual(execve.call_args.args[2]["JARVIS_GATEWAY_PID"], "4242")
+
 
 class GreetingClaimTests(unittest.TestCase):
     """The spoken greeting is the opening line of the day, once, for every tab, and never
