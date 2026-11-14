@@ -117,12 +117,18 @@ def _setup_error_log():
 RESTART_FLAG = LOG_DIR / "restart-requested"
 RESTART_QUIET_S = 5                    # no speech/listen request for this long first
 _VOICE_AT = [0.0]                      # monotonic time of the last /api/speak or /api/listen
+# POSTs being handled right now. The exec kills every thread, so an attachment upload or a
+# note save in flight used to be cut off half-way.
+_IN_FLIGHT = [0]
+_IN_FLIGHT_LOCK = threading.Lock()
 
 
 def _maybe_restart():
     """Re-exec this server when a restart was requested and nothing is in flight.
     Same token and boot id, so the open tab carries on. Returns False when not yet."""
     if not RESTART_FLAG.exists() or time.monotonic() - _VOICE_AT[0] < RESTART_QUIET_S:
+        return False
+    if _IN_FLIGHT[0]:                                  # an upload, a save, a model test…
         return False
     if not RUN_LOCK.acquire(blocking=False):           # a turn is still streaming
         return False
@@ -601,6 +607,15 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── POST ─────────────────────────────────────────────────
     def do_POST(self):
+        with _IN_FLIGHT_LOCK:
+            _IN_FLIGHT[0] += 1
+        try:
+            return self._post()
+        finally:
+            with _IN_FLIGHT_LOCK:
+                _IN_FLIGHT[0] -= 1
+
+    def _post(self):
         p = urlparse(self.path).path
         if not self._host_ok() or not self._origin_ok():
             return self._json({"error": "request origin rejected"}, 403)

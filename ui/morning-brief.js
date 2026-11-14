@@ -1,7 +1,7 @@
 // ══════════ IIFE · morning brief home screen (real data: jobs, agents, brain, greeting) ══════════
 (() => {
   'use strict';
-  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+  const esc = window.esc;
   const data = {greeting: '', date: '', agents: [], running: 0, brainCount: 0, brainDepts: [], collapsed: false,
                 pulse: null,           // GET /api/brief: business + calendar, fetched by a quiet Hermes helper
                 inbox: []};

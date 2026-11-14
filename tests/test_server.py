@@ -283,6 +283,11 @@ class SafeRestartTests(unittest.TestCase):
             server._VOICE_AT[0] = time.monotonic()           # Atlas is still speaking
             self.assertFalse(server._maybe_restart())
             server._VOICE_AT[0] = 0.0
+            server._IN_FLIGHT[0] = 1                         # an upload or a save is in flight
+            try:
+                self.assertFalse(server._maybe_restart())
+            finally:
+                server._IN_FLIGHT[0] = 0
             self.assertTrue(server._maybe_restart())
         env = execve.call_args.args[2]
         self.assertEqual((env["JARVIS_TOKEN"], env["JARVIS_BOOT_ID"]), (server.API_TOKEN, server.BOOT_ID))

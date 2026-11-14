@@ -12,14 +12,14 @@ import voice
 class VoiceWorkerTests(unittest.TestCase):
     def setUp(self):
         self._saved = (voice._proc, dict(voice._state))
-        voice.clear_audio_cache()
+        voice._AUDIO_CACHE.clear()
 
     def tearDown(self):
         if voice._proc is not None and voice._proc is not self._saved[0] and voice._proc.poll() is None:
             voice._proc.kill()
         voice._proc = self._saved[0]
         voice._state.clear(); voice._state.update(self._saved[1])
-        voice.clear_audio_cache()
+        voice._AUDIO_CACHE.clear()
 
     def test_speech_falls_back_at_once_while_worker_warms(self):
         with mock.patch.object(voice, "worker_installed", return_value=True), \

@@ -26,7 +26,10 @@ const apiHeaders = extra => ({'x-jarvis-token': API_TOKEN, ...(extra || {})});
 const now = () => new Date().toLocaleTimeString('en-GB', {hour12:false});
 const rid = () => 'run_' + (crypto.randomUUID ? crypto.randomUUID().replace(/-/g,'').slice(0,24)
                                               : Math.random().toString(16).slice(2,14));
-const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// The one HTML escaper (markdown.js loads first). It covers quotes as well, because the
+// result is also put inside attributes (data-id="…"); the old copies in each file did not.
+const esc = s => AtlasMarkdown.escapeHtml(s);
+window.esc = esc;
 
 // ── reactor state ──
 function setState(cls, word, sub){

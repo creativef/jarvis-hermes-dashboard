@@ -15,7 +15,7 @@
   };
   const VIEWS = [['grid', 'Grid'], ['sidebar', 'Sidebar'], ['orbit', 'Orbit']];
   const KEY = 'jarvis.deptview';
-  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  const esc = window.esc;
   let view = 'grid', sel = {dept: null, team: null};
   try { const v = localStorage.getItem(KEY); if (VIEWS.some(x => x[0] === v)) view = v; } catch (_) {}
   const h = /deptview=([a-z]+)/.exec(location.hash); if (h && VIEWS.some(x => x[0] === h[1])) view = h[1];

@@ -53,11 +53,6 @@ def apply_settings(settings):
         KOKORO_SPEED = float(settings["voice_speed"])
 
 
-def clear_audio_cache():
-    with _AUDIO_CACHE_LOCK:
-        _AUDIO_CACHE.clear()
-
-
 def _disabled():
     return os.environ.get("JARVIS_LOCAL_VOICE", "1") == "0"
 

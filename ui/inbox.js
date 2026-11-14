@@ -15,7 +15,7 @@
   const pathEl = document.getElementById('inbPath');
   const autoTriageChk = document.getElementById('inbAutoTriage');
   const winDrop = document.getElementById('windowDropOverlay');
-  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+  const esc = window.esc;
 
   let items = [];
 

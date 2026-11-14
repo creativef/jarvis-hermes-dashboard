@@ -52,7 +52,7 @@
   const input = ov.querySelector('#palInput'), results = ov.querySelector('#palResults');
 
   let items = [], sel = 0, brainNotes = [], agentsNow = [];
-  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+  const esc = window.esc;
 
   async function loadBrain(){
     try {

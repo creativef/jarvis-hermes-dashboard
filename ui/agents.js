@@ -3,7 +3,7 @@
   const TOKEN = document.querySelector('meta[name="jarvis-token"]')?.content || '';
   const btn = document.getElementById('navAgents');
   if (!btn) return;
-  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  const esc = window.esc;
 
   const ov = document.createElement('div');
   ov.className = 'agents-overlay'; ov.id = 'agentsOverlay'; ov.hidden = true;

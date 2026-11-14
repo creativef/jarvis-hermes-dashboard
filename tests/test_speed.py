@@ -83,8 +83,8 @@ class FastPathIntentRouterTests(unittest.TestCase):
 
 class AcknowledgementAndSentenceStreamTests(unittest.TestCase):
     def setUp(self):
-        runtime.clear_cache()
-        voice.clear_audio_cache()
+        runtime._TTL_CACHE.clear()
+        voice._AUDIO_CACHE.clear()
 
     def test_ack_is_neutral(self):
         # "explain" used to match "plan" and announce a brief; it gets a general holding line
@@ -210,7 +210,7 @@ class NoProbesInTurnTests(unittest.TestCase):
     def test_a_turn_spawns_only_the_chat_process(self):
         # `hermes --version` / `hermes tools list` (subprocess.run) must never sit in
         # front of a turn; only the chat itself (Popen) may start.
-        runtime.clear_cache()
+        runtime._TTL_CACHE.clear()
         with tempfile.TemporaryDirectory() as td:
             env = {"HERMES_CMD": f"{sys.executable} {FAKE}", "FAKE_HERMES_LOG": str(pathlib.Path(td) / "log"),
                    "FAKE_HERMES_SESSION": "20261018_130000_noprobe"}
@@ -224,10 +224,10 @@ class NoProbesInTurnTests(unittest.TestCase):
 
 class ProbePrewarmTests(unittest.TestCase):
     def setUp(self):
-        runtime.clear_cache()
+        runtime._TTL_CACHE.clear()
 
     def tearDown(self):
-        runtime.clear_cache()
+        runtime._TTL_CACHE.clear()
 
     def test_prewarm_probe_cache_avoids_subprocess_spawns(self):
         env = {"HERMES_CMD": f"{sys.executable} {FAKE}"}

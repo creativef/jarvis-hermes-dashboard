@@ -358,12 +358,6 @@ def _ttl_cached(key, ttl, fn, *args):
     return value
 
 
-def clear_cache():
-    """Clear the runtime probe cache."""
-    with _TTL_LOCK:
-        _TTL_CACHE.clear()
-
-
 def probe_cache_status():
     """Return warm status and remaining TTL (seconds) for runtime probes."""
     now = time.monotonic()

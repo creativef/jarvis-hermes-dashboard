@@ -1,7 +1,7 @@
 // ══════════ IIFE · ambient wall-display mode on the focus layout ══════════
 (() => {
   'use strict';
-  const esc = window.esc || (s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])));
+  const esc = window.esc;
   const ov = document.createElement('div');
   ov.className = 'ambient-overlay'; ov.id = 'ambientOverlay'; ov.hidden = true;
   ov.innerHTML = `<div class="am-orb" id="amOrb"><div id="amReactor"></div></div>

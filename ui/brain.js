@@ -791,7 +791,7 @@
 
   // ══ small helpers ══
   const pretty = id => String(id).replace(/-/g, ' ');
-  const escA = s => esc(s).replace(/"/g, '&quot;');
+  const escA = esc;
   const post = (url, body) => fetch(url, {method: 'POST', headers: apiHeaders({'content-type': 'application/json'}), body: JSON.stringify(body)})
     .then(async r => ({status: r.status, ...(await r.json().catch(() => ({})))}))
     .catch(() => ({ok: false, error: 'Could not reach the dashboard server.'}));
