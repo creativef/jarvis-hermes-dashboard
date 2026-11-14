@@ -262,14 +262,16 @@
       <span>Atlas workspace</span>
       <div class="brain-tools">
         <div class="br-search-wrap">
-          <input type="search" id="brSearch" class="br-search" placeholder="Fly to node… (Enter)" autocomplete="off" spellcheck="false" aria-label="Search brain nodes">
+          <input type="search" id="brSearch" class="br-search" placeholder="Search names and text… (/)" autocomplete="off" spellcheck="false" aria-label="Search notes by name or text">
           <span id="brSearchCount" class="br-search-count" hidden></span>
+          <div id="brResults" class="br-results" hidden role="listbox" aria-label="Notes that match"></div>
         </div>
         <label class="btog"><input type="checkbox" id="brNotebooks"> Notebooks</label>
         <label class="btog"><input type="checkbox" id="brShared"> Shared &amp; log</label>
         <button id="brIsolate" class="ctl aux" type="button" aria-pressed="false" title="Show only the selected note and its neighbours (X)">Isolate</button>
         <button id="brTimelineBtn" class="ctl aux" type="button" aria-pressed="false" title="Replay how your brain grew (L)">Timeline</button>
         <button id="brNew" class="ctl aux" type="button" title="New note, linked to the selected one (N)">＋ Note</button>
+        <button id="brHealthBtn" class="ctl aux" type="button" aria-pressed="false" title="Broken links, unlinked notes and hidden duplicates">Health</button>
         <button id="brOutlineToggle" class="ctl aux" type="button" aria-pressed="false" title="Toggle accessible text outline">Outline</button>
         <button id="brRefresh" class="ctl aux" type="button" title="Reload notes from disk" aria-label="Refresh">↻</button>
         <button id="brainClose" class="ctl aux" aria-label="Close brain">✕</button>
@@ -288,11 +290,13 @@
           <button type="button" id="brTlClose" class="br-tl-btn" aria-label="Close timeline">✕</button>
         </div>
         <div id="brOutline" class="brain-outline" hidden role="region" aria-label="Brain notes outline"></div>
+        <div id="brHealth" class="brain-outline" hidden role="region" aria-label="Brain health"></div>
+        <div id="brTip" class="br-tip" hidden role="tooltip"></div>
       </div>
       <aside class="brain-note">
         <form id="brNewForm" class="br-newform" hidden autocomplete="off">
           <input id="brNewTitle" class="br-search" placeholder="New note title…" maxlength="80" aria-label="New note title">
-          <button type="submit" class="ctl run br-rb">Create</button>
+          <button type="submit" id="brNewGo" class="ctl run br-rb">Create</button>
           <button type="button" id="brNewCancel" class="ctl aux br-rb">Cancel</button>
           <span id="brNewNear" class="br-newnear"></span>
           <span id="brNewMsg" class="br-newmsg" role="alert"></span>
@@ -308,6 +312,8 @@
           <button type="button" id="brFocus" class="ctl aux br-rb" title="Focus / reading mode" aria-pressed="false">Focus</button>
           <button type="button" id="brFull" class="ctl aux br-rb" title="Fullscreen" aria-pressed="false" aria-label="Toggle fullscreen">⛶</button>
           <button type="button" id="brEdit" class="ctl aux br-rb" title="Edit this note (E)" aria-pressed="false">Edit</button>
+          <button type="button" id="brRename" class="ctl aux br-rb" title="Rename this note; links to it follow (R)">Rename</button>
+          <button type="button" id="brArchive" class="ctl aux br-rb" title="Move this note out of the brain into .archive (not deleted)">Archive</button>
           <span class="br-rb-sep" aria-hidden="true"></span>
           <button type="button" id="brCopy" class="ctl aux br-rb" title="Copy the raw markdown">Copy</button>
           <button type="button" id="brDownload" class="ctl aux br-rb" title="Download this note as .md">Download</button>

@@ -44,6 +44,7 @@ if (!G) throw new Error('window.AtlasGraphMath was not exported');
 const cases = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 const out = cases.map(c => {
   if (c.op === 'const') return [G.HIT_PAD, G.DRAG_THRESHOLD];
+  if (c.op === 'nodeDrag') return G.moved(c.a, c.b, G.NODE_DRAG_THRESHOLD);
   if (c.op === 'pickRadius') return G.pickRadius(c.r, c.k);
   if (c.op === 'moved') return G.moved(c.a, c.b, c.th == null ? undefined : c.th);
   if (c.op === 'zoomAt') return c.deltas.reduce((v, d) => G.zoomAt(v, d, c.px, c.py, c.W, c.H), c.view);
@@ -147,6 +148,16 @@ class GraphMathTests(unittest.TestCase):
         self.assertTrue(res[4])
         self.assertTrue(res[5])
 
+
+    def test_a_slipped_click_on_a_node_is_still_a_click(self):
+        # Measured live: a press that slid 7 px was treated as a drag, so the note did not
+        # open and the node was pinned. A node now needs a 10 px pull before it drags.
+        slip, pull = _run([
+            {"op": "nodeDrag", "a": {"x": 100, "y": 100}, "b": {"x": 106, "y": 103}},
+            {"op": "nodeDrag", "a": {"x": 100, "y": 100}, "b": {"x": 112, "y": 104}},
+        ])
+        self.assertFalse(slip)
+        self.assertTrue(pull)
 
     def test_trackpad_pinch_zooms_gently(self):
         # one short pinch: 20 tiny deltas. The old code jumped 10% per event and hit max zoom.

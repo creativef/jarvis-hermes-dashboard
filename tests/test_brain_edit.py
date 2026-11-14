@@ -139,7 +139,7 @@ class VoiceIntentTests(BrainFixture):
         self.assertEqual(self.ui("close the brain")["action"], "close")
         self.assertEqual(self.ui("what's new in my brain this week")["action"], "timeline")
         self.assertEqual(self.ui("isolate finance"), {"view": "brain", "action": "isolate", "id": "finance"})
-        self.assertEqual(self.ui("find quarterly taxes in my brain")["action"], "search")
+        self.assertEqual(self.ui("find quarterly taxes in my brain")["action"], "find")   # looks inside the notes
 
     def test_does_not_steal_normal_requests(self):
         for text in ("focus on marketing this week", "brain dump my day", "show me my meeting notes",

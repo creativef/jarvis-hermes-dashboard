@@ -13,6 +13,10 @@
   const G = {
     HIT_PAD: 12,                    // extra *screen* px of clickable margin around every node (generous, zoom-consistent)
     DRAG_THRESHOLD: 4,              // CSS px the pointer may drift before it counts as a drag
+    // A node needs a firmer pull than the background: a click that slipped 5-8 px used to
+    // count as a drag, so the note did not open and the node was silently pinned instead.
+    NODE_DRAG_THRESHOLD: 10,
+    MIN_DOT: 4.5,                   // no dot is drawn (or hit-tested) smaller than this on screen
     pickRadius: (r, k) => r + G.HIT_PAD / (k || 1),
     moved: (a, b, th) => Math.hypot(b.x - a.x, b.y - a.y) > (th == null ? G.DRAG_THRESHOLD : th),
     ZOOM_MIN: .35, ZOOM_MAX: 3,
@@ -246,6 +250,7 @@
       alpha = .05;
       revealT0 = performance.now(); revealTotal = nodes.length;   // fade-in stagger for the fresh layout
       if (!g.exists) $b('brTitle').textContent = 'No brain folder found at ' + g.root;
+      tipCache.clear();
       legend(); renderOutline();
     } catch (_) { $b('brTitle').textContent = 'Could not load the brain'; }
   }
@@ -297,7 +302,7 @@
   }
   const fitView = () => fitTo(nodes.filter(visible), false);
 
-  const radiusOf = t => RADIUS[t] || 4.5;
+  const radiusOf = t => Math.max(RADIUS[t] || 4.5, GM.MIN_DOT / view.k);   // zoomed out, small dots keep a usable size
   // ONE transform pair for the whole canvas. draw() translates by (W/2 + view.x, …) then
   // scales by view.k, and the hit test inverts exactly that — including devicePixelRatio, which the
   // ctx.setTransform(dpr,…) applies to the bitmap only, so both sides work in CSS pixels.
@@ -444,7 +449,7 @@
       const c = colorOf(n), lay = layerOf(n), dep = lay / LAYER_N;
       const isHot = n === hover;
       const breath = REDUCE ? 1 : 1 + 0.03 * Math.sin(now / 900 + (hash(n.id) % 7) * 1.1);
-      let r = (RADIUS[n.type] || 4.5) * (1.16 - dep * 0.30) * breath;   // size by layer
+      let r = Math.max((RADIUS[n.type] || 4.5) * (1.16 - dep * 0.30), GM.MIN_DOT / view.k) * breath;   // size by layer, never a speck
       if (isHot) r *= 1.22;                                            // hover lift
       const ny = n.y - (isHot && !REDUCE ? 3 / view.k : 0);
       const isMatch = matchSet && matchSet.has(n.id);
@@ -611,7 +616,7 @@
     const activeAnim = alpha > 0.021 || flyAnim || edgePulses.length > 0 || nodeSparks.size > 0 || drag || pan || tl.playing || !REDUCE;
     raf = activeAnim ? requestAnimationFrame(loop) : 0;
   }
-  const setCursor = () => cv.classList.toggle('node-hover', !!(hover && !drag));
+  const setCursor = () => { cv.classList.toggle('node-hover', !!(hover && !drag)); syncTip(); };
 
   async function openNote(n){
     if (editing && editing.id !== n.id){
@@ -668,7 +673,7 @@
     downX = e.clientX; downY = e.clientY; downId = e.pointerId;
     const n = pick(px, py);
     if (n && e.shiftKey){ linkDrag = {from: n, px, py}; cv.classList.add('drag'); return; }
-    if (n){ drag = n; cv.classList.add('drag'); }      // grabbing cursor while dragging a node too
+    if (n){ drag = n; cv.classList.add('drag'); syncTip(); }   // grabbing cursor while dragging a node too
     else { pan = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; cv.classList.add('drag'); viewSaved = null; }
   });
   cv.addEventListener('pointermove', e => {
@@ -683,7 +688,7 @@
     if (drag || pan){
       // A click is only a drag once the pointer has moved past the threshold, so a
       // jittery click still selects instead of silently becoming a drag.
-      if (!moved && GM.moved({x: downX, y: downY}, {x: e.clientX, y: e.clientY})) moved = true;
+      if (!moved && GM.moved({x: downX, y: downY}, {x: e.clientX, y: e.clientY}, drag ? GM.NODE_DRAG_THRESHOLD : undefined)) moved = true;
       if (moved){
         if (drag){ const w = toWorld(px, py); drag.x = w.x; drag.y = w.y; alpha = Math.max(alpha, .3); if (!raf) loop(); }
         else { view.x = pan.vx + e.clientX - pan.x; view.y = pan.vy + e.clientY - pan.y; if (!raf) loop(); }
@@ -738,8 +743,9 @@
     flyAnim = {t0: performance.now(), dur: 320, x0: view.x, y0: view.y, k0: view.k, x1: v.x, y1: v.y, k1: v.k};
     if (!raf) loop();
   };
-  function updateSearch(fly = false){
+  function updateSearch(fly = false, keepText = false){
     searchQuery = (searchInput?.value || '').toLowerCase().trim();
+    if (!keepText) searchText(searchQuery);             // the notes' text is searched on the server
     if (!searchQuery){
       searchMatches = []; searchIdx = 0;
       if (searchCount) searchCount.hidden = true;
@@ -748,6 +754,7 @@
       return;
     }
     searchMatches = nodes.filter(n => n.id.toLowerCase().includes(searchQuery) || (n.group || '').toLowerCase().includes(searchQuery));
+    for (const r of textHits){ const n = byId.get(r.id); if (n && !searchMatches.includes(n)) searchMatches.push(n); }
     if (searchCount){
       searchCount.hidden = false;
       searchCount.textContent = searchMatches.length ? `${(searchIdx % searchMatches.length) + 1}/${searchMatches.length}` : '0';
@@ -768,12 +775,15 @@
       if (e.key === 'Enter' && searchMatches.length){
         e.preventDefault();
         searchIdx = (searchIdx + (e.shiftKey ? searchMatches.length - 1 : 1)) % searchMatches.length;
-        updateSearch(true);
+        updateSearch(true, true);
+      } else if (e.key === 'Enter' && textHits.length){   // only notes that are not on the graph matched
+        e.preventDefault(); openById(textHits[0].id);
       } else if (e.key === 'Escape' && searchInput.value){
         e.stopPropagation();
         searchInput.value = ''; updateSearch(false);
       }
     });
+    searchInput.addEventListener('focus', renderResults);
   }
   if (outlineBtn && outlineBox){
     outlineBtn.addEventListener('click', () => {
@@ -802,6 +812,75 @@
     if (text && ms) actTimer = setTimeout(() => { actEl.hidden = true; }, ms);
   };
   const navPing = () => { const b = $b('navBrain'); if (!b) return; b.classList.remove('brain-ping'); void b.offsetWidth; b.classList.add('brain-ping'); };
+  // Open a note by name. A note with no links is not drawn on the graph, but it can still be read.
+  function openById(id){
+    const n = byId.get(id);
+    if (n){ saveView(); flyTo(n, 1.3); return openNote(n); }
+    return openNote({id, type: 'other', x: 0, y: 0});
+  }
+
+  // ══ search inside notes: names match as you type, the text of every note a moment later ══
+  const resultsBox = $b('brResults');
+  let textHits = [], searchSeq = 0, searchTimer = 0;
+  function renderResults(){
+    if (!resultsBox) return;
+    if (!searchQuery || !textHits.length){ resultsBox.hidden = true; return; }
+    resultsBox.innerHTML = textHits.map(r =>
+      `<button type="button" role="option" data-id="${esc(r.id)}"><b>${esc(pretty(r.id))}</b>${r.group ? `<i>${esc(pretty(r.group))}</i>` : ''}`
+      + `<span>${esc(r.snippet || '')}</span></button>`).join('');
+    resultsBox.hidden = false;
+  }
+  function searchText(q){
+    clearTimeout(searchTimer);
+    const seq = ++searchSeq;
+    if (q.length < 2){ textHits = []; renderResults(); return; }
+    searchTimer = setTimeout(async () => {
+      let r = null;
+      try { r = await fetch('/api/brain/search?q=' + encodeURIComponent(q), {headers: apiHeaders()}).then(x => x.json()); } catch (_) {}
+      if (seq !== searchSeq) return;                   // a newer search is already on its way
+      textHits = (r && r.results) || [];
+      updateSearch(false, true); renderResults();
+    }, 180);
+  }
+  if (resultsBox){
+    resultsBox.addEventListener('mousedown', e => e.preventDefault());   // keep the caret in the search box
+    resultsBox.addEventListener('click', e => {
+      const b = e.target.closest('[data-id]'); if (!b) return;
+      resultsBox.hidden = true; openById(b.dataset.id);
+    });
+    searchInput.addEventListener('blur', () => { resultsBox.hidden = true; });
+  }
+
+  // ══ hover preview: rest on a node to read the start of the note without opening it ══
+  const tip = $b('brTip'), tipCache = new Map();
+  let tipFor = null, tipTimer = 0;
+  const plain = md => String(md || '').split('\n').filter(l => l.trim() && !/^\s*(#|---|```|- \*\*)/.test(l)).join(' ')
+    .replace(/\[\[([^\]|#]+)[^\]]*\]\]/g, (m, a) => a.replace(/-/g, ' ')).replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 170);
+  function syncTip(){
+    const n = (hover && !drag && !pan && !linkDrag) ? hover : null;
+    if (n === tipFor) return;
+    tipFor = n; clearTimeout(tipTimer);
+    if (tip) tip.hidden = true;
+    if (!n || !tip) return;
+    tipTimer = setTimeout(async () => {
+      let text = tipCache.get(n.id);
+      if (text === undefined){
+        try { text = plain((await fetch('/api/brain/note?id=' + encodeURIComponent(n.id), {headers: apiHeaders()}).then(r => r.json())).text); }
+        catch (_) { text = ''; }
+        tipCache.set(n.id, text);
+      }
+      if (tipFor !== n || ov.hidden) return;
+      const kind = {hub: 'hub', dept: 'department', sub: 'team', notebook: 'notebook', inbox: 'inbox', commons: 'shared', log: 'log'}[n.type] || 'note';
+      tip.innerHTML = `<b>${esc(pretty(n.id))}</b><i>${esc(kind + (n.group && n.type !== 'dept' ? ' · ' + pretty(n.group) : ''))}</i>`
+        + (text ? `<span>${esc(text)}${text.length >= 170 ? '…' : ''}</span>` : '');
+      tip.hidden = false;
+      const s = toScreen(n.x, n.y), w = tip.offsetWidth, h = tip.offsetHeight;
+      const above = s.y - h - 16;
+      tip.style.left = Math.max(8, Math.min(W - w - 8, s.x - w / 2)) + 'px';
+      tip.style.top = (above >= 8 ? above : Math.min(H - h - 8, s.y + 40)) + 'px';
+    }, 350);
+  }
 
   // ══ Atlas ↔ Brain: voice actions, and notes lighting up as Atlas reads or writes them ══
   const WRITE_TOOL = /write|patch|edit|create|append|save|replace|insert|move/i;
@@ -834,10 +913,22 @@
   }
   async function voiceAction(a){
     if (a.action === 'close') return close();
+    if (a.action === 'wrote'){                         // "note that…": saved already; show where, don't take over the screen
+      touched.set(a.id, {at: performance.now(), kind: 'write'});
+      if (ov.hidden) return navPing();
+      await load(); pulseNode(a.id, 'write'); chip(`✓ Noted in ${pretty(a.id)}`);
+      if (selected && selected.id === a.id && !editing) openNote(selected);
+      return;
+    }
     if (a.action === 'open') return showBrain(a.id);
     await showBrain(a.action === 'isolate' ? a.id : undefined);
     if (a.action === 'isolate' && byId.get(a.id)) setIsolate(a.id, 1);
     else if (a.action === 'search' && searchInput){ searchInput.value = a.q || ''; searchIdx = 0; updateSearch(false); chip(`No note called “${a.q}”. Closest matches are highlighted.`, 4000); }
+    else if (a.action === 'find' && searchInput){     // "search my brain for…": the list, and the best match opened
+      searchInput.value = a.q || ''; searchIdx = 0; updateSearch(false);
+      if (a.id) openById(a.id);
+    }
+    else if (a.action === 'health') showHealth(true);
     else if (a.action === 'timeline'){ selected = null; syncToDept(null); showTimeline(true); }   // let the new notes stand out
   }
 
@@ -977,14 +1068,82 @@
 
   // ══ new note (linked to the selected one) ══
   const newForm = $b('brNewForm'), newTitle = $b('brNewTitle');
+  let formMode = 'new';                               // the same small form creates and renames
   function newNote(){
+    formMode = 'new'; $b('brNewGo').textContent = 'Create'; newTitle.placeholder = 'New note title…';
     newForm.hidden = false; $b('brNewMsg').textContent = '';
     $b('brNewNear').textContent = selected ? `linked to ${pretty(selected.id)}` : 'linked to Atlas';
     newTitle.value = ''; newTitle.focus();
   }
+  function renameNote(){
+    if (!selected) return chip('Pick a note first.');
+    if (editing) return chip('Save or cancel the edit first.');
+    formMode = 'rename'; $b('brNewGo').textContent = 'Rename'; newTitle.placeholder = 'New name…';
+    newForm.hidden = false; $b('brNewMsg').textContent = '';
+    $b('brNewNear').textContent = `renaming ${pretty(selected.id)} · links to it follow`;
+    newTitle.value = pretty(selected.id); newTitle.focus(); newTitle.select();
+  }
+  async function doRename(title){
+    const old = selected && selected.id; if (!old) return;
+    const res = await post('/api/brain/note', {rename: old, title});
+    if (!res.ok){ $b('brNewMsg').textContent = res.error || 'Could not rename the note.'; return; }
+    newForm.hidden = true;
+    const id = res.note.id;
+    if (pins[old]){ pins[id] = pins[old]; delete pins[old]; savePins(); }   // a pinned node stays where you put it
+    const was = byId.get(old); if (was) was.id = id;                         // …and keeps its place through the reload
+    await load();
+    chip(`✓ Renamed to ${pretty(id)}` + (res.note.relinked ? ` · ${res.note.relinked} note${res.note.relinked > 1 ? 's' : ''} relinked` : ''), 4000);
+    openById(id);
+  }
+  // Archive: two clicks, and the note is moved to <brain>/.archive, never deleted.
+  const archiveBtn = $b('brArchive'); let archiveArmed = 0;
+  const disarmArchive = () => { clearTimeout(archiveArmed); archiveArmed = 0; archiveBtn.textContent = 'Archive'; archiveBtn.classList.remove('armed'); };
+  archiveBtn.addEventListener('click', async () => {
+    if (!selected) return chip('Pick a note first.');
+    if (editing) return chip('Save or cancel the edit first.');
+    if (!archiveArmed){ archiveBtn.textContent = 'Confirm archive'; archiveBtn.classList.add('armed'); archiveArmed = setTimeout(disarmArchive, 4000); return; }
+    disarmArchive();
+    const id = selected.id, res = await post('/api/brain/note', {archive: id});
+    if (!res.ok) return chip(res.error || 'Could not archive the note.', 4000);
+    const left = res.note.linked_from || [];
+    if (pins[id]){ delete pins[id]; savePins(); }
+    selected = null; syncToDept(null);
+    $b('brTitle').textContent = 'Click a node'; $b('brPath').textContent = ''; $b('brLinks').textContent = '';
+    $b('brText').innerHTML = ''; $b('brSuggest').hidden = true;
+    await load();
+    chip(`✓ Archived ${pretty(id)} (kept in ${res.note.archived})` + (left.length ? ` · still linked from ${left.length} note${left.length > 1 ? 's' : ''}: see Health` : ''), 6000);
+  });
+  $b('brRename').addEventListener('click', renameNote);
+
+  // ══ health: what needs tidying ══
+  const healthBox = $b('brHealth'), healthBtn = $b('brHealthBtn');
+  async function showHealth(on){
+    healthBox.hidden = !on; healthBtn.setAttribute('aria-pressed', String(!!on));
+    if (!on) return;
+    healthBox.innerHTML = '<div class="pal-empty">Checking…</div>';
+    let h = null;
+    try { h = await fetch('/api/brain/health', {headers: apiHeaders()}).then(r => r.json()); } catch (_) {}
+    if (!h || !h.broken){ healthBox.innerHTML = '<div class="pal-empty">Could not check the brain.</div>'; return; }
+    const btn = id => `<button type="button" class="bo-btn" data-node="${esc(id)}">${esc(pretty(id))}</button>`;
+    const sec = (title, n, hint, body) => `<div class="bo-group"><h4>${title} (${n})</h4><p class="bh-hint">${n ? hint : 'None.'}</p>${n ? body : ''}</div>`;
+    healthBox.innerHTML = `<div class="bh-sum">${h.notes} notes · ${h.links} links · click a note to open it</div>`
+      + sec('Broken links', h.broken.length, 'These links point at a note that does not exist. Open the note and fix or remove the link.',
+            h.broken.map(b => `<div class="bh-row">${btn(b.from)}<span>links to <b>[[${esc(b.to)}]]</b>${b.did_you_mean ? ` · did you mean <b>${esc(b.did_you_mean)}</b>?` : ''}</span></div>`).join(''))
+      + sec('Unlinked notes', h.orphans.length, 'Nothing links to these and they link to nothing, so they are easy to lose. Link them (⇧-drag) or archive them.',
+            `<div class="bo-items">${h.orphans.map(btn).join('')}</div>`)
+      + sec('Hidden duplicates', h.duplicates.length, 'Two files share a name, so only the first one appears in the brain. Rename the hidden file in Finder.',
+            h.duplicates.map(d => `<div class="bh-row">${btn(d.id)}<span>shown: ${esc(d.shown)} · hidden: ${esc(d.hidden.join(', '))}</span></div>`).join(''));
+  }
+  healthBtn.addEventListener('click', () => showHealth(healthBox.hidden));
+  healthBox.addEventListener('click', e => {
+    const b = e.target.closest('[data-node]'); if (!b) return;
+    showHealth(false); openById(b.dataset.node);
+  });
+
   newForm.addEventListener('submit', async e => {
     e.preventDefault();
     const title = newTitle.value.trim(); if (!title) return;
+    if (formMode === 'rename') return doRename(title);
     const res = await post('/api/brain/note', {create: title, near: selected ? selected.id : ''});
     if (!res.ok){ $b('brNewMsg').textContent = res.error || 'Could not create the note.'; return; }
     newForm.hidden = true;
@@ -1085,7 +1244,7 @@
   const close = () => {
     ov.hidden = true; navBtn.setAttribute('aria-expanded', 'false'); cancelAnimationFrame(raf); raf = 0;
     hover = null; drag = null; pan = null; flyAnim = null; moved = false; downId = null; pointerIn = false;
-    linkDrag = null; tl.playing = false;
+    linkDrag = null; tl.playing = false; syncTip();
   };
   window.AtlasBrain = {
     open, close, load,
@@ -1104,6 +1263,8 @@
     ready: () => nodes.length > 0,
     settled: () => alpha <= 0.021 && !drag && !pan && !flyAnim,   // forces have stopped, nodes still
     voice: a => voiceAction(a),
+    health: on => showHealth(on !== false),
+    textHits: () => textHits.map(r => r.id),
     isolate: (id, depth) => setIsolate(id, depth || 1),
     fold: slug => toggleFold(slug),
     timeline: on => showTimeline(on !== false),
@@ -1137,6 +1298,7 @@
     if (e.key === 'Escape'){                           // peel one layer at a time
       if (linkDrag){ endPointer(); draw(); }
       else if (!newForm.hidden) newForm.hidden = true;
+      else if (!healthBox.hidden) showHealth(false);
       else if (iso) setIsolate(null);
       else if (tl.on) showTimeline(false);
       else if (selected){ selected = null; syncToDept(null); draw(); }
@@ -1147,7 +1309,7 @@
     const d = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]}[e.key];
     if (d){ if (el === $b('brText')) return; e.preventDefault(); hop(d[0], d[1]); return; }
     const act = {f: () => fitTo(nodes.filter(visible), true), x: cycleIsolate, l: () => showTimeline(!tl.on),
-                 e: () => startEdit(), n: newNote, '/': () => searchInput && searchInput.focus()}[e.key.toLowerCase()];
+                 e: () => startEdit(), n: newNote, r: renameNote, '/': () => searchInput && searchInput.focus()}[e.key.toLowerCase()];
     if (act){ e.preventDefault(); act(); }
   });
   [$b('brNotebooks'), $b('brShared')].forEach(c => c.addEventListener('change', () => { alpha = 1; }));

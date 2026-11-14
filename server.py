@@ -551,6 +551,15 @@ class Handler(BaseHTTPRequestHandler):
             name = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
             found = brain.note(name)
             return self._json(found if found else {"error": "not found"}, 200 if found else 404)
+        if p == "/api/brain/search":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            q = (parse_qs(urlparse(self.path).query).get("q") or [""])[0]
+            return self._json(brain.search(q[:200]))
+        if p == "/api/brain/health":
+            if not self._token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._json(brain.health())
         if p == "/api/brain/suggest":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -683,6 +692,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "payload must be a JSON object"}, 400)
             if p == "/api/brain/link":
                 res, err = brain.add_link(str(body.get("source") or ""), str(body.get("target") or ""))
+            elif body.get("rename"):
+                res, err = brain.rename_note(str(body.get("rename")), body.get("title"))
+            elif body.get("archive"):
+                res, err = brain.archive_note(str(body.get("archive")))
             elif body.get("create"):
                 res, err = brain.create_note(body.get("create"), str(body.get("near") or "") or None)
             else:

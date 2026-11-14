@@ -620,6 +620,12 @@ _BRAIN_NEW = re.compile(rf"^(?:what(?:'?s|\s+is)\s+new|what\s+changed)(?:\s+this
                         rf"|^(?:show|open|play)(?:\s+me)?\s+(?:the\s+|my\s+)?(?:brain\s+)?timeline$")
 _BRAIN_ISOLATE = re.compile(rf"^(?:isolate\s+(.+?)(?:\s+in\s+{_BRAIN})?|(?:focus|zoom)\s+(?:in\s+)?on\s+(.+?)\s+in\s+{_BRAIN})$")
 _BRAIN_FIND = re.compile(rf"^(?:show(?:\s+me)?|open|find|pull\s+up|bring\s+up|go\s+to|take\s+me\s+to|jump\s+to)\s+(.+?)\s+(?:in|from|on)\s+{_BRAIN}$")
+_BRAIN_SEARCH = re.compile(rf"^(?:search|look)\s+(?:in\s+|through\s+)?{_BRAIN}\s+for\s+(.+)$"
+                           rf"|^(?:search|look)\s+for\s+(.+?)\s+in\s+{_BRAIN}$"
+                           rf"|^what\s+(?:do|does)\s+my\s+(?:notes|brain)\s+say\s+about\s+(.+)$"
+                           rf"|^which\s+(?:of\s+my\s+)?notes\s+(?:mention|talk\s+about)\s+(.+)$")
+_BRAIN_HEALTH = re.compile(rf"^(?:check|tidy|audit)\s+{_BRAIN}$|^how\s+(?:healthy\s+is|is)\s+{_BRAIN}(?:\s+doing)?$"
+                           rf"|^brain\s+(?:health|check)$")
 # looser phrasings only claim the turn on a clear name match, so "brain dump my day" still reaches Hermes
 _LOOSE_FIND = re.compile(r"^(?:show(?:\s+me)?|open|pull\s+up|bring\s+up)\s+(.+?\s+notes?)$|^brain[\s,:]+(.+)$")
 
@@ -640,6 +646,26 @@ def _brain_intent(q):
         return ui("open", "Here's your brain.")
     if _BRAIN_NEW.match(q):
         return ui("timeline", "Here's what's new in your brain this week.", days=7)
+    if _BRAIN_HEALTH.match(q):
+        h = brain.health()
+        parts = [f"{len(h[k])} {word}{'' if len(h[k]) == 1 else 's'}"
+                 for k, word in (("broken", "broken link"), ("orphans", "unlinked note"), ("duplicates", "hidden duplicate"))
+                 if h[k]]
+        return ui("health", (f"{h['notes']} notes. To tidy: " + ", ".join(parts) + "." if parts
+                             else f"{h['notes']} notes, all linked up. Nothing to tidy."))
+
+    def in_text(what):
+        """Notes that mention `what` anywhere: the list goes on screen, the count is spoken."""
+        res = brain.search(what, limit=3)
+        if not res["count"]:
+            return ui("find", f"Nothing in your brain mentions {what}.", q=what)
+        top = pretty(res["results"][0]["id"])
+        n = res["count"]
+        return ui("find", (f"One note mentions {what}: {top}." if n == 1
+                           else f"{n} notes mention {what}. The closest is {top}."), q=what, id=res["results"][0]["id"])
+    m = _BRAIN_SEARCH.match(q)
+    if m:
+        return in_text(next(g for g in m.groups() if g))
     m = _BRAIN_ISOLATE.match(q)
     if m:
         what = m.group(1) or m.group(2)
@@ -652,12 +678,49 @@ def _brain_intent(q):
         name = brain.find_note(m.group(1))
         if name:
             return ui("open", f"Here's {pretty(name)}.", id=name)
-        return ui("search", f"I couldn't find a note matching {m.group(1)}.", q=m.group(1))
+        return in_text(m.group(1))                  # no note by that name: look inside the notes
     m = _LOOSE_FIND.match(q)
     if m:
         name = brain.find_note(m.group(1) or m.group(2), min_tier=2)
         if name:
             return ui("open", f"Here's {pretty(name)}.", id=name)
+    return None
+
+
+# ── quick capture: "note that …", "add … to my pricing notes" — saved at once, no model call ──
+_SAY = r"^\s*(?:(?:hey\s+atlas|ok\s+atlas|atlas|jarvis)[,:\s]+)?(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+_NOTE_THAT = re.compile(_SAY + r"(?:(?:make|take|add|write|jot)\s+(?:down\s+)?(?:a\s+)?(?:quick\s+)?note|note\s+down|jot\s+down|note)"
+                        r"\s*(?:that\b|:|,)\s*(.+?)\s*$", re.I | re.S)
+_NOTE_SELF = re.compile(_SAY + r"note\s+to\s+(?:my)?self[\s,:]+(.+?)\s*$", re.I | re.S)
+_NOTE_ADD = re.compile(_SAY + r"(?:add|append|put|write)\s+(.+?)\s+(?:to|in|into|on)\s+(?:my\s+|the\s+)?(.+?)\s+notes?[.!]?\s*$", re.I | re.S)
+_NOTE_ADD_TO = re.compile(_SAY + r"(?:add|append)\s+to\s+(?:my\s+|the\s+)?(.+?)\s+notes?\s*(?:that\b|:|,)\s*(.+?)\s*$", re.I | re.S)
+
+
+def _capture_intent(message):
+    """Things you ask Atlas to write down. The words are saved exactly as said. Returns a
+    fast-path reply, or None so the request goes to Hermes (no brain folder, no such note)."""
+    def out(reply, name):
+        return dict(message=None, reply=reply, note=f"brain: wrote {name}", intent="capture", fast_path=True,
+                    ui=dict(view="brain", action="wrote", id=name))
+
+    raw = message or ""
+    m = _NOTE_ADD_TO.match(raw)
+    target, text = (m.group(1), m.group(2)) if m else (None, None)
+    if not m:
+        m = _NOTE_ADD.match(raw)
+        if m:
+            text, target = m.group(1), m.group(2)
+    if target:
+        name = brain.find_note(target, min_tier=2)
+        if not name:
+            return None                              # not a note we know: Hermes decides what was meant
+        text = text.strip().rstrip(".")
+        _, err = brain.append_line(name, f"- {text[:1].upper() + text[1:]} ({datetime.date.today().isoformat()})")
+        return None if err else out(f"Added to {name.replace('-', ' ')}.", name)
+    m = _NOTE_SELF.match(raw) or _NOTE_THAT.match(raw)
+    if m and len(m.group(1).split()) >= 2:
+        saved, err = brain.capture(m.group(1))
+        return None if err else out("Noted.", saved["id"])
     return None
 
 
@@ -806,6 +869,10 @@ def fast_path(message):
         return hit
 
     hit = _jobs_intent(q, message)
+    if hit:
+        return hit
+
+    hit = _capture_intent(message)
     if hit:
         return hit
 

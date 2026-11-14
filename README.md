@@ -147,6 +147,8 @@ Normal text and voice requests go directly to Hermes Agent.
   It learns how loud his own voice is in your mic; if it triggers by itself it gets less sensitive. Headphones make it reliable. Toggle: Settings → "Talk over Atlas". Esc still cancels outright.
 - **Instant commands, no model call:** "stop", "repeat that", "slower" / "faster", "new topic".
 - **Helper jobs by voice, no model call:** "start a job to compare hoodie base prices", "how's the flight job going?", "what did the flight job find?", "stop the flight job", "stop all jobs". Any word from the job's brief picks it.
+- **The Brain by voice, no model call:** "note that the supplier raised prices" (saved to this month's quick notes), "add ask about bulk discount to my supplier notes", "search my brain for hoodie pricing", "what do my notes say about returns", "check my brain" (broken links, unlinked notes, hidden duplicates).
+- **In the Brain:** the search box looks inside every note, not only at names; rest the pointer on a node for a preview; **R** renames the open note and every link to it follows; **Archive** moves a note to `~/Atlas/.archive/` (never deleted); **Health** lists what needs tidying.
 - **Space while you're talking** sends right away instead of waiting for the 1.2 s pause.
 - **Voice and speed** are in Settings and apply from the next sentence.
 - Each voice turn logs one **TIMING** line (you→text · →first word · →voice) so you can see which step is slow.

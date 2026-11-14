@@ -1,12 +1,13 @@
 """
-Read-only view of the Atlas second brain (a folder of linked markdown notes),
-plus the local Inbox store under <brain>/inbox/ so dropped files, CSVs, and
-quick notes link directly into the Brain graph.
+The Atlas second brain (a folder of linked markdown notes): the graph the dashboard
+draws, reading, editing, searching and tidying notes, quick capture, plus the local
+Inbox store under <brain>/inbox/ so dropped files, CSVs, and quick notes link
+directly into the Brain graph.
 
-Builds a graph from [[wikilinks]] so the dashboard can draw it, and serves a
-single note's text on request. Note lookups go by note name only (never a
-caller-supplied path), and inbox filenames/IDs are strictly sanitised so the
-API cannot be used to read or write files outside the brain folder.
+Note lookups go by note name only (never a caller-supplied path), and inbox
+filenames/IDs are strictly sanitised so the API cannot be used to read or write
+files outside the brain folder. Nothing here deletes a note: "archive" moves it to
+<brain>/.archive/, where it can be put back by hand.
 """
 import base64
 import datetime
@@ -36,17 +37,23 @@ _BLOCKED_EXTS = {
 }
 
 
-def _notes():
-    """{name: Path} for every markdown note in the brain (first one wins)."""
-    out = {}
+def _note_files():
+    """Every markdown note file in the brain, in the order the graph sees them."""
     if not ROOT.is_dir():
-        return out
+        return
     for p in sorted(ROOT.rglob("*.md")):
         rel = p.relative_to(ROOT).parts
         if any(part.startswith(".") for part in rel):
             continue
         if rel[0] == "inbox" and p.stem.endswith("-source"):   # original of a .md drop; its companion note is the node
             continue
+        yield p
+
+
+def _notes():
+    """{name: Path} for every markdown note in the brain (first one wins)."""
+    out = {}
+    for p in _note_files():
         out.setdefault(p.stem, p)
     return out
 
@@ -340,6 +347,210 @@ def suggestions(name, limit=12):
     return {"id": name,
             "mentioned_in": sorted(mentioned_in, key=longer_first)[:limit],
             "mentions": sorted(mentions, key=longer_first)[:limit]}
+
+
+# ── search inside notes ──────────────────────────────────────────────────────
+def search(query, limit=20):
+    """Notes whose name or text holds every word of `query`, best first, each with a
+    snippet around the first hit. A word in the name counts for more than one in the text."""
+    words = _norm(query).split()
+    out = {"q": " ".join(str(query or "").split()), "count": 0, "results": []}
+    if not words:
+        return out
+    phrase = " ".join(words)
+    hits = []
+    for name, path in _notes().items():
+        try:
+            text = path.read_text(encoding="utf-8")[:_MAX_NOTE]
+        except OSError:
+            continue
+        low, nname = text.lower(), _norm(name)
+        score, found = 0, 0
+        for w in words:
+            in_name, n = w in nname, low.count(w)
+            if not in_name and not n:
+                score = -1
+                break
+            score += (40 if in_name else 0) + min(n, 15)
+            found += n
+        if score < 0:
+            continue
+        if nname == phrase:
+            score += 100
+        at = low.find(phrase)
+        if at >= 0 and len(words) > 1:
+            score += 25                              # the words stand together, as asked
+        if at < 0:
+            at = min((i for i in (low.find(w) for w in words) if i >= 0), default=-1)
+        snippet = ""
+        if at >= 0:
+            a, b = max(0, at - 70), min(len(text), at + 110)
+            snippet = ("…" if a else "") + " ".join(text[a:b].split()) + ("…" if b < len(text) else "")
+        kind, group = _classify(name, path)
+        hits.append((score, name, {"id": name, "type": kind, "group": group, "snippet": snippet, "hits": found}))
+    hits.sort(key=lambda h: (-h[0], h[1]))
+    out["count"] = len(hits)
+    out["results"] = [h[2] for h in hits[:limit]]
+    return out
+
+
+# ── quick capture: things said out loud land in the brain ────────────────────
+def append_line(name, line):
+    """Add one line to the end of an existing note. Returns (note, error)."""
+    path = _notes().get(name)
+    if path is None:
+        return None, "note not found"
+    line = " ".join(str(line or "").split())
+    if not line:
+        return None, "nothing to add"
+    try:
+        if path.stat().st_size + len(line) > _MAX_NOTE:
+            return None, "this note is too large to add to here"
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return None, f"could not read the note: {e}"
+    _atomic_write(path, text.rstrip("\n") + "\n" + line + "\n")
+    return note(name), None
+
+
+def capture(text, now=None):
+    """Save a spoken note. One note per month (<brain>/notes/quick-notes-YYYY-MM.md, linked
+    to [[Atlas]]), a heading per day, a timed bullet per capture. Returns (note, error)."""
+    text = " ".join(str(text or "").split())[:2000]
+    if not text:
+        return None, "nothing to note"
+    if not ROOT.is_dir():
+        return None, "no brain folder"
+    now = now or datetime.datetime.now()
+    name = f"quick-notes-{now:%Y-%m}"
+    path = _notes().get(name)
+    if path is None:
+        path = ROOT / "notes" / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, f"# Quick notes · {now:%B %Y}\n\nPart of [[Atlas]]. Things you asked Atlas to note down.\n")
+    body = path.read_text(encoding="utf-8")
+    if len(body) + len(text) > _MAX_NOTE:
+        return None, "this month's quick notes are full"
+    day = f"## {now:%Y-%m-%d}"
+    if not re.search(r"^" + re.escape(day) + r"\s*$", body, re.M):
+        body = body.rstrip("\n") + f"\n\n{day}\n"
+    _atomic_write(path, body.rstrip("\n") + f"\n- {now:%H:%M} {text[:1].upper() + text[1:]}\n")
+    return note(name), None
+
+
+# ── housekeeping: rename, archive, health ────────────────────────────────────
+def _movable(name, path):
+    """Notes the dashboard may rename or archive. The hub, department and team notes,
+    notebooks and inbox items are tied to their folder or to an index by name."""
+    kind, _ = _classify(name, path)
+    return kind not in ("hub", "dept", "inbox", "notebook") and path.parent.name != name
+
+
+def _retarget(text, old, new):
+    """[[old]], [[old|label]] and [[old#section]] -> the same link to `new`."""
+    return re.sub(r"\[\[\s*" + re.escape(old) + r"\s*(?=[\]|#])", "[[" + new, text)
+
+
+def rename_note(name, title):
+    """Rename a note and repoint every [[link]] to it. Returns (note, error)."""
+    notes = _notes()
+    path = notes.get(name)
+    if path is None:
+        return None, "note not found"
+    if not _movable(name, path):
+        return None, "this note is part of the brain's structure and cannot be renamed here"
+    title = " ".join(str(title or "").split())
+    if not _TITLE.match(title):
+        return None, "title: letters, numbers, spaces, - and _ only (max 80)"
+    new = re.sub(r"\s+", "-", title).lower()
+    if new == name:
+        return note(name), None
+    if any(n.lower() == new for n in notes):
+        return None, "a note with that name already exists"
+    target = path.with_name(f"{new}.md")
+    if target.exists():
+        return None, "a file with that name already exists in that folder"
+    os.replace(path, target)
+    relinked = 0
+    for other in _notes().values():
+        try:
+            text = other.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        changed = _retarget(text, name, new)
+        if changed != text:
+            _atomic_write(other, changed)
+            relinked += 1
+    born = ROOT / ".atlas" / "born.json"           # the timeline keeps its first-seen date
+    try:
+        known = json.loads(born.read_text(encoding="utf-8"))
+        if isinstance(known, dict) and name in known:
+            known[new] = known.pop(name)
+            _atomic_write(born, json.dumps(known))
+    except (OSError, ValueError):
+        pass
+    out = note(new)
+    out["renamed_from"], out["relinked"] = name, relinked
+    return out, None
+
+
+def archive_note(name):
+    """Take a note out of the brain without deleting it: it moves to <brain>/.archive/.
+    Returns ({id, archived, linked_from}, error)."""
+    notes = _notes()
+    path = notes.get(name)
+    if path is None:
+        return None, "note not found"
+    if not _movable(name, path):
+        return None, "this note is part of the brain's structure and cannot be archived here"
+    linked_from = []
+    for other, p in notes.items():
+        if other == name:
+            continue
+        try:
+            if name in _links_in(p.read_text(encoding="utf-8")[:_MAX_NOTE]):
+                linked_from.append(other)
+        except OSError:
+            continue
+    folder = ROOT / ".archive"
+    folder.mkdir(exist_ok=True)
+    dest = folder / f"{name}.md"
+    if dest.exists():
+        dest = folder / f"{name}-{int(time.time())}.md"
+    os.replace(path, dest)
+    return {"id": name, "archived": str(dest.relative_to(ROOT)), "linked_from": sorted(linked_from)}, None
+
+
+def health():
+    """What needs tidying: links that point at no note, notes nothing links to or from,
+    and notes hidden because another note has the same name."""
+    files = {}
+    for p in _note_files():
+        files.setdefault(p.stem, []).append(p)
+    notes = {name: paths[0] for name, paths in files.items()}
+    lower = {n.lower(): n for n in notes}
+    links_of, linked = {}, set()
+    for name, path in notes.items():
+        try:
+            links_of[name] = _links_in(path.read_text(encoding="utf-8")[:_MAX_NOTE])
+        except OSError:
+            links_of[name] = set()
+    broken = []
+    for name in sorted(links_of):
+        for tgt in sorted(links_of[name]):
+            if tgt == name:
+                continue
+            if tgt in notes:
+                linked.update((name, tgt))
+            else:
+                broken.append({"from": name, "to": tgt, "did_you_mean": lower.get(tgt.lower(), "")})
+    orphans = sorted(n for n in notes if n not in linked and _classify(n, notes[n])[0] != "hub")
+    duplicates = [{"id": name, "shown": str(paths[0].relative_to(ROOT)),
+                   "hidden": [str(p.relative_to(ROOT)) for p in paths[1:]]}
+                  for name, paths in sorted(files.items()) if len(paths) > 1]
+    return {"notes": len(notes), "links": sum(len(v) for v in links_of.values()),
+            "broken": broken[:200], "orphans": orphans[:200], "duplicates": duplicates[:100],
+            "root": str(ROOT), "exists": ROOT.is_dir()}
 
 
 # ── Inbox store (<brain>/inbox/) ─────────────────────────────────────────────
