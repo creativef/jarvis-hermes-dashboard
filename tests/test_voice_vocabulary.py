@@ -32,6 +32,7 @@ class Fixture(unittest.TestCase):
                         mock.patch.object(commands, "HANDOFF_DIR", d / "handoff"),
                         mock.patch.object(phrases, "FILE", lib),
                         mock.patch.object(phrases, "CANDIDATES", d / "candidates.json"),
+                        mock.patch.object(phrases, "USAGE", d / "usage.json"),
                         mock.patch.dict(phrases._data, {"mtime": None, "lines": {}}),
                         mock.patch.object(phrases, "last_spoken", "")]
         for p in self.patches:
@@ -110,6 +111,22 @@ class LibraryByVoiceTests(Fixture):
         phrases.CANDIDATES.write_text(json.dumps({"ack": ["Another one for the pile."]}))
         commands.fast_path("bin them")
         self.assertNotIn("Another one for the pile.", phrases.lines("ack"))
+
+    def test_a_retired_line_cannot_come_back_as_new(self):
+        phrases.retire("Let me consult the oracle.")
+        phrases.CANDIDATES.write_text(json.dumps({"ack_question": ["Let me consult the oracle.", "One for the detectives."]}))
+        self.assertEqual(phrases.candidates(), {"ack_question": ["One for the detectives."]})
+
+    def test_spoken_stock_lines_are_counted_once_each_time(self):
+        line = phrases.lines("long_wait")[0]
+        other = phrases.lines("ack_task")[0]
+        phrases.heard(line); phrases.heard(line)          # the page repeats it on every turn until a new one is said
+        phrases.heard(other); phrases.heard(line)
+        phrases.heard("something the model said")         # not a stock line: not counted
+        self.assertEqual(phrases.usage(), {line: 2, other: 1})
+        r = commands.fast_path("which lines do you say most")
+        self.assertIn(line.rstrip(".!?"), r["reply"])
+        self.assertIn("2 times", r["reply"])
 
     def test_freshen_up_sends_a_helper_to_write_candidates(self):
         from tools import handoff

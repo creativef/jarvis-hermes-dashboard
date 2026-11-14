@@ -536,7 +536,7 @@ class Handler(BaseHTTPRequestHandler):
             # stock lines the UI says itself (job news, approval re-asks); see phrases.json
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
-            return self._json({"lines": phrases.all_lines()})
+            return self._json({"lines": phrases.all_lines(), "usage": phrases.usage()})
         if p == "/api/status":
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
@@ -824,7 +824,7 @@ class Handler(BaseHTTPRequestHandler):
         system = "\n\n".join(x for x in (persona(), extra) if x) or None
         fresh = bool(payload.get("fresh"))
         # the stock line the page last said out loud, so "don't say that again" knows which one
-        phrases.last_spoken = " ".join(str(payload.get("last_stock") or "").split())[:200]
+        phrases.heard(payload.get("last_stock"))
         if not message:
             return self._json({"error": "empty message"}, 400)
         if fresh:

@@ -564,6 +564,8 @@ _RETIRE_QUERIES = {"don't say that again", "dont say that again", "stop saying t
 _FRESHEN_QUERIES = {"freshen up your lines", "freshen your lines", "freshen up your phrases", "learn some new lines",
                     "get some new lines", "come up with some new lines", "new phrases please", "you need new lines"}
 _NEW_LINES_QUERIES = {"what are the new lines", "read me the new lines", "show me the new lines", "new lines"}
+_USAGE_QUERIES = {"which lines do you say most", "what do you say most", "which lines do you overuse",
+                  "your most used lines", "what are your most used lines"}
 _KEEP_LINES = {"keep them", "keep the new lines", "keep those lines", "keep those", "use them", "use the new lines"}
 _BIN_LINES = {"bin them", "bin the new lines", "drop the new lines", "drop them", "scrap them", "scrap the new lines"}
 
@@ -632,6 +634,13 @@ def _phrase_control(q):
         jid = handoff.launch(_FRESHEN_PROMPT.format(library=phrases.FILE, path=phrases.CANDIDATES, groups=", ".join(groups)))
         return out("Good idea, I was boring myself. A helper is writing some now; when it's back, say "
                    "\"what are the new lines\" and keep or bin them.", f"helper {jid}: new phrase lines")
+    if q in _USAGE_QUERIES:
+        top = sorted(phrases.usage().items(), key=lambda kv: -kv[1])[:8]
+        if not top:
+            return out("I haven't been keeping count for long enough to say. Ask me again in a day or two.", "usage: none")
+        return out(f"My most used line is \"{top[0][0].rstrip('.!?')}\", {top[0][1]} times. The top of the list is on screen; "
+                   "say \"don't say that again\" right after one you're tired of and I'll retire it.\n\n---\n\n"
+                   + "\n".join(f"- {n}× {line}" for line, n in top), f"usage: {len(top)}")
     new = phrases.candidates()
     if q in _NEW_LINES_QUERIES:
         if not new:

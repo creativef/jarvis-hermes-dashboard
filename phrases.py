@@ -63,7 +63,48 @@ def say(group, fallback="", **slots):
 
 # ── the library changes by voice: retire a line, take on new ones ──
 CANDIDATES = FILE.with_name("logs") / "phrase-candidates.json"
+USAGE = FILE.with_name("logs") / "phrase-usage.json"
 last_spoken = ""         # the stock line the dashboard last said out loud (the UI reports it)
+
+
+def heard(line):
+    """The page reports the stock line it last SAID (a holding line is picked every turn but
+    only spoken when the answer is slow). Remember it for "don't say that again", and count
+    it once, so retiring an over-used line rests on numbers, not on a hunch."""
+    global last_spoken
+    line = " ".join(str(line or "").split())[:200]
+    if not line or line == last_spoken:
+        last_spoken = line
+        return
+    last_spoken = line
+    if not any(line in pool for group, pool in all_lines().items() if group != "never_say"):
+        return                                    # a filled-in line or job news text: not countable
+    with _lock:
+        counts = usage()
+        counts[line] = counts.get(line, 0) + 1
+        try:
+            USAGE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = USAGE.with_name("." + USAGE.name + ".tmp")
+            tmp.write_text(json.dumps(counts, indent=1, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(USAGE)
+        except OSError:
+            pass
+
+
+def usage():
+    """{line: times spoken}."""
+    try:
+        raw = json.loads(USAGE.read_text(encoding="utf-8"))
+        return {str(k): int(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def retired():
+    try:
+        return {s.strip() for s in json.loads(FILE.read_text(encoding="utf-8")).get("retired", []) if isinstance(s, str)}
+    except (OSError, ValueError, AttributeError):
+        return set()
 
 
 def _rewrite(change):
@@ -92,7 +133,7 @@ def candidates():
         raw = json.loads(CANDIDATES.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    have = all_lines()
+    have, gone = all_lines(), retired()           # a retired line must not come back as "new"
     out = {}
     for group, pool in (raw.items() if isinstance(raw, dict) else []):
         if group not in have or group == "never_say" or not isinstance(pool, list):
@@ -101,7 +142,7 @@ def candidates():
         keep = []
         for s in pool:
             s = " ".join(str(s).split())
-            if (3 <= len(s) <= 110 and not re.search(r"[*_#`<>]", s) and s not in have[group] and s not in keep
+            if (3 <= len(s) <= 110 and not re.search(r"[*_#`<>]", s) and s not in have[group] and s not in gone and s not in keep
                     and set(re.findall(r"\{\w+\}", s)) <= slots):
                 keep.append(s)
         if keep:
