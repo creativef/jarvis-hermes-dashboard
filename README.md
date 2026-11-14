@@ -149,6 +149,8 @@ Normal text and voice requests go directly to Hermes Agent.
 - **Helper jobs by voice, no model call:** "start a job to compare hoodie base prices", "how's the flight job going?", "what did the flight job find?", "stop the flight job", "stop all jobs". Any word from the job's brief picks it.
 - **The Brain by voice, no model call:** "note that the supplier raised prices" (saved to this month's quick notes), "add ask about bulk discount to my supplier notes", "search my brain for hoodie pricing", "what do my notes say about returns", "check my brain" (broken links, unlinked notes, hidden duplicates).
 - **In the Brain:** the search box looks inside every note, not only at names; rest the pointer on a node for a preview; **R** renames the open note and every link to it follows; **Archive** moves a note to `~/Atlas/.archive/` (never deleted); **Health** lists what needs tidying.
+- **How much he says:** Settings → "How much Atlas says" (brief / normal / chatty), or by voice: "keep it brief", "talk me through things", "back to normal". `persona.md` sets the length for each kind of moment (a quick fact, chat, advice, a report).
+- **His stock lines** live in `phrases.json`. "Don't say that again" retires the one he just used; "freshen up your lines" has a helper write new ones, then "what are the new lines", "keep them" or "bin them".
 - **Space while you're talking** sends right away instead of waiting for the 1.2 s pause.
 - **Voice and speed** are in Settings and apply from the next sentence.
 - Each voice turn logs one **TIMING** line (you→text · →first word · →voice) so you can see which step is slow.

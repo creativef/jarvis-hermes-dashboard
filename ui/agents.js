@@ -48,7 +48,8 @@
         <span>${running ? 'Elapsed' : 'Took'} <b class="ag-el" data-run="${running ? 1 : 0}" data-base="${el ?? ''}">${dur(el)}</b></span>
         <span class="ag-id">${esc(a.kind)} · ${esc(a.id)}</span></div>
       ${!running && a.result ? `<div class="ag-result"><span class="ag-k">Result</span><div class="ag-rtext${open ? ' open' : ''}">${esc(a.result)}</div></div>` : ''}
-      ${long || (a.result && a.result.length > 260) ? `<button class="ag-more" data-more="${esc(a.id)}">${open ? 'Show less' : 'Show more'}</button>` : ''}
+      ${!running && a.detail && open ? `<div class="ag-result"><span class="ag-k">Detail</span><div class="ag-detail md-read md-compact">${window.AtlasMarkdown ? AtlasMarkdown.render(a.detail) : esc(a.detail)}</div></div>` : ''}
+      ${long || a.detail || (a.result && a.result.length > 260) ? `<button class="ag-more" data-more="${esc(a.id)}">${open ? 'Show less' : 'Show more'}</button>` : ''}
     </article>`;
   }
 

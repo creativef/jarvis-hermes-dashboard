@@ -24,6 +24,7 @@ class Fake(BaseHTTPRequestHandler):
     run_bodies = []
     events = EVENTS
     refuse_sessions = False
+    silent_for = 0          # seconds of keep-alive lines and nothing else
 
     def log_message(self, *a):
         pass
@@ -39,6 +40,13 @@ class Fake(BaseHTTPRequestHandler):
         if self.path.endswith("/events"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+            import time
+            end = time.monotonic() + type(self).silent_for
+            try:
+                while time.monotonic() < end:
+                    self.wfile.write(b": keep-alive\n\n"); self.wfile.flush(); time.sleep(0.1)
+            except OSError:
+                return
             for ev in type(self).events:
                 self.wfile.write(f"event: {ev['event']}\ndata: {json.dumps(ev)}\n\n".encode())
                 self.wfile.flush()
@@ -77,6 +85,7 @@ class ApiBackendTests(unittest.TestCase):
     def setUp(self):
         Fake.approvals.clear(); Fake.stop_calls.clear(); Fake.run_bodies.clear(); Fake.events = EVENTS
         Fake.refuse_sessions = False
+        Fake.silent_for = 0
 
     def _run(self, **kw):
         return list(api_backend.run("hi", kw.pop("session_id", None), "PROMPT", base=self.base, key="secret",
@@ -177,6 +186,16 @@ class ApiBackendTests(unittest.TestCase):
         # The gateway run is still going at this point: a tab reload or a read timeout used
         # to leave it burning tokens unseen, with approvals nobody could answer and the next
         # turn free to overlap on the same session. It has to be told to stop.
+        self.assertTrue(any(c.endswith("/v1/runs/run_abc123/stop") for c in Fake.stop_calls))
+
+    def test_a_run_that_only_sends_keep_alives_is_stopped(self):
+        # Keep-alive lines kept the socket awake, so a stuck run "thought" for minutes and
+        # nothing ever stopped it. Silence is now counted from the last real event.
+        Fake.silent_for = 6
+        evs = list(api_backend.run("hi", None, "PROMPT", base=self.base, key="secret",
+                                   idle_timeout=1, valid_session=lambda s: bool(s)))
+        self.assertEqual([e["t"] for e in evs], ["status", "error"])
+        self.assertIn("went quiet for 1s", evs[-1]["message"])
         self.assertTrue(any(c.endswith("/v1/runs/run_abc123/stop") for c in Fake.stop_calls))
 
     def test_a_completed_run_is_not_stopped(self):

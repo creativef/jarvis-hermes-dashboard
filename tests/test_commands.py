@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 import commands
+import phrases
 
 
 class StateTests(unittest.TestCase):
@@ -107,7 +108,8 @@ class BackgroundJobTests(unittest.TestCase):
             res = commands.handle("/background tidy the inbox")
         launch.assert_called_once_with("tidy the inbox")
         self.assertIsNone(res["message"])
-        self.assertIn("ab12cd34", res["reply"])
+        self.assertIn(res["reply"], phrases.lines("handoff"))        # spoken: no job id read aloud
+        self.assertIn("ab12cd34", res["note"])
 
     def _job(self, d, jid, **kw):
         job = {"id": jid, "status": "done", "mission": "m", "result": "ok",

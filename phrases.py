@@ -52,6 +52,79 @@ def all_lines():
         return {k: list(v) for k, v in _load().items()}
 
 
+def say(group, fallback="", **slots):
+    """pick() with the {slots} filled in: say("time", time="14:05", day="Saturday")."""
+    line = pick(group, fallback)
+    try:
+        return line.format(**slots)
+    except (KeyError, IndexError, ValueError):       # a hand edit dropped or mistyped a slot
+        return fallback.format(**slots) if fallback else line
+
+
+# ── the library changes by voice: retire a line, take on new ones ──
+CANDIDATES = FILE.with_name("logs") / "phrase-candidates.json"
+last_spoken = ""         # the stock line the dashboard last said out loud (the UI reports it)
+
+
+def _rewrite(change):
+    """Apply `change(raw)` to phrases.json and save it, atomically."""
+    with _lock:
+        raw = json.loads(FILE.read_text(encoding="utf-8"))
+        change(raw)
+        tmp = FILE.with_name("." + FILE.name + ".tmp")
+        tmp.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(FILE)
+        _data["mtime"] = None                     # read it back at once, even within the clock's tick
+
+
+def retire(line):
+    """Stop a stock line being said (it moves to "retired"). True if it was a stock line."""
+    line = " ".join(str(line or "").split())
+    if not line or not any(line in pool for group, pool in all_lines().items() if group != "never_say"):
+        return False
+    _rewrite(lambda raw: raw.setdefault("retired", []).append(line) if line not in raw.get("retired", []) else None)
+    return True
+
+
+def candidates():
+    """{group: [new lines]} a helper proposed, cleaned: known groups, plain short lines, nothing we already say."""
+    try:
+        raw = json.loads(CANDIDATES.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    have = all_lines()
+    out = {}
+    for group, pool in (raw.items() if isinstance(raw, dict) else []):
+        if group not in have or group == "never_say" or not isinstance(pool, list):
+            continue
+        slots = set(re.findall(r"\{\w+\}", " ".join(have[group])))
+        keep = []
+        for s in pool:
+            s = " ".join(str(s).split())
+            if (3 <= len(s) <= 110 and not re.search(r"[*_#`<>]", s) and s not in have[group] and s not in keep
+                    and set(re.findall(r"\{\w+\}", s)) <= slots):
+                keep.append(s)
+        if keep:
+            out[group] = keep[:8]
+    return out
+
+
+def keep_candidates():
+    """Take the proposed lines into the library. Returns how many were added."""
+    new = candidates()
+    if new:
+        _rewrite(lambda raw: [raw.setdefault(g, []).extend(v) for g, v in new.items()])
+    drop_candidates()
+    return sum(len(v) for v in new.values())
+
+
+def drop_candidates():
+    try:
+        CANDIDATES.unlink()
+    except OSError:
+        pass
+
+
 def pick(group, fallback=""):
     """Next line from a group, shuffled-deck style. `fallback` if the group is empty."""
     with _lock:
@@ -74,17 +147,27 @@ _WAKE = re.compile(r"^\s*(?:hey\s+atlas|ok\s+atlas|atlas|jarvis)[,:\s]+", re.I)
 _POLITE = re.compile(r"^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?", re.I)
 _LOOKUP = re.compile(r"\b(?:look\s+(?:up|into|for)|find|search|research|dig\s+into)\b", re.I)
 _TASK = re.compile(r"^(?:make|create|build|write|draft|send|add|set|update|fix|change|open|run|start|"
-                   r"book|schedule|put|move|delete|remove|rename|generate|design|turn|play|save|"
+                   r"book|schedule|put|move|delete|remove|rename|generate|design|turn|play|save|check|pull|list|read|compare|"
                    r"remind|cancel|stop|post|upload|edit|clean|sort|organi[sz]e|prepare|order)\b", re.I)
 _QUESTION = re.compile(r"^(?:what|what's|whats|who|who's|where|when|why|how|which|is|are|was|were|"
                        r"do|does|did|can|could|should|would|will|have|has|any)\b", re.I)
 
 
+# Talk, not a task: a holding line here ("Just a jiffy." to "thank you") sounds like nobody is listening.
+_CHAT = re.compile(r"^(?:good\s+(?:morning|afternoon|evening|night)|morning|evening|hello|hi|hey|thanks?|thank\s+you|cheers|"
+                   r"yes|yeah|yep|no|nope|ok(?:ay)?|sure|fine|brilliant|great|lovely|nice|perfect|wow|oh|well|sorry|"
+                   r"how\s+are\s+you|how\s+you|how(?:'s|\s+is)\s+(?:it|things|life|your)|how\s+do\s+you\s+feel|how\s+was|"
+                   r"are\s+you\s+(?:there|here|awake|ok)|so\s+good|good\s+to|nice\s+to|i(?:'m|\s+am)\s+(?:back|here|tired|done))\b", re.I)
+
+
 def ack(message):
-    """A holding line suited to the request, or "" (say nothing) now and then."""
+    """A holding line suited to the request, or "" (say nothing): now and then, and always
+    for small talk, where the reply itself should be the first thing he hears."""
+    text = _WAKE.sub("", message or "").strip()
+    if _CHAT.match(text) or len(text.split()) <= 1:
+        return ""
     if random.random() < SILENCE:
         return ""
-    text = _WAKE.sub("", message or "").strip()
     asked = _POLITE.sub("", text)
     if _LOOKUP.search(text[:80]):
         group = "ack_lookup"
@@ -136,7 +219,7 @@ def never_say_block():
 def prewarm_lines():
     """Lines worth recording in advance so they play instantly."""
     groups = ("ack", "ack_question", "ack_task", "ack_lookup", "long_wait", "longer_wait",
-              "handoff", "didnt_catch")
+              "handoff", "didnt_catch", "error", "noted", "cleared", "fresh", "nothing_running")
     with _lock:
         data = _load()
         return [line for g in groups for line in data.get(g, [])]

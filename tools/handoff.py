@@ -36,8 +36,11 @@ def rules(name=""):
     return (
         f"You are a helper working for Atlas on a job for {who}. Do the job fully "
         "and carefully. Never send messages or emails, spend money, or commit them to "
-        "anything. When finished, reply with one or two plain spoken sentences "
-        "stating the outcome: no markdown, no lists, no process narration.\n\nJOB:\n"
+        "anything. When finished, reply first with what Atlas should say out loud: two to "
+        "four plain spoken sentences giving the outcome and what matters most about it, with "
+        "no markdown, no lists and no process narration. If there is detail worth keeping "
+        "(figures, a comparison, links, steps), add a line containing only --- and put it "
+        "below that line in markdown; it is shown on screen, not read aloud.\n\nJOB:\n"
     )
 
 
@@ -151,6 +154,11 @@ def worker(jid, mission):
         if old_term is not None:
             signal.signal(signal.SIGTERM, old_term)
     job = json.loads(path.read_text(encoding="utf-8"))
+    # "spoken summary / --- / detail": the summary is announced, the detail is kept for the Agents tab
+    spoken, sep, detail = text.partition("\n---")
+    if sep and status == "done" and spoken.strip():
+        text = spoken.strip()
+        job["detail"] = detail.lstrip("-").strip()[:20000]
     if stopped.is_set():
         job.update(status="stopped", result="Stopped by you.", finished=time.time(), reported=True)
     else:

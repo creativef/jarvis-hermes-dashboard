@@ -175,10 +175,11 @@ def persona():
         base = ""
     name = commands.get_settings().get("user_name", "").strip() or runtime.user_name()
     who = (f"## Who you serve\nYou serve {name}. "
-           "Address them by name, naturally.")
+           "Use the name now and then, not in every reply.")
     extra = commands.context_block()      # profile / goal / personality / queue
+    talk = commands.talk_block()          # "keep it brief" / "talk me through things": changes only with the setting
     never = phrases.never_say_block()   # stable unless phrases.json changes: keeps the prompt cache
-    return "\n\n".join(x for x in (base, who, extra, never) if x)
+    return "\n\n".join(x for x in (base, talk, who, extra, never) if x)
 # One continuing Hermes conversation until the user hits /new. Persisted across
 # restarts so the assistant remembers the prior conversation.
 SESSION = {"id": commands.get_session()}
@@ -201,14 +202,36 @@ def _merged_settings():
     st = commands.get_settings()
     out["user_name"] = st.get("user_name", "")
     out["greeting"] = st.get("greeting", True)
+    out["talk"] = st.get("talk") or "normal"
     out["voice"] = voice.KOKORO_VOICE
     out["voice_speed"] = voice.KOKORO_SPEED
     out["voices"] = list(voice.VOICES)
     return out
 
 
+def _greeting_news(now):
+    """One true thing worth hearing with the hello, from what is already on disk: helper
+    jobs that finished since yesterday evening, things waiting in the inbox. "" if nothing."""
+    since = now.timestamp() - 16 * 3600
+    done = [j for j in commands._handoff_jobs()
+            if not j.get("quiet") and j.get("status") in ("done", "failed") and (j.get("finished") or 0) >= since]
+    failed = sum(1 for j in done if j.get("status") == "failed")
+    waiting = sum(1 for i in brain.inbox_list().get("items", []) if i.get("status") in ("new", "needs-question"))
+    bits = []
+    if done:
+        n = len(done)
+        bits.append(f"{'One helper job' if n == 1 else f'{n} helper jobs'} finished while you were away"
+                    + (f", {'it' if n == 1 else f'{failed} of them'} with a problem" if failed else ""))
+    if waiting:
+        bits.append(f"{'one thing is' if waiting == 1 else f'{waiting} things are'} waiting in the inbox")
+    if not bits:
+        return ""
+    text = " and ".join(bits) + "."
+    return text[:1].upper() + text[1:]
+
+
 def build_greeting(now=None):
-    """Short spoken hello. Templated on purpose: no model call, so it is instant and free."""
+    """Spoken hello. Templated on purpose: no model call, so it is instant and free."""
     import datetime
     now = now or datetime.datetime.now()
     st = commands.get_settings()
@@ -218,7 +241,8 @@ def build_greeting(now=None):
         else ("Good afternoon", "afternoon") if h < 18 else ("Good evening", "evening")
     head = f"{opener}, {name}." if name else f"{opener}."
     line = phrases.pick(f"greet_{part}", "Ready when you are.")
-    return {"text": f"{head} {line}", "boot_id": BOOT_ID,
+    text = " ".join(x for x in (head, _greeting_news(now), line) if x)
+    return {"text": text, "boot_id": BOOT_ID,
             "enabled": bool(st.get("greeting", True))}
 
 
@@ -799,6 +823,8 @@ class Handler(BaseHTTPRequestHandler):
         extra = str(payload.get("system") or "").strip()
         system = "\n\n".join(x for x in (persona(), extra) if x) or None
         fresh = bool(payload.get("fresh"))
+        # the stock line the page last said out loud, so "don't say that again" knows which one
+        phrases.last_spoken = " ".join(str(payload.get("last_stock") or "").split())[:200]
         if not message:
             return self._json({"error": "empty message"}, 400)
         if fresh:

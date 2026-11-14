@@ -237,13 +237,23 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
     final_session = session_id if valid_session(session_id) else run_id
     # Reads can legitimately sit idle while a human decides, so allow for that.
     read_timeout = max(idle_timeout, approval_timeout + 30)
+    # The gateway sends keep-alive lines while a run is silent, so the read timeout above never
+    # fires on a run that has simply stopped producing anything (seen live: "thinking… 240s").
+    # Count the silence ourselves, the same way the CLI path does.
+    last, in_tool, waiting, quiet = time.monotonic(), False, False, False
     try:
         req = urllib.request.Request(base + f"/v1/runs/{run_id}/events", headers=_headers(key))
         with urllib.request.urlopen(req, timeout=read_timeout) as stream:
             for raw in stream:
                 line = raw.decode("utf-8", "replace").rstrip("\n")
                 if not line.startswith("data:"):
+                    limit = (approval_timeout + 30) if waiting else idle_timeout * (10 if in_tool else 1)
+                    if time.monotonic() - last > limit:
+                        quiet = True
+                        yield dict(t="error", message=f"Hermes went quiet for {int(limit)}s and was stopped.")
+                        break
                     continue
+                last = time.monotonic()
                 try:
                     ev = json.loads(line[5:].strip())
                 except json.JSONDecodeError:
@@ -257,9 +267,11 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
                     text_seen = True
                     yield dict(t="delta", text=ev.get("delta") or "")
                 elif name == "tool.started":
+                    in_tool = True
                     yield dict(t="tool", phase="use", name=ev.get("tool") or "tool",
                                input=str(ev.get("preview") or "")[:200])
                 elif name == "tool.completed":
+                    in_tool = False
                     yield dict(t="tool", phase="result", name=ev.get("tool") or "tool",
                                ok=not bool(ev.get("error")))
                 elif name == "approval.request":
@@ -270,12 +282,14 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
                     if auto_approve and resolve_approval(base, key, run_id, ev.get("request_id"), "once")[0]:
                         yield dict(t="note", message=f"Bypass mode: auto-approved {desc}"[:200])
                         continue
+                    waiting = True
                     info = classify_tier(desc, cmd)
                     yield dict(t="approval", run_id=run_id, request_id=ev.get("request_id"),
                                description=desc, command=cmd[:400],
                                risk=risk_from_tier(info["tier"]), risk_tier=info["tier"],
                                reason=info["reason"], timeout=approval_timeout)
                 elif name == "approval.responded":
+                    waiting = False
                     yield dict(t="approval_done", request_id=ev.get("request_id"),
                                choice=ev.get("choice"))
                 elif name == "run.completed":
@@ -301,7 +315,7 @@ def run(message, session_id, instructions=None, *, base, key, idle_timeout, appr
                     why = ev.get("error") or ev.get("reason") or name.replace("run.", "")
                     yield dict(t="error", message=f"Hermes run {why}"[:300])
                     break
-        if not completed:
+        if not completed and not quiet:
             yield dict(t="error", message="Hermes stream ended before the run finished.")
     except Exception as e:  # noqa: BLE001
         yield dict(t="error", message=f"Hermes stream error: {str(e)[:200]}")

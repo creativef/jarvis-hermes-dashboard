@@ -13,12 +13,13 @@
       $('#set-voice').innerHTML = voices.map(v => `<option value="${esc(v)}">${esc(label(v))}</option>`).join('');
       $('#set-voice').value = s.voice || '';
       $('#set-speed').value = s.voice_speed ?? 1;
+      $('#set-talk').value = s.talk || 'normal';
     } catch(_){}
   });
   $('#settingsSave').addEventListener('click', async () => {
     bargeOn = $('#set-barge').checked;
     try { localStorage.setItem('jarvis.barge', bargeOn ? '1' : '0'); } catch(_){}
-    const body = {voice_speed: parseFloat($('#set-speed').value)};
+    const body = {voice_speed: parseFloat($('#set-speed').value), talk: $('#set-talk').value || 'normal'};
     if ($('#set-voice').value) body.voice = $('#set-voice').value;
     try {
       const r = await fetch('/api/settings', {method:'POST', headers: apiHeaders({'content-type':'application/json'}),

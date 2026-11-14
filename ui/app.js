@@ -98,6 +98,7 @@ let inTransmit = 0, pendingTurn = null;   // a turn said while paused waits for 
 window.atlasBusy = () => running || inTransmit > 0 || !!window.__approvalOpen
   || document.body.classList.contains('speaking');
 let speakDone = Promise.resolve(), activeController = null;
+let lastStock = '';   // the stock line (holding line, job news…) last said aloud: "don't say that again" retires it
 let history = [], currentUser = '';
 
 async function transmit(message, options = {}){
@@ -132,7 +133,7 @@ async function transmit(message, options = {}){
     activeController = new AbortController();
     const res = await fetch('/api/run', {
       method:'POST', headers:apiHeaders({'content-type':'application/json'}),
-      body: JSON.stringify({message, fresh, system: options.system || undefined}), signal:activeController.signal
+      body: JSON.stringify({message, fresh, system: options.system || undefined, last_stock: lastStock || undefined}), signal:activeController.signal
     });
     if (res.status === 401){ location.reload(); return; }   // server restarted: new token, fresh page
     if (!res.ok) throw new Error(`backend returned HTTP ${res.status}`);
@@ -223,6 +224,8 @@ function handle(ev){
       if (!answer) $('#response').innerHTML =
         `<span style="color:var(--red)">⚠ ${esc(ev.message || 'Run failed.')}</span>`;
       else renderConversation(true);
+      // Say so as well: in a voice conversation a failure used to be red text and silence.
+      if (speakThisRun){ lastStock = phrase('error', "That one didn't go through. The reason is on screen."); speakDone = say(lastStock); }
       break;
     case 'cancelled':
       log('note', 'CANCEL', ev.message || 'run cancelled');
@@ -889,7 +892,8 @@ setInterval(async () => {
     for (const d of (j.done || [])){
       const failed = d.status === 'failed';
       log(failed ? 'error' : 'complete', 'MISSION', `${d.mission} → ${failed ? 'failed: ' : ''}${(d.result||'').slice(0,200)}`);
-      jobNews.push(`${failed ? phrase('job_failed', 'That job failed.') : phrase('job_done', 'Mission complete.')} ${(d.result||'').slice(0,300)}`);
+      lastStock = failed ? phrase('job_failed', 'That job failed.') : phrase('job_done', 'Mission complete.');
+      jobNews.push(`${lastStock} ${(d.result||'').slice(0,700)}`);   // the helper's spoken summary; its detail is in Agents
     }
   } catch(_){}
   tellJobNews();                                      // also retries news held back earlier
@@ -2097,7 +2101,7 @@ function parseApproval(heard){
   // The acknowledgement is only spoken if the answer is slow: a quick reply shouldn't
   // start with "On it." If it is slower still, the `later` lines ("Still at it.") follow.
   // These are asides: they don't count as the answer having been streamed.
-  const ACK_DELAY_MS = 1200;
+  const ACK_DELAY_MS = 2000;   // was 1.2s: almost every answer takes longer than that, so every answer began with a holding line
   let ackTimers = [];
   const cancelAck = () => { ackTimers.forEach(clearTimeout); ackTimers = []; };
   function aside(msg, ep){
@@ -2105,6 +2109,7 @@ function parseApproval(heard){
     const clean = cleanForSpeech(msg);
     if (!clean || muted || !speakThisRun) return;
     log('voice', 'ACK', clean);
+    lastStock = msg;
     if (window.AtlasOrb) AtlasOrb.setCaption(clean, false, 'ACK');
     speakDone = say(clean);
   }

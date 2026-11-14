@@ -13,7 +13,9 @@ class PhraseFileTests(unittest.TestCase):
     def test_shipped_file_has_every_group(self):
         data = phrases.all_lines()
         for group in ("ack", "ack_question", "ack_task", "ack_lookup", "long_wait", "longer_wait",
-                      "handoff", "job_done", "job_failed", "didnt_catch",
+                      "handoff", "job_done", "job_failed", "didnt_catch", "error", "time", "who", "cleared",
+                      "fresh", "noted", "added", "nothing_running", "retired_line",
+                      "talk_brief", "talk_normal", "talk_chatty",
                       "greet_late", "greet_morning", "greet_afternoon", "greet_evening"):
             self.assertTrue(data.get(group), group)
 
@@ -90,6 +92,14 @@ class AckChoiceTests(unittest.TestCase):
         self.assertEqual(self.group_for("Could you research hoodie trends"), "ack_lookup")
         self.assertEqual(self.group_for("explain photosynthesis"), "ack")
         self.assertEqual(self.group_for("settings are weird today"), "ack")   # "set" isn't "settings"
+
+    def test_small_talk_gets_no_holding_line(self):
+        # "Good morning, how are you?" used to be answered with "Ooh, let me see."
+        with mock.patch.object(phrases, "SILENCE", 0):
+            for text in ("Good morning Atlas. How are you doing today?", "thank you, that's great", "Oh my god.",
+                         "yes", "Atlas, how you feelin'?", "brilliant", "Atlas so good to hear you"):
+                self.assertEqual(phrases.ack(text), "", text)
+            self.assertTrue(phrases.ack("can you check the shop for new orders"))
 
     def test_sometimes_says_nothing(self):
         with mock.patch.object(phrases, "SILENCE", 1):

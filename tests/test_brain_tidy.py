@@ -13,6 +13,7 @@ import urllib.request
 
 import brain
 import commands
+import phrases
 import server
 
 
@@ -73,7 +74,7 @@ class SearchTests(Fixture):
 class CaptureTests(Fixture):
     def test_note_that_lands_in_this_months_quick_notes(self):
         r = commands.fast_path("Atlas, make a note that Printful raised prices again.")
-        self.assertEqual(r["reply"], "Noted.")
+        self.assertIn(r["reply"], phrases.lines("noted"))
         name = f"quick-notes-{datetime.date.today():%Y-%m}"
         self.assertEqual(r["ui"], {"view": "brain", "action": "wrote", "id": name})
         text = (self.r / "notes" / f"{name}.md").read_text()

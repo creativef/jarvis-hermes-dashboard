@@ -19,6 +19,7 @@ import uuid
 
 import brain
 import delegations
+import phrases
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
@@ -118,6 +119,22 @@ def get_settings():
     return load().get("settings", {})
 
 
+# How much Atlas says, set in Settings or by voice ("keep it brief", "talk me through things").
+# The words go into the persona, so they change only when the setting does (prompt cache).
+TALK = {
+    "brief": "## How much to say, for now\nHe has asked for short answers for the time being: one or two "
+             "sentences for everything, whatever the ranges above say, unless he asks for more.",
+    "normal": "",
+    "chatty": "## How much to say, for now\nHe has asked you to talk things through: lean to the fuller end "
+              "of every range above, think out loud, bring in what you remember from earlier, and always hand "
+              "the conversation back to him.",
+}
+
+
+def talk_block():
+    return TALK.get(str(get_settings().get("talk") or "normal"), "")
+
+
 def set_settings(updates):
     """Validate + persist settings. Returns (cleaned_settings, error)."""
     cleaned = {}
@@ -165,6 +182,11 @@ def set_settings(updates):
         if not re.fullmatch(r"[a-z]{2}_[a-z]+", v):
             return None, f"invalid voice: {v}"
         cleaned["voice"] = v
+    if "talk" in updates:
+        talk = str(updates["talk"]).strip().lower()
+        if talk not in TALK:
+            return None, f"invalid talk setting: {talk}"
+        cleaned["talk"] = talk
     if "voice_speed" in updates:
         import voice
         try:
@@ -188,7 +210,7 @@ def context_block():
     if d["goal"]:
         out.append(f"## Standing objective\n{d['goal']}\nKeep it in mind; mention it only when relevant.")
     if d["personality"]:
-        out.append(f"## Tone overlay\n{d['personality']}\nThis adjusts delivery; stay concise.")
+        out.append(f"## Tone overlay\n{d['personality']}\nThis adjusts how you say things, not what is true.")
     open_tasks = [t for t in d["tasks"] if not t.get("done")]
     if open_tasks:
         out.append("## Mission queue\n" + "\n".join(f"- {t['text']}" for t in open_tasks[:20]))
@@ -440,6 +462,7 @@ def agents_snapshot(limit=40):
             status=status, step=step, step_at=step_at, started=started, finished=finished,
             elapsed=max(0, (finished or now) - started) if started else None,
             result=j.get("result") or "",
+            detail=j.get("detail") or "",
             quiet=bool(j.get("quiet")),
             diagnostic="diagnostic" in mission.lower(),
             stoppable=True, model=""))
@@ -528,6 +551,37 @@ _SLOWER_QUERIES = {"slower", "speak slower", "talk slower", "slow down", "a bit 
 _FASTER_QUERIES = {"faster", "speak faster", "talk faster", "speed up", "a bit faster"}
 _FRESH_QUERIES = {"new topic", "start over", "fresh start", "change of subject", "let's start over",
                   "lets start over", "new conversation"}
+_TALK_QUERIES = {
+    "brief": {"keep it brief", "keep it short", "be brief", "short answers", "short answers please", "talk less",
+              "less talking", "be more concise", "keep your answers short", "just the short version from now on"},
+    "chatty": {"talk me through things", "be more chatty", "be chattier", "be more talkative", "say more",
+               "talk more", "longer answers", "give me longer answers", "give me more detail", "don't be so brief",
+               "dont be so brief", "stop being so brief", "talk to me properly", "be less dry"},
+    "normal": {"talk normally", "back to normal", "normal answers", "normal length", "answer normally"},
+}
+_RETIRE_QUERIES = {"don't say that again", "dont say that again", "stop saying that", "never say that again",
+                   "retire that line", "retire that", "drop that line", "i don't like that line", "i dont like that line"}
+_FRESHEN_QUERIES = {"freshen up your lines", "freshen your lines", "freshen up your phrases", "learn some new lines",
+                    "get some new lines", "come up with some new lines", "new phrases please", "you need new lines"}
+_NEW_LINES_QUERIES = {"what are the new lines", "read me the new lines", "show me the new lines", "new lines"}
+_KEEP_LINES = {"keep them", "keep the new lines", "keep those lines", "keep those", "use them", "use the new lines"}
+_BIN_LINES = {"bin them", "bin the new lines", "drop the new lines", "drop them", "scrap them", "scrap the new lines"}
+
+_FRESHEN_PROMPT = """Write new stock spoken lines for Atlas, a voice assistant with an English character: a sharp, unflappable chief of staff with dry humour and understatement. Natural British English, never a caricature. Each line is short (under 12 words), plain speech with no markdown, and must sound different from the ones already in use.
+
+Read the lines in use here (a JSON file of groups; ignore "_readme", "never_say" and "retired"):
+{library}
+
+For each of these groups write 4 new lines in the same job as the group's existing lines: {groups}.
+Keep any word in curly brackets, such as {{time}} or {{note}}, exactly as the existing lines of that group use it.
+
+Then write a JSON file at exactly this path (create the folder, overwrite the file):
+{path}
+
+with exactly this shape, one list per group:
+{{"ack": ["...", "..."], "greet_morning": ["..."]}}
+
+Do not edit the library file itself. When finished, say in two sentences how many lines you wrote and give two examples."""
 
 
 def _voice_control(q):
@@ -551,8 +605,48 @@ def _voice_control(q):
         return dict(message=None, reply=reply, note=f"voice speed {voice.KOKORO_SPEED}",
                     intent="speed", fast_path=True)
     if q in _FRESH_QUERIES:
-        return dict(fresh=True, message=None, reply="Fresh start.", note="Hermes thread reset",
+        return dict(fresh=True, message=None, reply=phrases.pick("fresh", "Fresh start."), note="Hermes thread reset",
                     intent="fresh", fast_path=True)
+    for mode, said in _TALK_QUERIES.items():
+        if q in said:
+            set_settings({"talk": mode})
+            return dict(message=None, reply=phrases.pick(f"talk_{mode}", "Understood."), note=f"talk: {mode}",
+                        intent="talk", fast_path=True)
+    return _phrase_control(q)
+
+
+def _phrase_control(q):
+    """The phrase library by voice: retire the stock line just used, ask for new ones, keep or bin them."""
+    def out(reply, note):
+        return dict(message=None, reply=reply, note=note, intent="phrases", fast_path=True)
+
+    if q in _RETIRE_QUERIES:
+        line = phrases.last_spoken
+        if phrases.retire(line):
+            return out(phrases.say("retired_line", 'You won\'t hear "{line}" again.', line=line.rstrip(".!?")), f"retired: {line[:40]}")
+        return out("I haven't used one of my stock lines just now, so there's nothing to retire. "
+                   "If it was something I said in an answer, tell me what to avoid and I'll remember it.", "retire: nothing")
+    if q in _FRESHEN_QUERIES:
+        from tools import handoff
+        groups = [g for g in phrases.all_lines() if g != "never_say"]
+        jid = handoff.launch(_FRESHEN_PROMPT.format(library=phrases.FILE, path=phrases.CANDIDATES, groups=", ".join(groups)))
+        return out("Good idea, I was boring myself. A helper is writing some now; when it's back, say "
+                   "\"what are the new lines\" and keep or bin them.", f"helper {jid}: new phrase lines")
+    new = phrases.candidates()
+    if q in _NEW_LINES_QUERIES:
+        if not new:
+            return out("There are no new lines waiting. Say \"freshen up your lines\" and I'll have some written.", "new lines: none")
+        n = sum(len(v) for v in new.values())
+        sample = [v[0] for v in list(new.values())[:3]]
+        listing = "\n".join(f"**{g}**\n" + "\n".join(f"- {s}" for s in v) for g, v in new.items())
+        return out(f"{n} new lines across {len(new)} groups. For a taste: " + " ".join(sample)
+                   + " The full list is on screen. Say keep them or bin them.\n\n---\n\n" + listing, f"new lines: {n}")
+    if new and q in _KEEP_LINES:
+        n = phrases.keep_candidates()
+        return out(f"Done, {n} new lines are in. You'll start hearing them from now on.", f"kept {n} lines")
+    if new and q in _BIN_LINES:
+        phrases.drop_candidates()
+        return out("Binned, all of them. No hard feelings.", "new lines binned")
     return None
 
 
@@ -582,13 +676,11 @@ def _fast_jobs_summary():
         names = [_agent_name(j.get("mission", "")) for j in running[:4]]
         parts.append(f"{len(running)} running job{'s' if len(running) != 1 else ''}: {', '.join(names)}.")
     else:
-        parts.append("No background jobs are currently running.")
+        parts.append(phrases.pick("nothing_running", "Nothing is running in the background."))
     if done_count:
         parts.append(f"{done_count} completed job{'s' if done_count != 1 else ''} on record.")
     if open_tasks:
         parts.append(f"Mission queue ({len(open_tasks)}): " + "; ".join(open_tasks[:5]) + ".")
-    else:
-        parts.append("Mission queue is empty.")
     return " ".join(parts)
 
 
@@ -716,11 +808,11 @@ def _capture_intent(message):
             return None                              # not a note we know: Hermes decides what was meant
         text = text.strip().rstrip(".")
         _, err = brain.append_line(name, f"- {text[:1].upper() + text[1:]} ({datetime.date.today().isoformat()})")
-        return None if err else out(f"Added to {name.replace('-', ' ')}.", name)
+        return None if err else out(phrases.say("added", "Added to {note}.", note=name.replace("-", " ")), name)
     m = _NOTE_SELF.match(raw) or _NOTE_THAT.match(raw)
     if m and len(m.group(1).split()) >= 2:
         saved, err = brain.capture(m.group(1))
-        return None if err else out("Noted.", saved["id"])
+        return None if err else out(phrases.pick("noted", "Noted."), saved["id"])
     return None
 
 
@@ -776,7 +868,7 @@ def _job_reply(j):
         return f"{name} failed: {str(j.get('result') or 'no reason given')[:240]}"
     if status == "stopped":
         return f"{name} was stopped."
-    return f"{name}: {str(j.get('result') or 'Finished with nothing to report.')[:400]}"
+    return f"{name}: {str(j.get('result') or 'Finished with nothing to report.')[:900]}"
 
 
 def _jobs_intent(q, message):
@@ -819,6 +911,10 @@ def _jobs_intent(q, message):
     return None
 
 
+def _ordinal(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
 def fast_path(message):
     """Local intent router for simple queries (<50ms, zero model/subprocess calls).
 
@@ -831,7 +927,8 @@ def fast_path(message):
 
     if q in _TIME_QUERIES:
         now = datetime.datetime.now()
-        reply = f"It is {now.strftime('%H:%M')} on {now.strftime('%A, %d %B %Y')}."
+        reply = phrases.say("time", "It's {time} on {day}.", time=now.strftime("%H:%M"),
+                            day=now.strftime("%A the ") + _ordinal(now.day) + now.strftime(" of %B"))
         return dict(message=None, reply=reply, note="fast-path: time", intent="time", fast_path=True)
 
     if q in _STATUS_QUERIES:
@@ -849,7 +946,7 @@ def fast_path(message):
                     intent="teams", fast_path=True)
 
     if q in _CLEAR_QUERIES:
-        return dict(message=None, reply="Display cleared. Hermes session is unchanged.",
+        return dict(message=None, reply=phrases.pick("cleared", "Screen's clear. The conversation is untouched."),
                     note="display clear", intent="clear", fast_path=True)
 
     if q in _HELP_QUERIES:
@@ -859,8 +956,7 @@ def fast_path(message):
     if q in _WHO_QUERIES:
         name = str(get_settings().get("user_name") or "").strip()
         whose = f"{name}'s" if name else "your"
-        reply = (f"I am Atlas, {whose} chief-of-staff dashboard powered by Hermes Agent. "
-                 "I track operations, coordinate departments, and prepare actions for your approval.")
+        reply = phrases.say("who", "I'm Atlas, {whose} chief of staff.", whose=whose)
         return dict(message=None, reply=reply, note="fast-path: identity",
                     intent="who_are_you", fast_path=True)
 
@@ -951,7 +1047,7 @@ def handle(message):
         return dict(message=None, reply=_commands_reply(), note="commands shown")
 
     if cmd == "clear":
-        return dict(message=None, reply="Display cleared. Hermes session is unchanged.", note="display clear")
+        return dict(message=None, reply=phrases.pick("cleared", "Screen's clear. The conversation is untouched."), note="display clear")
 
     if cmd == "new":
         return dict(fresh=True, message=arg or "Start a fresh Hermes dashboard session. Greet me in one concise ATLAS-style line.", note="Hermes thread reset")
@@ -1012,7 +1108,7 @@ def handle(message):
         if not arg:
             return dict(message=None, reply=d["personality"] or "Running default ATLAS persona.", note="persona read")
         update_state(lambda state: state.__setitem__("personality", arg))
-        return dict(message=f'Tone overlay changed to: "{arg}". Reply in one short line using that tone.', note=f"persona: {arg[:50]}")
+        return dict(message=f'Tone overlay changed to: "{arg}". Reply briefly in that tone so he can hear it.', note=f"persona: {arg[:50]}")
 
     if cmd in ("kanban", "mission", "missions"):
         done = re.match(r"(?:done|finished|complete|remove)\s+(.+)$", arg, re.I | re.S)
@@ -1035,6 +1131,7 @@ def handle(message):
             return dict(message=None, reply="Give me a mission.", note="background empty")
         from tools import handoff
         jid = handoff.launch(arg)
-        return dict(message=None, reply=f"Background Hermes mission {jid} launched. I'll report when it lands.", note=f"mission {jid} started: {arg[:50]}")
+        return dict(message=None, reply=phrases.pick("handoff", "That's with a helper now. I'll tell you when it lands."),
+                    note=f"mission {jid} started: {arg[:50]}")
 
     return None
